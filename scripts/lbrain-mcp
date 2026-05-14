@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# MCP launcher for LBrain. Uses the installed `lbrain` entry point so click's main()
+# is called via the setuptools-generated script (not `python -m lbrain.cli`, which
+# imports the module without invoking main).
+#
+# The lbrain.config module loads ~/.lbrain/env at import time, so credentials are
+# inherited without shell sourcing.
+
+exec /usr/local/bin/lbrain mcp
