@@ -288,11 +288,25 @@ def onboard(target_dir: str):
 
 
 @main.command()
-def mcp():
-    """Start the MCP server (Claude Code will spawn this)."""
+@click.option(
+    "--transport",
+    default="stdio",
+    type=click.Choice(["stdio", "sse", "streamable-http"]),
+    help="MCP transport. stdio for Claude Code, streamable-http for remote/container agents.",
+)
+@click.option("--host", default="127.0.0.1", help="Bind host for HTTP transports.")
+@click.option("--port", default=7370, type=int, help="Bind port for HTTP transports.")
+def mcp(transport: str, host: str, port: int):
+    """Start the MCP server.
+
+    \b
+    stdio              — for Claude Code subprocess (default, spawned via mcp-launcher).
+    streamable-http    — for remote autonomous agents (containerized deployments).
+    sse                — legacy SSE transport.
+    """
     from .mcp_server import serve
 
-    serve()
+    serve(transport=transport, host=host, port=port)
 
 
 if __name__ == "__main__":

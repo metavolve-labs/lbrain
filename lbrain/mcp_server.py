@@ -139,8 +139,16 @@ def lair_stats() -> str:
         store.close()
 
 
-def serve() -> None:
-    mcp.run()
+def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 7370) -> None:
+    """Run the MCP server. Defaults to stdio for Claude Code subprocess use.
+
+    For containerized / remote autonomous agents, use:
+        serve(transport="streamable-http", host="0.0.0.0", port=7370)
+    """
+    if transport != "stdio":
+        mcp.settings.host = host
+        mcp.settings.port = port
+    mcp.run(transport=transport)
 
 
 if __name__ == "__main__":

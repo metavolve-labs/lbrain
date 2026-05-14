@@ -1,0 +1,15 @@
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+*.db
+*.db-shm
+*.db-wal
+tests/
+.lbrain/

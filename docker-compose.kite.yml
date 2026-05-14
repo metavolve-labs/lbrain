@@ -1,0 +1,67 @@
+# docker-compose.kite.yml
+#
+# Example wiring for an autonomous Claude agent (Kite-style: Apprentice / Maestro)
+# co-deployed with a containerized LBrain sidecar.
+#
+# Pattern:
+#   - LBrain runs as a sidecar service exposing MCP over streamable-http on :7370.
+#   - The brain.db is mounted from a host volume (./brain-data) so it persists across
+#     restarts and can be hot-swapped per agent specialization.
+#   - The agent container connects to LBrain via the internal Docker network as
+#     http://lbrain:7370/mcp and registers the 5 lair_* tools at startup.
+#
+# Two-brain pattern (recommended for production):
+#   1. SHARED brain (read-only mount of Tad's full corpus) — Cognitive Nutrition + global
+#      anti-pattern detection on substrate/schema/lair/deployment topics.
+#   2. TASK-SPECIFIC brain (per-agent, ephemeral or persisted) — curated subset for the
+#      agent's mission (e.g. Kite Buildathon brain pre-loaded with x402 / AP2 / AO docs).
+#
+# To use:
+#   1. cp .env.example .env  &&  set OPENAI_API_KEY
+#   2. Initialize the brain volume:
+#        docker compose -f docker-compose.kite.yml run --rm lbrain lbrain init \
+#          --api-key=$OPENAI_API_KEY --source=/sources/lairs --source=/sources/memory
+#        docker compose -f docker-compose.kite.yml run --rm lbrain lbrain import
+#        docker compose -f docker-compose.kite.yml run --rm lbrain lbrain embed --stale
+#   3. docker compose -f docker-compose.kite.yml up
+
+services:
+  lbrain:
+    build: .
+    image: codex-curator/lbrain:latest
+    container_name: lbrain
+    restart: unless-stopped
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+      LBRAIN_HOME: /data
+    volumes:
+      - ./brain-data:/data
+      # Mount source corpus read-only for initial import + re-imports.
+      # (Adjust paths to wherever the agent's curated corpus lives.)
+      - ./sources:/sources:ro
+    ports:
+      - "127.0.0.1:7370:7370"   # bind localhost-only by default; remove host bind for compose-internal-only
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:7370/mcp', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # ---- Example autonomous agent ----
+  # Replace this stub with your actual Apprentice / Maestro / Claude SDK agent.
+  # The agent's MCP client config should point at http://lbrain:7370/mcp.
+  agent:
+    image: ${AGENT_IMAGE:-busybox}
+    container_name: kite-apprentice
+    depends_on:
+      lbrain:
+        condition: service_started
+    environment:
+      LBRAIN_MCP_URL: http://lbrain:7370/mcp
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    # Override with the agent's actual entrypoint:
+    command: ["sh", "-c", "echo 'Replace agent service with your actual Apprentice/Maestro image.'; sleep infinity"]
+
+# Named volume pattern (alternative to ./brain-data bind mount):
+# volumes:
+#   brain-data:

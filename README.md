@@ -85,6 +85,38 @@ claude mcp add -s user lbrain -- /path/to/repos/lbrain/scripts/lbrain-mcp
 
 Tools surfaced: `lair_query`, `lair_search`, `lair_protocol_check`, `lair_check_action`, `lair_stats`.
 
+## Containerized deployment — for autonomous agents
+
+For agents running in containers / Kubernetes / outside Claude Code, run LBrain as an HTTP MCP service:
+
+```bash
+# Local (no container):
+lbrain mcp --transport streamable-http --host 0.0.0.0 --port 7370
+
+# Docker:
+docker build -t lbrain .
+docker run --rm -p 7370:7370 -v $(pwd)/brain-data:/data \
+  -e OPENAI_API_KEY=$OPENAI_API_KEY lbrain
+
+# docker-compose (Kite Apprentice / Maestro pattern):
+docker compose -f docker-compose.kite.yml up
+```
+
+The agent's MCP client connects to `http://lbrain:7370/mcp` and gets the same 5 tools. Use this for:
+
+- **Cognitive Nutrition for autonomous loops** — agent calls `lair_query` at decision points, automatic substrate priming on schema/lair/deployment topics.
+- **Anti-pattern guarding** — agent calls `lair_check_action` before destructive actions; the saved `feedback_*.md` rules become an automatic safety net.
+- **Lair-Protocol output capture** — agent calls `lair_protocol_check` on session outputs to decide what's save-worthy, eliminating the "remind me to remember this" round trip with the user.
+
+### Two-brain pattern (recommended for production agents)
+
+1. **Shared brain** (read-only mount of your full corpus) — global Cognitive Nutrition + anti-pattern coverage.
+2. **Task-specific brain** (per-agent, curated subset) — focused, cheaper, faster. E.g. a Buildathon agent gets only the relevant submission/spec/integration lairs.
+
+Both can run in the same container with different brain.db files via `LBRAIN_HOME` switching, or as separate containers the agent queries in parallel.
+
+See `docker-compose.kite.yml` for a full Apprentice + LBrain wiring example.
+
 ## Architecture
 
 ```
