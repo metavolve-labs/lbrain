@@ -105,18 +105,33 @@ def import_cmd(paths: tuple[str, ...], prune: bool):
                     store.delete_doc_chunks(doc.rel_path)
                 store.upsert_doc(doc)
                 store.replace_wikilinks(doc)
-                chunks = chunk_doc(doc, max_tokens=cfg.chunk_tokens, overlap=cfg.chunk_overlap)
+                chunks = chunk_doc(
+                    doc,
+                    max_tokens=cfg.chunk_tokens,
+                    overlap=cfg.chunk_overlap,
+                    contextualize=cfg.contextual_prefix,
+                )
                 store.insert_chunks(chunks)
                 total_chunks += len(chunks)
+
+    pruned: list[str] = []
+    if prune:
+        with store.transaction():
+            pruned = store.prune_missing()
 
     stats = store.stats()
     store.close()
     dt = time.time() - t0
     click.secho(
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
-        f"unchanged: {unchanged_docs}, chunks: {total_chunks}",
+        f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}",
         fg="green",
     )
+    if pruned:
+        for rel in pruned[:10]:
+            click.echo(f"    pruned (file gone): {rel}")
+        if len(pruned) > 10:
+            click.echo(f"    … +{len(pruned) - 10} more")
     click.echo(
         f"  brain stats — docs: {stats['docs']}, chunks: {stats['chunks']}, "
         f"embedded: {stats['embedded']}, wikilinks: {stats['wikilinks']}"
@@ -139,8 +154,10 @@ def embed(stale: bool, batch: int):
     if stale:
         pending = store.stale_chunks()
     else:
-        rows = store.db.execute("SELECT chunk_id, text FROM chunks ORDER BY chunk_id").fetchall()
-        pending = [(r["chunk_id"], r["text"]) for r in rows]
+        rows = store.db.execute(
+            f"SELECT chunk_id, {store.EMBED_TEXT_SQL} AS etext FROM chunks ORDER BY chunk_id"
+        ).fetchall()
+        pending = [(r["chunk_id"], r["etext"]) for r in rows]
 
     if not pending:
         click.echo("  Nothing to embed.")

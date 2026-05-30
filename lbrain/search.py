@@ -68,62 +68,54 @@ def search(
         except Exception:
             kw_rows = []
 
-    # 3. Merge & rerank
+    # 3. Reciprocal Rank Fusion. Combine the two ranked lists by ordinal RANK,
+    #    not by raw (incompatible) score scales — robust to the min-max
+    #    degeneracy where the single closest vector is always forced to 1.0.
+    #    Each list contributes 1/(rrf_k + rank); rrf_k (~60) flattens the curve
+    #    so consistent top-rankers dominate without any single list overriding
+    #    the consensus. vector_score / keyword_score now hold each list's RRF
+    #    contribution (for display/debug), not a normalized similarity.
+    rrf_k = cfg.rrf_k
     hits: dict[int, Hit] = {}
 
-    # vec_rows: lower dist = better. Map to similarity in [0,1] where 1 is best.
-    if vec_rows:
-        v_dists = [r["dist"] for r in vec_rows]
-        v_min, v_max = min(v_dists), max(v_dists)
-        v_span = max(v_max - v_min, 1e-6)
-        for r in vec_rows:
-            sim = 1.0 - (r["dist"] - v_min) / v_span  # normalized
-            cid = r["chunk_id"]
-            hits[cid] = Hit(
+    def _hit(r) -> Hit:
+        cid = r["chunk_id"]
+        h = hits.get(cid)
+        if h is None:
+            h = Hit(
                 rel_path=r["rel_path"],
                 chunk_idx=r["chunk_idx"],
                 text=r["text"],
                 title=r["title"],
                 score=0.0,
-                vector_score=sim,
                 doc_type=r["doc_type"],
                 is_priority=bool(r["is_priority"]),
             )
+            hits[cid] = h
+        return h
 
-    # kw_rows: more negative rank = better (FTS5 convention).
-    if kw_rows:
-        k_ranks = [r["rank"] for r in kw_rows]
-        k_min, k_max = min(k_ranks), max(k_ranks)
-        k_span = max(k_max - k_min, 1e-6)
-        for r in kw_rows:
-            norm = 1.0 - (r["rank"] - k_min) / k_span  # normalized
-            cid = r["chunk_id"]
-            if cid in hits:
-                hits[cid].keyword_score = norm
-            else:
-                hits[cid] = Hit(
-                    rel_path=r["rel_path"],
-                    chunk_idx=r["chunk_idx"],
-                    text=r["text"],
-                    title=r["title"],
-                    score=0.0,
-                    keyword_score=norm,
-                    doc_type=r["doc_type"],
-                    is_priority=bool(r["is_priority"]),
-                )
+    # vec_rows are ORDER BY dist (best first); kw_rows ORDER BY rank (best first).
+    for rank, r in enumerate(vec_rows, start=1):
+        h = _hit(r)
+        c = 1.0 / (rrf_k + rank)
+        h.vector_score += c
+        h.score += c
+    for rank, r in enumerate(kw_rows, start=1):
+        h = _hit(r)
+        c = 1.0 / (rrf_k + rank)
+        h.keyword_score += c
+        h.score += c
 
-    # 4. Apply weights + boosts
+    # 4. Filters + domain boosts (multiplicative on the fused score)
     out: list[Hit] = []
     for h in hits.values():
-        base = cfg.bm25_weight * h.keyword_score + cfg.vector_weight * h.vector_score
-        if h.is_priority:
-            base *= cfg.priority_boost
-            h.boosts["priority"] = cfg.priority_boost
         if doc_type and h.doc_type != doc_type:
             continue
         if priority_only and not h.is_priority:
             continue
-        h.score = base
+        if h.is_priority:
+            h.score *= cfg.priority_boost
+            h.boosts["priority"] = cfg.priority_boost
         out.append(h)
 
     # 5. Wikilink graph boost — if a hit is wikilinked-to by another hit, lift it
@@ -178,10 +170,21 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
 
 
 def _fts_query(q: str) -> str:
-    """Sanitize a free-text query for FTS5 MATCH. Quote each token; drop ones with no alphanumerics."""
+    """Sanitize free-text into an FTS5 MATCH expression.
+
+    Tokens become OR'd quoted terms. For 2–6 token queries we ALSO prepend the
+    full token sequence as a quoted phrase, so contiguous/exact matches rank
+    above scattered single-token hits. This is what recovers hyphen/dot
+    compounds: unicode61 indexes ``C2PA-Manifest-Hash`` as the three tokens
+    ``c2pa manifest hash``, so the phrase ``"c2pa manifest hash"`` matches it
+    exactly while the individual OR'd terms preserve recall.
+    """
     import re
 
-    toks = re.findall(r"[A-Za-z0-9_]+", q)
+    toks = [t for t in re.findall(r"[A-Za-z0-9_]+", q) if len(t) > 1]
     if not toks:
         return ""
-    return " OR ".join(f'"{t}"' for t in toks if len(t) > 1)
+    terms = [f'"{t}"' for t in toks]
+    if 2 <= len(toks) <= 6:
+        terms.insert(0, '"' + " ".join(toks) + '"')
+    return " OR ".join(terms)

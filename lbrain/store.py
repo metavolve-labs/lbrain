@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     token_count INTEGER NOT NULL,
     chunk_hash TEXT NOT NULL,
     embedded   INTEGER NOT NULL DEFAULT 0,
+    context    TEXT NOT NULL DEFAULT '',
     UNIQUE(rel_path, chunk_idx),
     FOREIGN KEY (rel_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
@@ -57,6 +58,10 @@ class Store:
         self.db.enable_load_extension(False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        # Idempotent migration for DBs created before the `context` column existed.
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(chunks)")}
+        if "context" not in cols:
+            self.db.execute("ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT ''")
         self.db.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(embedding float[{embedding_dim}])"
         )
@@ -116,6 +121,21 @@ class Store:
         self.db.execute("DELETE FROM fts_chunks WHERE rel_path = ?", (rel_path,))
         self.db.execute("DELETE FROM chunks WHERE rel_path = ?", (rel_path,))
 
+    def prune_missing(self) -> list[str]:
+        """Drop docs whose source file no longer exists on disk — and their
+        chunks, vectors, FTS rows, and wikilinks. (FK cascade does not fire
+        without PRAGMA foreign_keys, and vec_chunks has no FK at all, so we
+        delete every dependent row explicitly.) Returns the pruned rel_paths."""
+        import os
+
+        rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
+        gone = [r["rel_path"] for r in rows if not os.path.exists(r["abs_path"])]
+        for rel in gone:
+            self.delete_doc_chunks(rel)
+            self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+        return gone
+
     def replace_wikilinks(self, doc: Doc) -> None:
         self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (doc.rel_path,))
         for tgt in doc.wikilinks:
@@ -128,23 +148,32 @@ class Store:
         ids: list[int] = []
         for c in chunks:
             cur = self.db.execute(
-                "INSERT INTO chunks (rel_path, chunk_idx, text, token_count, chunk_hash) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (c.doc_path, c.chunk_idx, c.text, c.token_count, c.chunk_hash),
+                "INSERT INTO chunks (rel_path, chunk_idx, text, token_count, chunk_hash, context) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (c.doc_path, c.chunk_idx, c.text, c.token_count, c.chunk_hash, c.context),
             )
             chunk_id = cur.lastrowid
             ids.append(chunk_id)
+            # FTS indexes context+text so a chunk is findable under its doc's
+            # subject even when the chunk body never restates it. Display still
+            # reads the raw `text` column, so previews stay clean.
+            fts_text = f"{c.context}\n{c.text}" if c.context else c.text
             self.db.execute(
                 "INSERT INTO fts_chunks (rowid, text, rel_path, chunk_idx) VALUES (?, ?, ?, ?)",
-                (chunk_id, c.text, c.doc_path, c.chunk_idx),
+                (chunk_id, fts_text, c.doc_path, c.chunk_idx),
             )
         return ids
 
+    # Embed text = context + text when contextualized, else text. Used so the
+    # vector embedding carries the doc macro-context without touching display.
+    EMBED_TEXT_SQL = "CASE WHEN context != '' THEN context || char(10) || text ELSE text END"
+
     def stale_chunks(self) -> list[tuple[int, str]]:
         rows = self.db.execute(
-            "SELECT chunk_id, text FROM chunks WHERE embedded = 0 ORDER BY chunk_id"
+            f"SELECT chunk_id, {self.EMBED_TEXT_SQL} AS etext "
+            "FROM chunks WHERE embedded = 0 ORDER BY chunk_id"
         ).fetchall()
-        return [(r["chunk_id"], r["text"]) for r in rows]
+        return [(r["chunk_id"], r["etext"]) for r in rows]
 
     def write_embeddings(self, chunk_ids: list[int], blobs: list[bytes]) -> None:
         # sqlite-vec virtual tables don't support UPSERT; use DELETE+INSERT
