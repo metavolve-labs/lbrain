@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS docs (
     mtime    REAL NOT NULL,
     is_priority INTEGER NOT NULL DEFAULT 0,
     doc_type TEXT NOT NULL DEFAULT '',
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    last_retrieved REAL NOT NULL DEFAULT 0,
+    retrieval_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -42,8 +44,17 @@ CREATE TABLE IF NOT EXISTS wikilinks (
     FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS associations (
+    a_path   TEXT NOT NULL,
+    b_path   TEXT NOT NULL,
+    strength REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (a_path, b_path)
+);
+
 CREATE INDEX IF NOT EXISTS idx_wikilinks_tgt ON wikilinks(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
+CREATE INDEX IF NOT EXISTS idx_assoc_a ON associations(a_path);
+CREATE INDEX IF NOT EXISTS idx_assoc_b ON associations(b_path);
 """
 
 
@@ -58,10 +69,15 @@ class Store:
         self.db.enable_load_extension(False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
-        # Idempotent migration for DBs created before the `context` column existed.
-        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(chunks)")}
-        if "context" not in cols:
+        # Idempotent migrations for DBs created before later columns existed.
+        chunk_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(chunks)")}
+        if "context" not in chunk_cols:
             self.db.execute("ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+        doc_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(docs)")}
+        if "last_retrieved" not in doc_cols:
+            self.db.execute("ALTER TABLE docs ADD COLUMN last_retrieved REAL NOT NULL DEFAULT 0")
+        if "retrieval_count" not in doc_cols:
+            self.db.execute("ALTER TABLE docs ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0")
         self.db.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(embedding float[{embedding_dim}])"
         )
@@ -121,6 +137,62 @@ class Store:
         self.db.execute("DELETE FROM fts_chunks WHERE rel_path = ?", (rel_path,))
         self.db.execute("DELETE FROM chunks WHERE rel_path = ?", (rel_path,))
 
+    def record_retrievals(self, rel_paths: list[str], ts: float) -> None:
+        """Reinforce-on-use: bump retrieval_count + stamp last_retrieved for the
+        docs a query actually surfaced. Frequently-surfaced docs accrue salience
+        (the write path of the Ebbinghaus/Oblivion decay model)."""
+        seen = set()
+        for rel in rel_paths:
+            if rel in seen:
+                continue
+            seen.add(rel)
+            self.db.execute(
+                "UPDATE docs SET retrieval_count = retrieval_count + 1, last_retrieved = ? "
+                "WHERE rel_path = ?",
+                (ts, rel),
+            )
+        self.db.commit()
+
+    # ---------- associative memory (Hebbian co-retrieval graph) ----------
+
+    def strengthen_associations(self, rel_paths: list[str], inc: float = 1.0) -> None:
+        """Hebbian write: every unordered pair among the surfaced docs gains
+        ``inc`` strength. Stored canonically (a_path < b_path) as an undirected
+        edge. 'Docs that fire together wire together.'"""
+        uniq = sorted({r for r in rel_paths})
+        for i in range(len(uniq)):
+            for j in range(i + 1, len(uniq)):
+                a, b = uniq[i], uniq[j]
+                self.db.execute(
+                    "INSERT INTO associations (a_path, b_path, strength) VALUES (?, ?, ?) "
+                    "ON CONFLICT(a_path, b_path) DO UPDATE SET strength = strength + ?",
+                    (a, b, inc, inc),
+                )
+        self.db.commit()
+
+    def neighbors(self, rel_path: str, min_strength: float = 0.0, limit: int = 8) -> list[tuple[str, float]]:
+        """Strongest learned associations for a doc (both edge directions)."""
+        rows = self.db.execute(
+            "SELECT other, strength FROM ("
+            "  SELECT b_path AS other, strength FROM associations WHERE a_path = ? "
+            "  UNION ALL "
+            "  SELECT a_path AS other, strength FROM associations WHERE b_path = ? "
+            ") WHERE strength >= ? ORDER BY strength DESC LIMIT ?",
+            (rel_path, rel_path, min_strength, limit),
+        ).fetchall()
+        return [(r["other"], r["strength"]) for r in rows]
+
+    def representative_chunk(self, rel_path: str):
+        """First chunk + doc signals for a doc — used to inject an associatively
+        recalled doc that didn't directly match the query."""
+        return self.db.execute(
+            "SELECT c.chunk_idx, c.text, d.title, d.is_priority, d.doc_type, "
+            "       d.mtime, d.retrieval_count "
+            "FROM chunks c JOIN docs d ON d.rel_path = c.rel_path "
+            "WHERE c.rel_path = ? ORDER BY c.chunk_idx LIMIT 1",
+            (rel_path,),
+        ).fetchone()
+
     def prune_missing(self) -> list[str]:
         """Drop docs whose source file no longer exists on disk — and their
         chunks, vectors, FTS rows, and wikilinks. (FK cascade does not fire
@@ -133,6 +205,7 @@ class Store:
         for rel in gone:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM associations WHERE a_path = ? OR b_path = ?", (rel, rel))
             self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
         return gone
 

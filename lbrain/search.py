@@ -22,6 +22,8 @@ class Hit:
     boosts: dict[str, float] = field(default_factory=dict)
     doc_type: str = ""
     is_priority: bool = False
+    mtime: float = 0.0
+    retrieval_count: int = 0
 
 
 def search(
@@ -40,7 +42,8 @@ def search(
     q_vec = embedder.embed_one(query)
     vec_rows = store.db.execute(
         "SELECT v.rowid AS chunk_id, vec_distance_cosine(v.embedding, ?) AS dist, "
-        "       c.rel_path, c.chunk_idx, c.text, d.title, d.is_priority, d.doc_type "
+        "       c.rel_path, c.chunk_idx, c.text, d.title, d.is_priority, d.doc_type, "
+        "       d.mtime, d.retrieval_count "
         "FROM vec_chunks v "
         "JOIN chunks c ON c.chunk_id = v.rowid "
         "JOIN docs d ON d.rel_path = c.rel_path "
@@ -56,7 +59,7 @@ def search(
         try:
             kw_rows = store.db.execute(
                 "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
-                "       d.title, d.is_priority, d.doc_type "
+                "       d.title, d.is_priority, d.doc_type, d.mtime, d.retrieval_count "
                 "FROM fts_chunks "
                 "JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
                 "JOIN docs d ON d.rel_path = c.rel_path "
@@ -90,6 +93,8 @@ def search(
                 score=0.0,
                 doc_type=r["doc_type"],
                 is_priority=bool(r["is_priority"]),
+                mtime=r["mtime"],
+                retrieval_count=r["retrieval_count"],
             )
             hits[cid] = h
         return h
@@ -134,8 +139,101 @@ def search(
                 h.score *= lift
                 h.boosts["wikilink_inbound"] = lift
 
+    # 6. Temporal dynamics — gentle, bounded freshness + salience (Tier 2a).
+    #    Priority docs are exempt (canonical lairs never decay). Freshness is a
+    #    ± lift around a neutral midpoint so old-but-relevant docs aren't buried;
+    #    salience rewards docs repeated retrieval has marked as load-bearing.
+    if cfg.temporal_decay and out:
+        import math
+        import time as _time
+
+        now = _time.time()
+        hl = max(cfg.decay_half_life_days, 1.0) * 86400.0
+        for h in out:
+            if h.is_priority:
+                continue
+            age = max(now - (h.mtime or now), 0.0)
+            freshness = math.pow(0.5, age / hl)  # (0,1], 1 = brand new
+            salience = min(h.retrieval_count, 10) / 10.0  # 0..1, capped
+            factor = (
+                1.0
+                + cfg.recency_weight * (freshness - 0.5)
+                + cfg.salience_weight * salience
+            )
+            h.score *= factor
+            h.boosts["temporal"] = round(factor, 3)
+
+    # 7. Spreading activation over the learned association graph (Tier 2b).
+    #    Seeds = current top docs; their strongly-associated neighbors get an
+    #    activation bonus when already present, or are recalled into the result
+    #    (bounded injection) even though they never directly matched the query —
+    #    associative recall, the core brain-like behavior.
+    if cfg.hebbian and out:
+        present: dict[str, Hit] = {}
+        for h in out:
+            cur = present.get(h.rel_path)
+            if cur is None or h.score > cur.score:
+                present[h.rel_path] = h
+        seeds = sorted(out, key=lambda h: h.score, reverse=True)[:5]
+        injected = 0
+        for seed in seeds:
+            for other, strength in store.neighbors(
+                seed.rel_path, min_strength=cfg.assoc_min_strength, limit=5
+            ):
+                act = seed.score * cfg.spread_weight * min(strength / 10.0, 1.0)
+                if other in present:
+                    h = present[other]
+                    if "assoc" not in h.boosts:  # add the bonus once
+                        h.score += act
+                        h.boosts["assoc"] = round(act, 4)
+                elif injected < cfg.max_injected:
+                    row = store.representative_chunk(other)
+                    if row is None:
+                        continue
+                    if doc_type and row["doc_type"] != doc_type:
+                        continue
+                    if priority_only and not row["is_priority"]:
+                        continue
+                    nh = Hit(
+                        rel_path=other, chunk_idx=row["chunk_idx"], text=row["text"],
+                        title=row["title"], score=act, doc_type=row["doc_type"],
+                        is_priority=bool(row["is_priority"]), mtime=row["mtime"],
+                        retrieval_count=row["retrieval_count"],
+                        boosts={"assoc_recall": round(act, 4)},
+                    )
+                    out.append(nh)
+                    present[other] = nh
+                    injected += 1
+
     out.sort(key=lambda h: h.score, reverse=True)
-    return out[:k]
+
+    # 7.5 Optional cross-encoder rerank — joint (query, chunk) precision pass over
+    #     the fused head. No-op if no reranker backend is installed.
+    if cfg.rerank:
+        from .rerank import rerank as _rerank
+
+        out = _rerank(
+            query, out, cfg.rerank_model,
+            top_n=cfg.rerank_top_n, priority_boost=cfg.priority_boost,
+        )
+
+    top = out[:k]
+
+    # 8. Hebbian write — the docs THIS query surfaced wire together for next time.
+    if cfg.hebbian and len(top) > 1:
+        try:
+            store.strengthen_associations([h.rel_path for h in top])
+        except Exception:
+            pass
+
+    # Reinforce-on-use: the docs this query surfaced gain salience next time.
+    if cfg.temporal_decay and top:
+        try:
+            store.record_retrievals([h.rel_path for h in top], now)
+        except Exception:
+            pass
+
+    return top
 
 
 def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:

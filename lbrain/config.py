@@ -53,6 +53,20 @@ class Config:
     vector_weight: float = 0.6  # retained for back-compat; unused since RRF fusion
     rrf_k: int = 60  # Reciprocal Rank Fusion smoothing constant (higher = flatter)
     contextual_prefix: bool = False  # prepend doc macro-context to each chunk's embed/FTS text
+    # --- temporal dynamics (Tier 2a) — gentle, bounded; priority docs exempt ---
+    temporal_decay: bool = False  # apply freshness + salience factor and record retrievals
+    recency_weight: float = 0.15  # max ± lift from doc freshness (mtime half-life)
+    salience_weight: float = 0.10  # max lift from retrieval frequency (reinforce-on-use)
+    decay_half_life_days: float = 120.0  # freshness half-life
+    # --- associative memory (Tier 2b) — Hebbian co-retrieval + spreading activation ---
+    hebbian: bool = False  # learn co-retrieval edges and spread activation across them
+    spread_weight: float = 0.5  # how strongly an associated doc inherits a seed's score
+    assoc_min_strength: float = 2.0  # only spread along edges co-retrieved >= this many times
+    max_injected: int = 3  # cap associatively-recalled docs that didn't directly match
+    # --- cross-encoder reranking (Tier 2c) — optional, lightweight, flag-gated ---
+    rerank: bool = False  # second-stage cross-encoder precision reorder of top candidates
+    rerank_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"  # fastembed name; ST maps automatically
+    rerank_top_n: int = 30  # rerank this many fused candidates before final top-k
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -77,6 +91,17 @@ class Config:
             vector_weight=raw.get("vector_weight", cls.vector_weight),
             rrf_k=raw.get("rrf_k", cls.rrf_k),
             contextual_prefix=raw.get("contextual_prefix", cls.contextual_prefix),
+            temporal_decay=raw.get("temporal_decay", cls.temporal_decay),
+            recency_weight=raw.get("recency_weight", cls.recency_weight),
+            salience_weight=raw.get("salience_weight", cls.salience_weight),
+            decay_half_life_days=raw.get("decay_half_life_days", cls.decay_half_life_days),
+            hebbian=raw.get("hebbian", cls.hebbian),
+            spread_weight=raw.get("spread_weight", cls.spread_weight),
+            assoc_min_strength=raw.get("assoc_min_strength", cls.assoc_min_strength),
+            max_injected=raw.get("max_injected", cls.max_injected),
+            rerank=raw.get("rerank", cls.rerank),
+            rerank_model=raw.get("rerank_model", cls.rerank_model),
+            rerank_top_n=raw.get("rerank_top_n", cls.rerank_top_n),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -94,6 +119,17 @@ class Config:
             f"vector_weight = {self.vector_weight}",
             f"rrf_k = {self.rrf_k}",
             f"contextual_prefix = {str(self.contextual_prefix).lower()}",
+            f"temporal_decay = {str(self.temporal_decay).lower()}",
+            f"recency_weight = {self.recency_weight}",
+            f"salience_weight = {self.salience_weight}",
+            f"decay_half_life_days = {self.decay_half_life_days}",
+            f"hebbian = {str(self.hebbian).lower()}",
+            f"spread_weight = {self.spread_weight}",
+            f"assoc_min_strength = {self.assoc_min_strength}",
+            f"max_injected = {self.max_injected}",
+            f"rerank = {str(self.rerank).lower()}",
+            f'rerank_model = "{self.rerank_model}"',
+            f"rerank_top_n = {self.rerank_top_n}",
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]
