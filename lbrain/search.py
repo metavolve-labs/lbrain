@@ -233,6 +233,32 @@ def search(
         except Exception:
             pass
 
+    # 9. Consolidation layer (Tier 3) — surface a dense summary AHEAD of the raw
+    #    fragments when the query has landed in that summary's territory: one
+    #    abstraction before the dozen pieces it was distilled from. The robust
+    #    signal is SOURCE OVERLAP (the query's best fragments belong to the
+    #    summary's cluster), with raw cosine distance as a looser fallback — a
+    #    broad summary embedding is naturally far from a short keyword query.
+    if cfg.use_summaries and top:
+        try:
+            import json as _json
+
+            srows = store.search_summaries(q_vec, k=2)
+            top_paths = {h.rel_path for h in top[:3]}
+            for s in srows:
+                src = set(_json.loads(s["source_paths"]))
+                if (src & top_paths) or s["dist"] <= cfg.summary_max_dist:
+                    top.insert(0, Hit(
+                        rel_path=f"[consolidated] {s['title']}",
+                        chunk_idx=-1, text=s["text"], title=s["title"],
+                        score=top[0].score * 1.001, doc_type="consolidated",
+                        boosts={"consolidated_sources": s["n_sources"]},
+                    ))
+                    top = top[:k]
+                    break
+        except Exception:
+            pass
+
     return top
 
 
