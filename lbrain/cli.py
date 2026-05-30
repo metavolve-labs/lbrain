@@ -258,6 +258,57 @@ def stats():
     click.echo(f"wikilinks:      {s['wikilinks']}")
 
 
+@main.command()
+@click.option("--threshold", default=0.45, type=float, help="Cosine distance cap for a cluster")
+@click.option("--min-size", default=4, type=int, help="Min chunks to form a cluster")
+@click.option("--max", "max_clusters", default=20, type=int, help="Cap clusters consolidated")
+@click.option("--model", default="gpt-4o-mini", help="OpenAI chat model for synthesis")
+def consolidate(threshold: float, min_size: int, max_clusters: int, model: str):
+    """Consolidate related chunks into dense summary memories (the neocortical layer).
+
+    Clusters chunks over their existing vectors and synthesizes one dense,
+    provenance-linked summary per cluster. Regenerable; never touches source.
+    """
+    cfg = Config.load()
+    if not cfg.openai_api_key:
+        click.secho("✗ No OPENAI_API_KEY configured.", fg="red")
+        sys.exit(1)
+    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    from .consolidate import consolidate as run_consolidation
+
+    t0 = time.time()
+    n = run_consolidation(
+        cfg, store, embedder, synth_model=model,
+        distance_threshold=threshold, min_size=min_size, max_clusters=max_clusters,
+        log=click.echo,
+    )
+    embedder.close()
+    store.close()
+    click.secho(f"✓ Consolidated {n} dense summary memories in {time.time() - t0:.1f}s", fg="green")
+
+
+@main.command()
+def summaries():
+    """List the dense summary memories in the consolidation layer."""
+    cfg = Config.load()
+    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    rows = store.list_summaries()
+    store.close()
+    if not rows:
+        click.echo("  No summaries yet. Run `lbrain consolidate`.")
+        return
+    click.secho(f"--- {len(rows)} dense summary memories ---", fg="cyan")
+    for r in rows:
+        import json
+
+        paths = json.loads(r["source_paths"])
+        click.secho(f"  [{r['summary_id']}] {r['title']}", fg="yellow")
+        click.echo(f"     {r['n_sources']} source docs · {r['len']} chars")
+        click.echo(f"     from: {', '.join(p.rsplit('/', 1)[-1] for p in paths[:6])}"
+                   + (" …" if len(paths) > 6 else ""))
+
+
 @main.command(name="commit-check")
 @click.argument("text", required=False)
 @click.option("--file", "from_file", type=click.Path(exists=True), help="Read text from file")

@@ -51,6 +51,17 @@ CREATE TABLE IF NOT EXISTS associations (
     PRIMARY KEY (a_path, b_path)
 );
 
+CREATE TABLE IF NOT EXISTS summaries (
+    summary_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    title            TEXT NOT NULL,
+    text             TEXT NOT NULL,
+    source_paths     TEXT NOT NULL DEFAULT '[]',
+    source_chunk_ids TEXT NOT NULL DEFAULT '[]',
+    n_sources        INTEGER NOT NULL DEFAULT 0,
+    created          REAL NOT NULL DEFAULT 0,
+    embedded         INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_wikilinks_tgt ON wikilinks(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
 CREATE INDEX IF NOT EXISTS idx_assoc_a ON associations(a_path);
@@ -85,6 +96,14 @@ class Store:
         self.db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5("
             "text, rel_path UNINDEXED, chunk_idx UNINDEXED, tokenize='porter unicode61')"
+        )
+        # Consolidation layer (Tier 3) — dense summary memories + their own vec/FTS.
+        self.db.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_summaries USING vec0(embedding float[{embedding_dim}])"
+        )
+        self.db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_summaries USING fts5("
+            "text, title UNINDEXED, tokenize='porter unicode61')"
         )
         self.db.commit()
 
@@ -257,6 +276,61 @@ class Store:
                 (cid, blob),
             )
             self.db.execute("UPDATE chunks SET embedded = 1 WHERE chunk_id = ?", (cid,))
+
+    # ---------- consolidation layer (dense summary memories) ----------
+
+    def all_chunk_vectors(self) -> list:
+        """Every embedded chunk with its vector — clustering input for Tier 3."""
+        return self.db.execute(
+            "SELECT v.rowid AS chunk_id, c.rel_path, c.text, d.is_priority, v.embedding "
+            "FROM vec_chunks v "
+            "JOIN chunks c ON c.chunk_id = v.rowid "
+            "JOIN docs d ON d.rel_path = c.rel_path"
+        ).fetchall()
+
+    def clear_summaries(self) -> None:
+        self.db.execute("DELETE FROM vec_summaries")
+        self.db.execute("DELETE FROM fts_summaries")
+        self.db.execute("DELETE FROM summaries")
+        self.db.commit()
+
+    def insert_summary(self, title, text, source_paths, source_chunk_ids, created) -> int:
+        import json
+
+        cur = self.db.execute(
+            "INSERT INTO summaries (title, text, source_paths, source_chunk_ids, n_sources, created) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (title, text, json.dumps(source_paths), json.dumps(source_chunk_ids),
+             len(source_paths), created),
+        )
+        sid = cur.lastrowid
+        self.db.execute(
+            "INSERT INTO fts_summaries (rowid, text, title) VALUES (?, ?, ?)", (sid, text, title)
+        )
+        return sid
+
+    def write_summary_embedding(self, summary_id: int, blob: bytes) -> None:
+        self.db.execute("DELETE FROM vec_summaries WHERE rowid = ?", (summary_id,))
+        self.db.execute(
+            "INSERT INTO vec_summaries (rowid, embedding) VALUES (?, ?)", (summary_id, blob)
+        )
+        self.db.execute("UPDATE summaries SET embedded = 1 WHERE summary_id = ?", (summary_id,))
+
+    def search_summaries(self, q_vec: bytes, k: int = 2) -> list:
+        """Nearest dense summaries to a query vector (the abstraction layer)."""
+        return self.db.execute(
+            "SELECT s.summary_id, s.title, s.text, s.source_paths, s.n_sources, "
+            "       vec_distance_cosine(v.embedding, ?) AS dist "
+            "FROM vec_summaries v JOIN summaries s ON s.summary_id = v.rowid "
+            "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist",
+            (q_vec, q_vec, k),
+        ).fetchall()
+
+    def list_summaries(self) -> list:
+        return self.db.execute(
+            "SELECT summary_id, title, n_sources, length(text) AS len, source_paths "
+            "FROM summaries ORDER BY n_sources DESC"
+        ).fetchall()
 
     # ---------- counts / health ----------
 

@@ -67,6 +67,9 @@ class Config:
     rerank: bool = False  # second-stage cross-encoder precision reorder of top candidates
     rerank_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"  # fastembed name; ST maps automatically
     rerank_top_n: int = 30  # rerank this many fused candidates before final top-k
+    # --- consolidation layer (Tier 3) — dense summary memories ---
+    use_summaries: bool = False  # surface the most relevant dense abstraction ahead of fragments
+    summary_max_dist: float = 0.55  # only surface a summary this cosine-close to the query
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -102,6 +105,8 @@ class Config:
             rerank=raw.get("rerank", cls.rerank),
             rerank_model=raw.get("rerank_model", cls.rerank_model),
             rerank_top_n=raw.get("rerank_top_n", cls.rerank_top_n),
+            use_summaries=raw.get("use_summaries", cls.use_summaries),
+            summary_max_dist=raw.get("summary_max_dist", cls.summary_max_dist),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -130,6 +135,8 @@ class Config:
             f"rerank = {str(self.rerank).lower()}",
             f'rerank_model = "{self.rerank_model}"',
             f"rerank_top_n = {self.rerank_top_n}",
+            f"use_summaries = {str(self.use_summaries).lower()}",
+            f"summary_max_dist = {self.summary_max_dist}",
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]
