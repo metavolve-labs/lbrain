@@ -49,8 +49,10 @@ class Config:
     chunk_overlap: int = 64
     priority_boost: float = 1.3
     wikilink_boost: float = 1.15
-    bm25_weight: float = 0.4
-    vector_weight: float = 0.6
+    bm25_weight: float = 0.4  # retained for back-compat; unused since RRF fusion
+    vector_weight: float = 0.6  # retained for back-compat; unused since RRF fusion
+    rrf_k: int = 60  # Reciprocal Rank Fusion smoothing constant (higher = flatter)
+    contextual_prefix: bool = False  # prepend doc macro-context to each chunk's embed/FTS text
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -73,6 +75,8 @@ class Config:
             wikilink_boost=raw.get("wikilink_boost", cls.wikilink_boost),
             bm25_weight=raw.get("bm25_weight", cls.bm25_weight),
             vector_weight=raw.get("vector_weight", cls.vector_weight),
+            rrf_k=raw.get("rrf_k", cls.rrf_k),
+            contextual_prefix=raw.get("contextual_prefix", cls.contextual_prefix),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -88,6 +92,8 @@ class Config:
             f"wikilink_boost = {self.wikilink_boost}",
             f"bm25_weight = {self.bm25_weight}",
             f"vector_weight = {self.vector_weight}",
+            f"rrf_k = {self.rrf_k}",
+            f"contextual_prefix = {str(self.contextual_prefix).lower()}",
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]

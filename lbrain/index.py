@@ -41,6 +41,7 @@ class Chunk:
     text: str
     token_count: int
     chunk_hash: str
+    context: str = ""  # doc macro-context prepended to embed/FTS text (not display)
 
 
 def discover(roots: list[Path]) -> list[Path]:
@@ -88,8 +89,30 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     )
 
 
-def chunk(doc: Doc, max_tokens: int = 512, overlap: int = 64) -> list[Chunk]:
-    """Header-aware chunking. Splits on H1/H2 boundaries, then packs to max_tokens."""
+def build_context(doc: Doc) -> str:
+    """Doc-level macro-context for Contextual-Retrieval-style chunk prefixing.
+
+    Cheap (no LLM): the doc title plus its frontmatter ``description`` (the
+    one-line summary memory files already carry). This situates an isolated
+    chunk inside its parent document so deep chunks that never restate the
+    doc's subject still embed/match under it.
+    """
+    parts = [doc.title.strip()]
+    desc = doc.metadata.get("description")
+    if isinstance(desc, str) and desc.strip():
+        parts.append(desc.strip())
+    return " — ".join(parts)
+
+
+def chunk(
+    doc: Doc, max_tokens: int = 512, overlap: int = 64, contextualize: bool = False
+) -> list[Chunk]:
+    """Header-aware chunking. Splits on H1/H2 boundaries, then packs to max_tokens.
+
+    When ``contextualize`` is set, every chunk carries the doc's macro-context
+    (stored separately; prepended to embed/FTS text, never to the display text).
+    """
+    ctx = build_context(doc) if contextualize else ""
     sections = _split_on_headers(doc.body)
     chunks: list[Chunk] = []
     buf: list[str] = []
@@ -102,7 +125,7 @@ def chunk(doc: Doc, max_tokens: int = 512, overlap: int = 64) -> list[Chunk]:
             buf_tokens += sec_tokens
         else:
             if buf:
-                chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens))
+                chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
                 idx += 1
             if sec_tokens <= max_tokens:
                 buf = [sec]
@@ -113,12 +136,12 @@ def chunk(doc: Doc, max_tokens: int = 512, overlap: int = 64) -> list[Chunk]:
                 step = max_tokens - overlap
                 for start in range(0, len(tokens), step):
                     piece = ENCODER.decode(tokens[start : start + max_tokens])
-                    chunks.append(_make_chunk(doc, idx, piece, min(max_tokens, len(tokens) - start)))
+                    chunks.append(_make_chunk(doc, idx, piece, min(max_tokens, len(tokens) - start), ctx))
                     idx += 1
                 buf = []
                 buf_tokens = 0
     if buf:
-        chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens))
+        chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
     return chunks
 
 
@@ -136,9 +159,16 @@ def _split_on_headers(body: str) -> list[str]:
     return [s for s in sections if s.strip()]
 
 
-def _make_chunk(doc: Doc, idx: int, text: str, tokens: int) -> Chunk:
-    h = hashlib.sha1(text.encode("utf-8")).hexdigest()
-    return Chunk(doc_path=doc.rel_path, chunk_idx=idx, text=text, token_count=tokens, chunk_hash=h)
+def _make_chunk(doc: Doc, idx: int, text: str, tokens: int, context: str = "") -> Chunk:
+    # No context → legacy hash sha1(text) byte-for-byte, so flipping the flag
+    # OFF leaves change-detection identical to pre-context builds. With context,
+    # fold it in so flipping ON is correctly seen as a change.
+    payload = f"{context}\x00{text}" if context else text
+    h = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    return Chunk(
+        doc_path=doc.rel_path, chunk_idx=idx, text=text, token_count=tokens,
+        chunk_hash=h, context=context,
+    )
 
 
 def _first_header(body: str) -> str | None:
