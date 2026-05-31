@@ -89,6 +89,11 @@ def should_commit_to_lair(text: str) -> LairCommitSuggestion:
     - Strong signals: user said 'remember', 'save this', 'don't forget', explicit decision/feedback
     - Medium: surprising fact, non-obvious choice, name+date+constraint cluster
     - Weak: routine task output
+
+    A decision or commitment is commit-worthy whether or not it carries an explicit
+    date — the date is a confidence bonus, not a gate. (Pre-2026-05-30 this block only
+    fired when an ISO date was also present, so plain "we decided X is now the default"
+    scored 0 and was a false-negative.)
     """
     t = text.lower()
     score = 0.0
@@ -99,12 +104,35 @@ def should_commit_to_lair(text: str) -> LairCommitSuggestion:
     if re.search(r"\b(remember|save this|don't forget|note this|tag this|memorize)\b", t):
         score += 0.85
         reasoning.append("Explicit user save-intent.")
-    if re.search(r"\b(decision|decided|locked|approved|chose)\b", t) and re.search(
-        r"\b(2026|2027)-\d{2}-\d{2}\b", t
-    ):
-        score += 0.6
-        reasoning.append("Date-bound decision.")
+
+    # Decision / commitment signals — captured regardless of whether a date is present.
+    decision_verb = re.search(
+        r"\b(decid(?:e|es|ed|ing)|decision|chose|chosen|choosing|"
+        r"settl(?:e|es|ed|ing) on|go(?:ing)? with|went with|"
+        r"lock(?:ed|ing)?|approv(?:e|es|ed)|finaliz(?:e|es|ed)|agreed)\b",
+        t,
+    )
+    commitment_phrase = re.search(
+        r"(architectural default|the (?:new )?default|now the default|"
+        r"is now the\b|going forward|from now on|moving forward|"
+        r"canonical|source of truth|standard (?:practice|approach)|"
+        r"the (?:standard|convention) is)",
+        t,
+    )
+    has_date = re.search(r"\b(2026|2027)-\d{2}-\d{2}\b", t)
+    if decision_verb or commitment_phrase:
+        score += 0.5
         suggested_type = "project"
+        if decision_verb and commitment_phrase:
+            score += 0.2
+            reasoning.append("Decision + commitment phrasing.")
+        elif decision_verb:
+            reasoning.append("Decision/commitment language.")
+        else:
+            reasoning.append("Commitment / standard-setting phrasing.")
+        if has_date:
+            score += 0.2
+            reasoning.append("Date-bound.")
 
     # Feedback signals
     if re.search(r"\b(don't|stop|prefer|always|never|going forward|from now on)\b", t):
