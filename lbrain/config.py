@@ -36,6 +36,27 @@ def _load_env_file() -> None:
         pass
 
 
+def _write_env_var(key: str, value: str) -> None:
+    """Upsert KEY=value into ~/.lbrain/env with 0600 perms (the secret store).
+    Keeps credentials out of the world-readable config.toml."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    lines, found = [], False
+    if ENV_PATH.exists():
+        for line in ENV_PATH.read_text().splitlines():
+            if line.strip().startswith(f"{key}="):
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"{key}={value}")
+    ENV_PATH.write_text("\n".join(lines) + "\n")
+    try:
+        ENV_PATH.chmod(0o600)
+    except OSError:
+        pass
+
+
 _load_env_file()
 
 
@@ -113,7 +134,7 @@ class Config:
     def write(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         lines = [
-            f'openai_api_key = "{self.openai_api_key}"',
+            'openai_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
             f'embedding_model = "{self.embedding_model}"',
             f"embedding_dim = {self.embedding_dim}",
             f"chunk_tokens = {self.chunk_tokens}",
@@ -144,3 +165,11 @@ class Config:
             lines.append(f'  "{s}",')
         lines.append("]")
         CONFIG_PATH.write_text("\n".join(lines) + "\n")
+        try:
+            CONFIG_PATH.chmod(0o600)
+        except OSError:
+            pass
+        # The secret never goes into the (potentially world-readable) config above.
+        # Persist it to ~/.lbrain/env (chmod 600); _load_env_file() reads it at import.
+        if self.openai_api_key:
+            _write_env_var("OPENAI_API_KEY", self.openai_api_key)
