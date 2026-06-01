@@ -30,7 +30,10 @@ def main():
 
 
 @main.command()
-@click.option("--api-key", envvar="OPENAI_API_KEY", help="OpenAI API key")
+@click.option("--provider", type=click.Choice(["gemini", "openai"]), default="gemini",
+              help="Embedding provider (default: gemini, GCP-native, no third-party lock-in)")
+@click.option("--gemini-key", envvar="GEMINI_API_KEY", default=None, help="Gemini API key (provider=gemini)")
+@click.option("--api-key", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (provider=openai)")
 @click.option(
     "--source",
     "sources",
@@ -38,22 +41,41 @@ def main():
     type=click.Path(),
     help="Directory to index (repeatable)",
 )
-def init(api_key: str, sources: tuple[str, ...]):
-    """Initialize LBrain config + DB."""
+def init(provider: str, gemini_key: str, api_key: str, sources: tuple[str, ...]):
+    """Initialize LBrain config + DB (Gemini-native by default).
+
+    Out-of-the-box: `lbrain init --gemini-key <KEY> --source ./docs --source ./notes`
+    The key is written to ~/.lbrain/env (chmod 600), never to plaintext config.
+    """
     cfg = Config.load()
-    if api_key:
-        cfg.openai_api_key = api_key
+    cfg.embedding_provider = provider
+    if provider == "gemini":
+        cfg.embedding_model = "gemini-embedding-001"
+        if gemini_key:
+            cfg.gemini_api_key = gemini_key
+    else:
+        cfg.embedding_model = "text-embedding-3-small"
+        if api_key:
+            cfg.openai_api_key = api_key
     if sources:
         cfg.sources = [Path(s).expanduser().resolve() for s in sources]
     cfg.write()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     stats = store.stats()
     store.close()
+    active_key = cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key
     click.secho(f"✓ LBrain initialized at {CONFIG_DIR}", fg="green")
-    click.echo(f"  config: {CONFIG_PATH}")
-    click.echo(f"  db:     {cfg.db_path}")
-    click.echo(f"  sources: {len(cfg.sources)} configured")
-    click.echo(f"  docs:    {stats['docs']}")
+    click.echo(f"  provider: {provider} ({cfg.embedding_model}, {cfg.embedding_dim}d)")
+    click.echo(f"  config:   {CONFIG_PATH}")
+    click.echo(f"  db:       {cfg.db_path}")
+    click.echo(f"  sources:  {len(cfg.sources)} configured")
+    click.echo(f"  docs:     {stats['docs']}")
+    if not active_key:
+        click.secho(f"  ⚠️  No {provider} API key set — add it: lbrain init --{'gemini-key' if provider=='gemini' else 'api-key'} <KEY>", fg="yellow")
+    if not cfg.sources:
+        click.secho("  ⚠️  No sources yet — add one: lbrain add-source <dir>, then `lbrain import && lbrain embed --stale`", fg="yellow")
+    else:
+        click.echo("  next: lbrain import && lbrain embed --stale")
 
 
 @main.command(name="add-source")
@@ -400,6 +422,69 @@ def lair_from_repo_cmd(repo_path, dest, name, priority, model, dry_run, no_embed
     """
     from .lair_from_repo import run_from_repo
     run_from_repo(repo_path, dest, name, priority, model, dry_run, no_embed, echo=click.echo)
+
+
+@main.command()
+@click.argument("text", required=False)
+@click.option("--from-file", type=click.Path(exists=True), default=None, help="Read the work text from a file")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output (for the calling agent)")
+def suggest(text, from_file, as_json):
+    """Subtle prompt: should recent work be recorded? Suggests CREATE vs AMEND.
+
+    Built for an in-terminal agent to call at a natural breakpoint (end of a task /
+    session), then *offer* the result to the user. It NEVER writes — it only suggests,
+    so the human stays in the loop. Discipline-builder: the more you say yes, the
+    sharper your memory gets.
+    """
+    import json as _json
+    import re as _re
+    if from_file:
+        text = Path(from_file).read_text(encoding="utf-8", errors="replace")
+    elif not text:
+        text = "" if sys.stdin.isatty() else sys.stdin.read()
+    text = (text or "").strip()
+    if not text:
+        click.echo("  (no input text — pass TEXT, --from-file, or pipe via stdin)")
+        return
+    s = should_commit_to_lair(text)
+    out = {"should_commit": s.should_commit, "confidence": round(s.confidence, 2),
+           "type": s.suggested_type, "slug": s.suggested_slug, "reasoning": s.reasoning,
+           "action": None, "target": None}
+    if s.should_commit:
+        cfg = Config.load()
+        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        hits = []
+        try:
+            hits = search(cfg, store, make_embedder(cfg), text, k=3)
+        except Exception:
+            pass
+        finally:
+            store.close()
+        slug_words = set(_re.findall(r"[a-z0-9]{4,}", s.suggested_slug.lower()))
+        amend = None
+        for h in hits:
+            hay = set(_re.findall(r"[a-z0-9]{4,}", (h.rel_path + " " + (h.title or "")).lower()))
+            if slug_words and len(slug_words & hay) >= 2:
+                amend = h.rel_path
+                break
+        if amend:
+            out["action"], out["target"] = "amend", amend
+        else:
+            out["action"], out["target"] = "create", f"{s.suggested_type}-{s.suggested_slug}.md"
+    if as_json:
+        click.echo(_json.dumps(out))
+        return
+    if not s.should_commit:
+        click.echo(f"  ⬜ Probably not worth recording (confidence {s.confidence:.2f}). {s.reasoning}")
+        return
+    click.secho(f"  💡 Worth remembering — {s.suggested_type}, confidence {s.confidence:.2f}.", fg="cyan")
+    click.echo(f"     {s.reasoning}")
+    if out["action"] == "amend":
+        click.echo(f"     Looks like it belongs in an existing note: {out['target']}")
+        click.echo(f"     → Ask the user; on yes, append the note to that file, then `lbrain import && lbrain embed --stale`.")
+    else:
+        click.echo(f"     Suggest a new {s.suggested_type} memory: {out['target']}")
+        click.echo(f"     → Ask the user; on yes: lbrain remember \"<the fact>\" --write")
 
 
 @main.command()
