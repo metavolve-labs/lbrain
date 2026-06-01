@@ -22,6 +22,7 @@ import httpx
 import numpy as np
 
 CHAT_URL = "https://api.openai.com/v1/chat/completions"
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 SYNTH_SYSTEM = (
     "You consolidate related memory fragments into ONE dense, structured summary "
@@ -72,11 +73,27 @@ def _title_for(members) -> str:
     return f"Consolidated · {common}"
 
 
-def synthesize(api_key: str, model: str, members) -> str:
+def synthesize(api_key: str, model: str, members, provider: str = "gemini") -> str:
     frag = "\n\n---\n\n".join(
         f"[source: {m['rel_path']}]\n{m['text']}" for m in members[:24]
     )
+    user = (
+        f"Consolidate these {len(members)} related fragments into one dense "
+        f"summary memory:\n\n{frag}"
+    )
     with httpx.Client(timeout=120.0) as client:
+        if provider == "gemini":
+            r = client.post(
+                f"{GEMINI_BASE}/models/{model}:generateContent",
+                params={"key": api_key},
+                json={
+                    "systemInstruction": {"parts": [{"text": SYNTH_SYSTEM}]},
+                    "contents": [{"role": "user", "parts": [{"text": user}]}],
+                    "generationConfig": {"temperature": 0.2},
+                },
+            )
+            r.raise_for_status()
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
         r = client.post(
             CHAT_URL,
             headers={"Authorization": f"Bearer {api_key}"},
@@ -85,11 +102,7 @@ def synthesize(api_key: str, model: str, members) -> str:
                 "temperature": 0.2,
                 "messages": [
                     {"role": "system", "content": SYNTH_SYSTEM},
-                    {
-                        "role": "user",
-                        "content": f"Consolidate these {len(members)} related "
-                        f"fragments into one dense summary memory:\n\n{frag}",
-                    },
+                    {"role": "user", "content": user},
                 ],
             },
         )
@@ -98,8 +111,8 @@ def synthesize(api_key: str, model: str, members) -> str:
 
 
 def consolidate(
-    cfg, store, embedder, synth_model="gpt-4o-mini",
-    distance_threshold=0.45, min_size=4, max_clusters=20, log=print,
+    cfg, store, embedder, synth_model=None,
+    distance_threshold=None, min_size=4, max_clusters=20, log=print,
 ):
     """Cluster → synthesize → store. Returns the number of summaries written.
 
@@ -107,6 +120,16 @@ def consolidate(
     summary is embedded into vec_summaries so it is retrievable as an abstraction.
     """
     import time as _time
+
+    provider = getattr(cfg, "embedding_provider", "openai")
+    synth_key = cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key
+    if synth_model is None:
+        synth_model = "gemini-2.5-flash" if provider == "gemini" else "gpt-4o-mini"
+    if distance_threshold is None:
+        # Gemini's normalized vectors sit at higher baseline cosine similarity than
+        # OpenAI's, so clusters percolate into one blob well below 0.45. 0.15 is
+        # safely under the Gemini percolation cliff (~0.18); 0.45 suits OpenAI.
+        distance_threshold = 0.15 if provider == "gemini" else 0.45
 
     clusters = cluster_chunks(store, cfg.embedding_dim, distance_threshold, min_size, max_clusters)
     log(f"  clusters formed (>= {min_size} chunks): {len(clusters)}")
@@ -121,7 +144,7 @@ def consolidate(
         # Skip degenerate clusters that are just one doc talking to itself.
         if len(paths) < 2:
             continue
-        text = synthesize(cfg.openai_api_key, synth_model, members)
+        text = synthesize(synth_key, synth_model, members, provider=provider)
         title = _title_for(members)
         cids = [m["chunk_id"] for m in members]
         sid = store.insert_summary(title, text, paths, cids, now)
