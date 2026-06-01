@@ -385,5 +385,53 @@ def mcp(transport: str, host: str, port: int):
     serve(transport=transport, host=host, port=port)
 
 
+@main.command(name="lair-from-repo")
+@click.argument("repo_path", type=click.Path(exists=True))
+@click.option("--dest", default=None, help="Lairs dir (default: first configured source)")
+@click.option("--name", default=None, help="Override the lair title")
+@click.option("--priority", type=click.Choice(["CRITICAL", "HIGH", "MEDIUM", "LOW"], case_sensitive=False), default=None)
+@click.option("--model", default="gemini-2.5-flash", help="Gemini model for the fill")
+@click.option("--dry-run", is_flag=True, help="Print the lair to stdout; write nothing")
+@click.option("--no-embed", is_flag=True, help="Skip the index re-sync after writing")
+def lair_from_repo_cmd(repo_path, dest, name, priority, model, dry_run, no_embed):
+    """Convert a code repo + its README/CLAUDE.md into a filled LAIR.md.
+
+    Deterministic harvest + Python-resolved Status/Priority + Gemini fill + linter.
+    """
+    from .lair_from_repo import run_from_repo
+    run_from_repo(repo_path, dest, name, priority, model, dry_run, no_embed, echo=click.echo)
+
+
+@main.command()
+@click.argument("text")
+@click.option("--write", is_flag=True, help="Write a memory stub if worth committing")
+def remember(text: str, write: bool):
+    """Quick-capture: should this be remembered? (runs the commit-check primitive).
+
+    With --write, drafts a memory/<slug>.md stub in the memory source dir.
+    """
+    s = should_commit_to_lair(text)
+    mark = "✅ commit" if s.should_commit else "⬜ skip"
+    click.echo(f"  {mark}  confidence={s.confidence:.2f}  type={s.suggested_type}  slug={s.suggested_slug}")
+    click.echo(f"  reasoning: {s.reasoning}")
+    if not write:
+        return
+    if not s.should_commit:
+        click.secho("  not committing (should_commit=false); use the lair editor manually if you disagree.", fg="yellow")
+        return
+    cfg = Config.load()
+    mem_dir = next((p for p in cfg.sources if "memory" in str(p).lower()), cfg.sources[0] if cfg.sources else Path.cwd())
+    import datetime as _dt
+    out = Path(mem_dir) / f"{s.suggested_type}-{s.suggested_slug}-{_dt.date.today().isoformat()}.md"
+    body = (
+        f"---\nname: {s.suggested_slug}\n"
+        f"description: {text[:120].strip()}\n"
+        f"metadata:\n  type: {s.suggested_type}\n  sfmp:\n    generated: true\n"
+        f"    confidence: {s.confidence:.2f}\n    trigger: explicit\n---\n\n{text.strip()}\n"
+    )
+    out.write_text(body, encoding="utf-8")
+    click.echo(f"  ✍️  wrote {out}  (run `lbrain import {mem_dir} && lbrain embed --stale` to index)")
+
+
 if __name__ == "__main__":
     main()
