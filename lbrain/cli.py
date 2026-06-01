@@ -10,7 +10,7 @@ import click
 
 from . import __version__
 from .config import CONFIG_DIR, CONFIG_PATH, Config
-from .embed import EmbedClient
+from .embed import EmbedClient, make_embedder
 from .index import chunk as chunk_doc
 from .index import discover, parse
 from .lair_protocol import (
@@ -144,12 +144,17 @@ def import_cmd(paths: tuple[str, ...], prune: bool):
 def embed(stale: bool, batch: int):
     """Generate embeddings for chunks (re-embeds stale or all)."""
     cfg = Config.load()
-    if not cfg.openai_api_key:
-        click.secho("✗ No OPENAI_API_KEY configured. Run `lbrain init --api-key=...`.", fg="red")
+    _active_key = cfg.gemini_api_key if cfg.embedding_provider == "gemini" else cfg.openai_api_key
+    if not _active_key:
+        click.secho(
+            f"✗ No API key for embedding_provider='{cfg.embedding_provider}'. "
+            "Add it to ~/.lbrain/env or run `lbrain init --api-key=...`.",
+            fg="red",
+        )
         sys.exit(1)
 
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    embedder = make_embedder(cfg)
 
     if stale:
         pending = store.stale_chunks()
@@ -195,7 +200,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, no_prime: bo
     """Semantic + keyword hybrid search across the brain."""
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    embedder = make_embedder(cfg)
 
     t0 = time.time()
     hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority)
@@ -259,10 +264,10 @@ def stats():
 
 
 @main.command()
-@click.option("--threshold", default=0.45, type=float, help="Cosine distance cap for a cluster")
+@click.option("--threshold", default=None, type=float, help="Cosine distance cap (default: per provider)")
 @click.option("--min-size", default=4, type=int, help="Min chunks to form a cluster")
 @click.option("--max", "max_clusters", default=20, type=int, help="Cap clusters consolidated")
-@click.option("--model", default="gpt-4o-mini", help="OpenAI chat model for synthesis")
+@click.option("--model", default=None, help="Synthesis chat model (default: per provider)")
 def consolidate(threshold: float, min_size: int, max_clusters: int, model: str):
     """Consolidate related chunks into dense summary memories (the neocortical layer).
 
@@ -270,11 +275,14 @@ def consolidate(threshold: float, min_size: int, max_clusters: int, model: str):
     provenance-linked summary per cluster. Regenerable; never touches source.
     """
     cfg = Config.load()
-    if not cfg.openai_api_key:
-        click.secho("✗ No OPENAI_API_KEY configured.", fg="red")
+    _active_key = cfg.gemini_api_key if cfg.embedding_provider == "gemini" else cfg.openai_api_key
+    if not _active_key:
+        click.secho(
+            f"✗ No API key for embedding_provider='{cfg.embedding_provider}'.", fg="red"
+        )
         sys.exit(1)
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    embedder = make_embedder(cfg)
     from .consolidate import consolidate as run_consolidation
 
     t0 = time.time()
@@ -335,7 +343,7 @@ def check_action(action_text: str, k: int):
     """Cross-check a proposed action against saved feedback rules (anti-pattern detector)."""
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    embedder = make_embedder(cfg)
     hits = search(cfg, store, embedder, action_text, k=k, doc_type="feedback")
     warnings = detect_anti_pattern(action_text, hits)
     if not warnings:

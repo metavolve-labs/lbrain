@@ -63,7 +63,9 @@ _load_env_file()
 @dataclass
 class Config:
     sources: list[Path] = field(default_factory=list)
+    embedding_provider: str = "openai"  # "openai" | "gemini" (GCP-native)
     openai_api_key: str = ""
+    gemini_api_key: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     chunk_tokens: int = 512
@@ -98,13 +100,22 @@ class Config:
         if not CONFIG_PATH.exists():
             return cls(
                 openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+                gemini_api_key=os.environ.get("GEMINI_API_KEY")
+                or os.environ.get("GEMINI_3_API_KEY", ""),
             )
         raw = tomllib.loads(CONFIG_PATH.read_text())
         sources = [Path(s).expanduser() for s in raw.get("sources", [])]
         api_key = raw.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
+        gemini_key = (
+            raw.get("gemini_api_key")
+            or os.environ.get("GEMINI_API_KEY")
+            or os.environ.get("GEMINI_3_API_KEY", "")
+        )
         return cls(
             sources=sources,
+            embedding_provider=raw.get("embedding_provider", cls.embedding_provider),
             openai_api_key=api_key,
+            gemini_api_key=gemini_key,
             embedding_model=raw.get("embedding_model", cls.embedding_model),
             embedding_dim=raw.get("embedding_dim", cls.embedding_dim),
             chunk_tokens=raw.get("chunk_tokens", cls.chunk_tokens),
@@ -134,7 +145,9 @@ class Config:
     def write(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         lines = [
+            f'embedding_provider = "{self.embedding_provider}"',
             'openai_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
+            'gemini_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
             f'embedding_model = "{self.embedding_model}"',
             f"embedding_dim = {self.embedding_dim}",
             f"chunk_tokens = {self.chunk_tokens}",
@@ -173,3 +186,5 @@ class Config:
         # Persist it to ~/.lbrain/env (chmod 600); _load_env_file() reads it at import.
         if self.openai_api_key:
             _write_env_var("OPENAI_API_KEY", self.openai_api_key)
+        if self.gemini_api_key:
+            _write_env_var("GEMINI_API_KEY", self.gemini_api_key)
