@@ -1,0 +1,69 @@
+"""AMP — Augmented Memory Protocol patterns for LBrain's injection layer.
+
+Implements the genuinely useful parts of the AMP spec (github.com/t8/amp-spec) as
+native LBrain behavior — adopted as conventions, not a hard dependency:
+
+  - Quality GATING  : skip injection for trivial/low-signal queries (Gate 1).
+  - Token BUDGETING : cap injected context to a budget, prioritized by score.
+  - PROVENANCE      : an auditable injection-metadata footer (what entered context).
+
+AMP is transport/storage-agnostic; LBrain is the memory engine beneath it. These
+helpers make our injection layer gated, budgeted, and auditable — on-brand for a
+verifiable "trust layer."
+"""
+from __future__ import annotations
+
+import re
+
+_GREETINGS = {
+    "hi", "hello", "hey", "yo", "sup", "thanks", "thank you", "ty", "ok", "okay",
+    "cool", "nice", "lol", "yes", "no", "yep", "nope", "got it", "great", "perfect",
+}
+_STOP = set(
+    "the a an of and or to in on for with is are was were be do does did how what "
+    "why when who which that this it's its you i we they me my our your".split()
+)
+
+
+def gate(query: str, min_chars: int = 3, min_content_words: int = 1) -> tuple[bool, str]:
+    """AMP Gate 1 (rule-based, ~0ms): should memory be injected for this query at all?
+
+    Returns (proceed, reason). Content-driven, NOT length-driven — a short but real
+    query ("UDL terms", "the verifier") must pass; only greetings, empties, and zero-content
+    strings are gated. Conservative by design: when unsure, it proceeds.
+    """
+    q = (query or "").strip()
+    if len(q) < min_chars:
+        return False, "empty/near-empty query"
+    low = q.lower().strip(" .!?")
+    if low in _GREETINGS:
+        return False, "greeting/acknowledgement"
+    content = [w for w in re.findall(r"[a-z0-9]{3,}", low) if w not in _STOP]
+    if len(content) < min_content_words:
+        return False, "no content terms"
+    return True, ""
+
+
+def budget(hits, max_chars: int, per_chunk_chars: int):
+    """AMP token budgeting: keep the highest-scored hits whose previews fit the budget.
+
+    `hits` arrive score-sorted. Returns (kept_hits, used_chars). max_chars=0 → unbudgeted.
+    """
+    kept, used = [], 0
+    for h in hits:
+        prev_len = min(len(h.text.strip()), per_chunk_chars)
+        if max_chars and kept and used + prev_len > max_chars:
+            break
+        kept.append(h)
+        used += prev_len
+    return kept, used
+
+
+def provenance(kept, total: int, used_chars: int, budget_chars: int, strategy: str = "tool") -> str:
+    """AMP provenance: a one-line, auditable injection-metadata footer."""
+    scores = [h.score for h in kept]
+    rng = f"{min(scores):.3f}–{max(scores):.3f}" if scores else "—"
+    srcs = len({h.rel_path for h in kept})
+    bud = f"{used_chars}/{budget_chars} chars" if budget_chars else f"{used_chars} chars (unbudgeted)"
+    return (f"[AMP] strategy={strategy} · injected {len(kept)}/{total} hits "
+            f"from {srcs} source(s) · budget {bud} · score {rng}")

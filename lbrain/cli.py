@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 
 from . import __version__
+from . import amp
 from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import EmbedClient, make_embedder
 from .index import chunk as chunk_doc
@@ -224,20 +225,27 @@ def embed(stale: bool, batch: int):
 def query(query: str, k: int, doc_type: str | None, priority: bool, no_prime: bool):
     """Semantic + keyword hybrid search across the brain."""
     cfg = Config.load()
+    if getattr(cfg, "amp_gating", True):
+        ok, reason = amp.gate(query, getattr(cfg, "amp_min_chars", 12))
+        if not ok:
+            click.secho(f"[AMP gate] no memory injected — {reason}.", fg="yellow")
+            return
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = make_embedder(cfg)
 
     t0 = time.time()
     hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority)
     dt_ms = (time.time() - t0) * 1000
+    kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
 
     if not no_prime:
-        preamble = cognitive_nutrition_preamble(query, hits)
+        preamble = cognitive_nutrition_preamble(query, kept)
         if preamble:
             click.echo(preamble)
 
-    click.secho(f"--- {len(hits)} hits ({dt_ms:.0f} ms) ---\n", fg="cyan")
-    for i, h in enumerate(hits, 1):
+    label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
+    click.secho(f"--- {label} ({dt_ms:.0f} ms) ---\n", fg="cyan")
+    for i, h in enumerate(kept, 1):
         prefix = "★" if h.is_priority else " "
         click.secho(
             f"{prefix} [{i}] {h.title}  ({h.score:.3f})", fg="yellow"
@@ -245,9 +253,11 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, no_prime: bo
         click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
         if h.doc_type:
             click.echo(f"   type={h.doc_type}  v={h.vector_score:.2f}  kw={h.keyword_score:.2f}  boosts={h.boosts}")
-        text_preview = h.text.strip().replace("\n", " ")[:240]
+        text_preview = h.text.strip().replace("\n", " ")[:getattr(cfg, "amp_per_chunk_chars", 360)]
         click.echo(f"   {text_preview}\n")
 
+    if getattr(cfg, "amp_provenance", True):
+        click.secho(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)), fg="cyan")
     embedder.close()
     store.close()
 
