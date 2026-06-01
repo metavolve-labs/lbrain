@@ -69,6 +69,7 @@ class GeminiEmbedClient:
         model: str = "gemini-embedding-001",
         dim: int = 1536,
         task_type: str = "SEMANTIC_SIMILARITY",
+        base_url: str = GEMINI_BASE,
     ):
         if not api_key:
             api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_3_API_KEY", "")
@@ -81,11 +82,12 @@ class GeminiEmbedClient:
         self.model = model if model.startswith("models/") else f"models/{model}"
         self.dim = dim
         self.task_type = task_type
+        self.base_url = (base_url or GEMINI_BASE).rstrip("/")
         self._client = httpx.Client(timeout=60.0)
 
     def embed(self, texts: list[str], batch_size: int = 100) -> list[bytes]:
         out: list[bytes] = []
-        url = f"{GEMINI_BASE}/{self.model}:batchEmbedContents"
+        url = f"{self.base_url}/{self.model}:batchEmbedContents"
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
             reqs = [
@@ -120,5 +122,8 @@ def make_embedder(cfg):
         model = cfg.embedding_model or "gemini-embedding-001"
         if model.startswith("text-embedding"):  # stale OpenAI default in config
             model = "gemini-embedding-001"
-        return GeminiEmbedClient(cfg.gemini_api_key, model, cfg.embedding_dim)
+        return GeminiEmbedClient(
+            cfg.gemini_api_key, model, cfg.embedding_dim,
+            base_url=getattr(cfg, "gemini_base_url", GEMINI_BASE),
+        )
     return EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)

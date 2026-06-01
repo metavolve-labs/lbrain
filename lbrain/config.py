@@ -66,6 +66,7 @@ class Config:
     embedding_provider: str = "openai"  # "openai" | "gemini" (GCP-native)
     openai_api_key: str = ""
     gemini_api_key: str = ""
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"  # override → proxy/self-host
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     chunk_tokens: int = 512
@@ -102,6 +103,7 @@ class Config:
                 openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
                 gemini_api_key=os.environ.get("GEMINI_API_KEY")
                 or os.environ.get("GEMINI_3_API_KEY", ""),
+                gemini_base_url=os.environ.get("GEMINI_BASE_URL", cls.gemini_base_url),
             )
         raw = tomllib.loads(CONFIG_PATH.read_text())
         sources = [Path(s).expanduser() for s in raw.get("sources", [])]
@@ -116,6 +118,9 @@ class Config:
             embedding_provider=raw.get("embedding_provider", cls.embedding_provider),
             openai_api_key=api_key,
             gemini_api_key=gemini_key,
+            gemini_base_url=raw.get("gemini_base_url")
+            or os.environ.get("GEMINI_BASE_URL")
+            or cls.gemini_base_url,
             embedding_model=raw.get("embedding_model", cls.embedding_model),
             embedding_dim=raw.get("embedding_dim", cls.embedding_dim),
             chunk_tokens=raw.get("chunk_tokens", cls.chunk_tokens),
@@ -148,6 +153,7 @@ class Config:
             f'embedding_provider = "{self.embedding_provider}"',
             'openai_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
             'gemini_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
+            f'gemini_base_url = "{self.gemini_base_url}"',
             f'embedding_model = "{self.embedding_model}"',
             f"embedding_dim = {self.embedding_dim}",
             f"chunk_tokens = {self.chunk_tokens}",

@@ -17,6 +17,7 @@ lbrain stats                                      # confirm: docs / 100% coverag
 ```
 
 - **Gemini-native by default.** Get the user a key from Google AI Studio; it's written to `~/.lbrain/env` (chmod 600), never to plaintext config. (`--provider openai --api-key …` is supported but not the default.)
+- **Key options** — see [`docs/KEYS.md`](docs/KEYS.md). Default is bring-your-own-key (fully private). A complimentary/operator proxy or a corporate gateway is supported via `lbrain init --api-base <url> --gemini-key <token>` (text transits the proxy — disclose that; sovereignty-sensitive users should BYOK).
 - If the user has no lairs yet, **seed from their repos** (see §3) — don't make them write docs by hand.
 
 **Wire the MCP server** (so you can query memory mid-conversation) — register `lbrain mcp` as an MCP stdio server in the host (Claude Code, etc.). Then prefer the MCP tools `lair_query` / `lair_search` before grep/Read when asking "have we decided/discussed/built this before?"

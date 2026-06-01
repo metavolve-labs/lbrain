@@ -34,6 +34,7 @@ def main():
               help="Embedding provider (default: gemini, GCP-native, no third-party lock-in)")
 @click.option("--gemini-key", envvar="GEMINI_API_KEY", default=None, help="Gemini API key (provider=gemini)")
 @click.option("--api-key", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (provider=openai)")
+@click.option("--api-base", default=None, help="Override the Gemini base URL (point at a proxy / self-hosted gateway)")
 @click.option(
     "--source",
     "sources",
@@ -41,7 +42,7 @@ def main():
     type=click.Path(),
     help="Directory to index (repeatable)",
 )
-def init(provider: str, gemini_key: str, api_key: str, sources: tuple[str, ...]):
+def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: tuple[str, ...]):
     """Initialize LBrain config + DB (Gemini-native by default).
 
     Out-of-the-box: `lbrain init --gemini-key <KEY> --source ./docs --source ./notes`
@@ -49,6 +50,8 @@ def init(provider: str, gemini_key: str, api_key: str, sources: tuple[str, ...])
     """
     cfg = Config.load()
     cfg.embedding_provider = provider
+    if api_base:
+        cfg.gemini_base_url = api_base.rstrip("/")
     if provider == "gemini":
         cfg.embedding_model = "gemini-embedding-001"
         if gemini_key:
