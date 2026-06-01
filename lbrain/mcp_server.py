@@ -14,8 +14,9 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
+from . import amp
 from .config import Config
-from .embed import EmbedClient
+from .embed import EmbedClient, make_embedder
 from .lair_protocol import (
     cognitive_nutrition_preamble,
     detect_anti_pattern,
@@ -40,21 +41,29 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
     Returns the Cognitive Nutrition preamble (if any triggers fire) plus formatted hits.
     """
     cfg = Config.load()
+    if getattr(cfg, "amp_gating", True):
+        ok, reason = amp.gate(query, getattr(cfg, "amp_min_chars", 12))
+        if not ok:
+            return f"[AMP gate] no memory injected — {reason}."
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    embedder = make_embedder(cfg)
     try:
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority_only)
+        kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
         out = []
-        preamble = cognitive_nutrition_preamble(query, hits)
+        preamble = cognitive_nutrition_preamble(query, kept)
         if preamble:
             out.append(preamble)
-        out.append(f"--- {len(hits)} hits ---\n")
-        for i, h in enumerate(hits, 1):
+        label = f"{len(kept)} of {len(hits)} hits (AMP-budgeted)" if len(kept) < len(hits) else f"{len(hits)} hits"
+        out.append(f"--- {label} ---\n")
+        for i, h in enumerate(kept, 1):
             prefix = "★ " if h.is_priority else "  "
             out.append(f"{prefix}[{i}] {h.title}  (score={h.score:.3f})")
             out.append(f"    {h.rel_path} :: chunk {h.chunk_idx}  type={h.doc_type or '?'}")
-            preview = h.text.strip().replace("\n", " ")[:300]
+            preview = h.text.strip().replace("\n", " ")[:getattr(cfg, "amp_per_chunk_chars", 360)]
             out.append(f"    {preview}\n")
+        if getattr(cfg, "amp_provenance", True):
+            out.append(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)))
         return "\n".join(out)
     finally:
         embedder.close()
@@ -108,7 +117,7 @@ def lair_check_action(action_text: str) -> str:
     """
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    embedder = make_embedder(cfg)
     try:
         hits = search(cfg, store, embedder, action_text, k=8, doc_type="feedback")
         warnings = detect_anti_pattern(action_text, hits)

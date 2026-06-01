@@ -94,6 +94,12 @@ class Config:
     # --- consolidation layer (Tier 3) — dense summary memories ---
     use_summaries: bool = False  # surface the most relevant dense abstraction ahead of fragments
     summary_max_dist: float = 0.55  # only surface a summary this cosine-close to the query
+    # --- AMP (Augmented Memory Protocol) injection layer — gating, budgeting, provenance ---
+    amp_gating: bool = True  # skip injection for trivial/low-signal queries (Gate 1)
+    amp_min_chars: int = 3  # gate only empty/near-empty queries (content-driven, not length)
+    amp_budget_chars: int = 6000  # injection budget (~1.5k tokens); 0 = unbudgeted
+    amp_per_chunk_chars: int = 360  # max preview chars per injected hit
+    amp_provenance: bool = True  # append an auditable injection-metadata footer
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -144,6 +150,11 @@ class Config:
             rerank_top_n=raw.get("rerank_top_n", cls.rerank_top_n),
             use_summaries=raw.get("use_summaries", cls.use_summaries),
             summary_max_dist=raw.get("summary_max_dist", cls.summary_max_dist),
+            amp_gating=raw.get("amp_gating", cls.amp_gating),
+            amp_min_chars=raw.get("amp_min_chars", cls.amp_min_chars),
+            amp_budget_chars=raw.get("amp_budget_chars", cls.amp_budget_chars),
+            amp_per_chunk_chars=raw.get("amp_per_chunk_chars", cls.amp_per_chunk_chars),
+            amp_provenance=raw.get("amp_provenance", cls.amp_provenance),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -177,6 +188,11 @@ class Config:
             f"rerank_top_n = {self.rerank_top_n}",
             f"use_summaries = {str(self.use_summaries).lower()}",
             f"summary_max_dist = {self.summary_max_dist}",
+            f"amp_gating = {str(self.amp_gating).lower()}",
+            f"amp_min_chars = {self.amp_min_chars}",
+            f"amp_budget_chars = {self.amp_budget_chars}",
+            f"amp_per_chunk_chars = {self.amp_per_chunk_chars}",
+            f"amp_provenance = {str(self.amp_provenance).lower()}",
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]
