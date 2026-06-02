@@ -243,6 +243,10 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, no_prime: bo
         if preamble:
             click.echo(preamble)
 
+    core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
+    if core:
+        click.secho(core, fg="green")
+
     label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
     click.secho(f"--- {label} ({dt_ms:.0f} ms) ---\n", fg="cyan")
     for i, h in enumerate(kept, 1):

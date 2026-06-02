@@ -59,6 +59,30 @@ def budget(hits, max_chars: int, per_chunk_chars: int):
     return kept, used
 
 
+def core_block(path: str, max_chars: int = 900) -> str:
+    """Letta-style always-on 'core memory': a curated durable-context block injected
+    ahead of retrieved hits, so the essentials are always present regardless of whether
+    a query happens to match them. Where AMP gates/budgets the *episodic* recall, this
+    is the *semantic* baseline — the always-resident facts (who/what/current-state).
+
+    `path` is a markdown file the user/agent curates (empty/missing → no-op, returns "").
+    Truncates on a line boundary to stay within `max_chars`.
+    """
+    import os
+
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        text = open(path, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    if not text:
+        return ""
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit("\n", 1)[0].rstrip() + "\n  …"
+    return "🧠 Core memory (always-on):\n" + text + "\n"
+
+
 def provenance(kept, total: int, used_chars: int, budget_chars: int, strategy: str = "tool") -> str:
     """AMP provenance: a one-line, auditable injection-metadata footer."""
     scores = [h.score for h in kept]

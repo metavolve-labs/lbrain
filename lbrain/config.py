@@ -100,6 +100,9 @@ class Config:
     amp_budget_chars: int = 6000  # injection budget (~1.5k tokens); 0 = unbudgeted
     amp_per_chunk_chars: int = 360  # max preview chars per injected hit
     amp_provenance: bool = True  # append an auditable injection-metadata footer
+    # --- core memory (Letta-style always-on context) ---
+    core_memory_path: str = ""  # markdown file injected ahead of every query (empty = off)
+    core_memory_chars: int = 900  # budget for the always-on core block
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -155,6 +158,8 @@ class Config:
             amp_budget_chars=raw.get("amp_budget_chars", cls.amp_budget_chars),
             amp_per_chunk_chars=raw.get("amp_per_chunk_chars", cls.amp_per_chunk_chars),
             amp_provenance=raw.get("amp_provenance", cls.amp_provenance),
+            core_memory_path=raw.get("core_memory_path", cls.core_memory_path),
+            core_memory_chars=raw.get("core_memory_chars", cls.core_memory_chars),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -193,6 +198,8 @@ class Config:
             f"amp_budget_chars = {self.amp_budget_chars}",
             f"amp_per_chunk_chars = {self.amp_per_chunk_chars}",
             f"amp_provenance = {str(self.amp_provenance).lower()}",
+            f'core_memory_path = "{self.core_memory_path}"',
+            f"core_memory_chars = {self.core_memory_chars}",
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]

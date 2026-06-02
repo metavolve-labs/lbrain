@@ -54,6 +54,9 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
         preamble = cognitive_nutrition_preamble(query, kept)
         if preamble:
             out.append(preamble)
+        core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
+        if core:
+            out.append(core)
         label = f"{len(kept)} of {len(hits)} hits (AMP-budgeted)" if len(kept) < len(hits) else f"{len(hits)} hits"
         out.append(f"--- {label} ---\n")
         for i, h in enumerate(kept, 1):
