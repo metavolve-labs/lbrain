@@ -103,6 +103,9 @@ class Config:
     # --- core memory (Letta-style always-on context) ---
     core_memory_path: str = ""  # markdown file injected ahead of every query (empty = off)
     core_memory_chars: int = 900  # budget for the always-on core block
+    # --- supersession-aware retrieval (Zep-inspired) — bury superseded, surface live truth ---
+    supersede_aware: bool = True  # de-rank docs another doc explicitly supersedes
+    supersede_penalty: float = 0.25  # multiplicative score penalty for a superseded doc
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -160,6 +163,8 @@ class Config:
             amp_provenance=raw.get("amp_provenance", cls.amp_provenance),
             core_memory_path=raw.get("core_memory_path", cls.core_memory_path),
             core_memory_chars=raw.get("core_memory_chars", cls.core_memory_chars),
+            supersede_aware=raw.get("supersede_aware", cls.supersede_aware),
+            supersede_penalty=raw.get("supersede_penalty", cls.supersede_penalty),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -200,6 +205,8 @@ class Config:
             f"amp_provenance = {str(self.amp_provenance).lower()}",
             f'core_memory_path = "{self.core_memory_path}"',
             f"core_memory_chars = {self.core_memory_chars}",
+            f"supersede_aware = {str(self.supersede_aware).lower()}",
+            f"supersede_penalty = {self.supersede_penalty}",
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]

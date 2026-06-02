@@ -12,6 +12,8 @@ import tiktoken
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
+# A line that declares this doc replaces another, e.g. "**Supersedes:** [[slug]]".
+SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*(.*)$")
 ENCODER = tiktoken.get_encoding("cl100k_base")
 
 
@@ -23,6 +25,7 @@ class Doc:
     body: str
     metadata: dict
     wikilinks: list[str] = field(default_factory=list)
+    supersedes: list[str] = field(default_factory=list)  # slugs this doc replaces
     doc_hash: str = ""
     mtime: float = 0.0
     is_priority: bool = False
@@ -65,6 +68,19 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
 
     title = meta.get("name") or _first_header(body) or path.stem
     wikilinks = list({m.group(1).strip() for m in WIKILINK_RE.finditer(body)})
+    # Supersession — slugs this doc declares it replaces. Sources: frontmatter
+    # `supersedes:` (string or list) and/or a body line `**Supersedes:** [[slug]]`.
+    # Drives supersede-aware retrieval: the named docs are buried so the live
+    # truth surfaces, while the originals stay indexed for provenance.
+    supersedes: list[str] = []
+    fm_sup = meta.get("supersedes")
+    if isinstance(fm_sup, str):
+        supersedes.extend(WIKILINK_RE.findall(fm_sup) or [fm_sup])
+    elif isinstance(fm_sup, list):
+        supersedes.extend(str(x) for x in fm_sup)
+    for m in SUPERSEDE_RE.finditer(body):
+        supersedes.extend(WIKILINK_RE.findall(m.group(1)))
+    supersedes = sorted({s.strip() for s in supersedes if s and s.strip()})
     doc_type = ""
     if isinstance(meta.get("metadata"), dict):
         doc_type = str(meta["metadata"].get("type", "")) or ""
@@ -82,6 +98,7 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         body=body,
         metadata=meta,
         wikilinks=wikilinks,
+        supersedes=supersedes,
         doc_hash=doc_hash,
         mtime=path.stat().st_mtime,
         is_priority=is_priority,

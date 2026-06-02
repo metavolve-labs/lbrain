@@ -120,6 +120,10 @@ def import_cmd(paths: tuple[str, ...], prune: bool):
         with store.transaction():
             for path in files:
                 doc = parse(path, repo_root=src)
+                # Supersession edges are cheap and resolved at search time, so keep
+                # them current for every doc — even ones whose chunks are unchanged
+                # (a doc can gain/lose a Supersedes marker without re-chunking).
+                store.replace_supersessions(doc)
                 existing_hash = store.get_doc_hash(doc.rel_path)
                 if existing_hash == doc.doc_hash:
                     unchanged_docs += 1

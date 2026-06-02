@@ -44,6 +44,13 @@ CREATE TABLE IF NOT EXISTS wikilinks (
     FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS supersessions (
+    src_path TEXT NOT NULL,
+    tgt_slug TEXT NOT NULL,
+    PRIMARY KEY (src_path, tgt_slug),
+    FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS associations (
     a_path   TEXT NOT NULL,
     b_path   TEXT NOT NULL,
@@ -63,6 +70,7 @@ CREATE TABLE IF NOT EXISTS summaries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_wikilinks_tgt ON wikilinks(tgt_slug);
+CREATE INDEX IF NOT EXISTS idx_supersessions_tgt ON supersessions(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
 CREATE INDEX IF NOT EXISTS idx_assoc_a ON associations(a_path);
 CREATE INDEX IF NOT EXISTS idx_assoc_b ON associations(b_path);
@@ -224,6 +232,7 @@ class Store:
         for rel in gone:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
             self.db.execute("DELETE FROM associations WHERE a_path = ? OR b_path = ?", (rel, rel))
             self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
         return gone
@@ -235,6 +244,25 @@ class Store:
                 "INSERT OR IGNORE INTO wikilinks (src_path, tgt_slug) VALUES (?, ?)",
                 (doc.rel_path, tgt),
             )
+
+    def replace_supersessions(self, doc: Doc) -> None:
+        """Record the slugs this doc declares it supersedes. Idempotent per doc
+        (mirrors replace_wikilinks) so it stays correct on re-import even when the
+        doc's chunks are unchanged — and clears the edge if the marker is removed."""
+        self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (doc.rel_path,))
+        for tgt in getattr(doc, "supersedes", []):
+            self.db.execute(
+                "INSERT OR IGNORE INTO supersessions (src_path, tgt_slug) VALUES (?, ?)",
+                (doc.rel_path, tgt),
+            )
+
+    def superseded_slugs(self) -> set[str]:
+        """Slugs some other doc explicitly supersedes — buried at retrieval so the
+        live truth surfaces while the original stays indexed for provenance."""
+        return {
+            r["tgt_slug"]
+            for r in self.db.execute("SELECT DISTINCT tgt_slug FROM supersessions")
+        }
 
     def insert_chunks(self, chunks: list[Chunk]) -> list[int]:
         ids: list[int] = []

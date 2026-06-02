@@ -139,6 +139,21 @@ def search(
                 h.score *= lift
                 h.boosts["wikilink_inbound"] = lift
 
+    # 5.5 Supersession-aware de-ranking (Zep-inspired). A doc that another doc
+    #     explicitly supersedes is BURIED, not deleted — the live truth surfaces
+    #     while the original stays retrievable for provenance/audit. This turns
+    #     the "amendable, supersede-not-overwrite" convention into actual ranking
+    #     behavior: "permanence at the substrate, selectivity at the surface."
+    if getattr(cfg, "supersede_aware", True) and out:
+        superseded = store.superseded_slugs()
+        if superseded:
+            pen = getattr(cfg, "supersede_penalty", 0.25)
+            for h in out:
+                slug = h.rel_path.rsplit("/", 1)[-1].replace(".md", "")
+                if slug in superseded:
+                    h.score *= pen
+                    h.boosts["superseded"] = pen
+
     # 6. Temporal dynamics — gentle, bounded freshness + salience (Tier 2a).
     #    Priority docs are exempt (canonical lairs never decay). Freshness is a
     #    ± lift around a neutral midpoint so old-but-relevant docs aren't buried;
