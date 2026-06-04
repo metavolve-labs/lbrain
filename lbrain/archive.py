@@ -155,13 +155,44 @@ class ArweaveL1Transport:
         return self._wallet
 
     def put(self, data: bytes, tags: dict[str, str]) -> str:
-        from arweave import Transaction  # imported lazily — optional dep at runtime
+        # Lazily imported — optional dep at runtime.
+        import io
+        from arweave import Transaction
+        from arweave.transaction_uploader import get_uploader
 
         tx = Transaction(self.wallet, data=data)
         for k, v in tags.items():
             tx.add_tag(k, str(v))
+        # The uploader streams merkle chunk proofs computed from the tx's file_handler
+        # over the RAW bytes (self.data is base64-encoded, so it can't be used here).
+        # An in-memory data= tx has no handler, so point one at the bytes and prepare
+        # the chunks BEFORE signing — sign() commits to the data_root that
+        # prepare_chunks() sets, so the order matters.
+        tx.file_handler = io.BytesIO(data)
+        tx.prepare_chunks()
         tx.sign()
-        tx.send()
+
+        # CHUNKED upload, not a single tx.send(): tx.send() posts the entire tx —
+        # header AND data — in one request, which 413s once a session crosses the
+        # gateway's body limit (~a few hundred KB). The uploader posts the small
+        # header, then streams the data in 256 KiB chunks (MAX_CHUNKS_IN_BODY=1), so
+        # arbitrarily large sessions upload cleanly.
+        #
+        # It also closes the "ghost txid" hole: upload_chunk() retries transient
+        # errors and RAISES on persistent failure, and we re-check is_complete before
+        # returning — so a txid is only ever returned for data that actually landed
+        # on the network, never for a failed/rejected upload.
+        uploader = get_uploader(tx, io.BytesIO(data))
+        guard = uploader.total_chunks + 16  # bound the loop; ~12 chunks for a 3 MB session
+        while not uploader.is_complete and guard > 0:
+            uploader.upload_chunk()
+            guard -= 1
+        if not uploader.is_complete:
+            raise RuntimeError(
+                "Arweave upload did not complete "
+                f"({uploader.uploaded_chunks}/{uploader.total_chunks} chunks, "
+                f"last HTTP {uploader.last_response_status} {uploader.last_response_error})"
+            )
         return tx.id
 
     def get(self, txid: str) -> bytes:
