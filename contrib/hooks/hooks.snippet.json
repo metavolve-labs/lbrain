@@ -1,0 +1,19 @@
+{
+  "_comment": "LBrain Tier-2 auto-capture. Merge into ~/.claude/settings.json under \"hooks\". Replace ABSOLUTE_PATH with the real path to lbrain-capture.sh (must be chmod +x). SessionEnd fires on session close; PreCompact adds a checkpoint before context compaction. Both are idempotent + local-only, so they cost nothing and never double-archive.",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "ABSOLUTE_PATH/contrib/hooks/lbrain-capture.sh" }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          { "type": "command", "command": "ABSOLUTE_PATH/contrib/hooks/lbrain-capture.sh" }
+        ]
+      }
+    ]
+  }
+}

@@ -69,6 +69,22 @@ CREATE TABLE IF NOT EXISTS summaries (
     embedded         INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS archives (
+    archive_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    txid          TEXT NOT NULL UNIQUE,
+    snapshot_txid TEXT NOT NULL DEFAULT '',
+    namespace     TEXT NOT NULL DEFAULT 'private',
+    title         TEXT NOT NULL DEFAULT '',
+    snapshot      TEXT NOT NULL DEFAULT '',
+    tags          TEXT NOT NULL DEFAULT '{}',
+    n_bytes       INTEGER NOT NULL DEFAULT 0,
+    created       REAL NOT NULL DEFAULT 0,
+    transport     TEXT NOT NULL DEFAULT 'local',
+    source_hash   TEXT NOT NULL DEFAULT '',
+    shredded      INTEGER NOT NULL DEFAULT 0,
+    embedded      INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_wikilinks_tgt ON wikilinks(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_supersessions_tgt ON supersessions(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
@@ -97,6 +113,11 @@ class Store:
             self.db.execute("ALTER TABLE docs ADD COLUMN last_retrieved REAL NOT NULL DEFAULT 0")
         if "retrieval_count" not in doc_cols:
             self.db.execute("ALTER TABLE docs ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0")
+        arch_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(archives)")}
+        if arch_cols and "source_hash" not in arch_cols:
+            self.db.execute("ALTER TABLE archives ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
+        if arch_cols:  # column now guaranteed (fresh schema or just-migrated) — index idempotently
+            self.db.execute("CREATE INDEX IF NOT EXISTS idx_archives_source ON archives(source_hash)")
         self.db.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(embedding float[{embedding_dim}])"
         )
@@ -112,6 +133,15 @@ class Store:
         self.db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS fts_summaries USING fts5("
             "text, title UNINDEXED, tokenize='porter unicode61')"
+        )
+        # Tier-2 archive layer — snapshots of permanent encrypted episodic records.
+        # Siloed from the main retrieval path (its own vec/FTS); reached via deep-recall.
+        self.db.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_archives USING vec0(embedding float[{embedding_dim}])"
+        )
+        self.db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_archives USING fts5("
+            "snapshot, title UNINDEXED, txid UNINDEXED, tokenize='porter unicode61')"
         )
         self.db.commit()
 
@@ -360,6 +390,120 @@ class Store:
             "FROM summaries ORDER BY n_sources DESC"
         ).fetchall()
 
+    # ---------- Tier-2 archive layer (permanent verifiable episodic memory) ----------
+
+    def get_archive_by_source(self, source_hash: str):
+        """Find a live (non-shredded) archive by the stable hash of its PLAINTEXT
+        content. Ciphertext is non-deterministic (random DEK/nonce per encrypt), so
+        idempotent capture must dedup on the source hash, not the txid."""
+        if not source_hash:
+            return None
+        return self.db.execute(
+            "SELECT * FROM archives WHERE source_hash = ? AND shredded = 0 LIMIT 1",
+            (source_hash,),
+        ).fetchone()
+
+    def insert_archive(self, *, txid, namespace, title, snapshot, tags, n_bytes,
+                       created, transport, snapshot_txid="", source_hash="") -> int:
+        """Mirror a permanent archive's snapshot into the index (the card-catalog
+        entry). Idempotent on txid — re-archiving identical content updates in place."""
+        import json
+
+        cur = self.db.execute(
+            "INSERT INTO archives (txid, snapshot_txid, namespace, title, snapshot, tags, "
+            "n_bytes, created, transport, source_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(txid) DO UPDATE SET snapshot=excluded.snapshot, title=excluded.title, "
+            "tags=excluded.tags, namespace=excluded.namespace, snapshot_txid=excluded.snapshot_txid, "
+            "source_hash=excluded.source_hash, shredded=0, embedded=0",
+            (txid, snapshot_txid, namespace, title, snapshot,
+             json.dumps(tags), n_bytes, created, transport, source_hash),
+        )
+        # Refresh the FTS row for this txid.
+        self.db.execute("DELETE FROM fts_archives WHERE txid = ?", (txid,))
+        self.db.execute(
+            "INSERT INTO fts_archives (rowid, snapshot, title, txid) VALUES "
+            "((SELECT archive_id FROM archives WHERE txid = ?), ?, ?, ?)",
+            (txid, snapshot, title, txid),
+        )
+        self.db.commit()
+        return cur.lastrowid or self.db.execute(
+            "SELECT archive_id FROM archives WHERE txid = ?", (txid,)
+        ).fetchone()["archive_id"]
+
+    def write_archive_embedding(self, txid: str, blob: bytes) -> None:
+        row = self.db.execute(
+            "SELECT archive_id FROM archives WHERE txid = ?", (txid,)
+        ).fetchone()
+        if not row:
+            return
+        aid = row["archive_id"]
+        self.db.execute("DELETE FROM vec_archives WHERE rowid = ?", (aid,))
+        self.db.execute("INSERT INTO vec_archives (rowid, embedding) VALUES (?, ?)", (aid, blob))
+        self.db.execute("UPDATE archives SET embedded = 1 WHERE archive_id = ?", (aid,))
+        self.db.commit()
+
+    def search_archives(self, q_vec: bytes, k: int = 5, namespace: str | None = None) -> list:
+        """Semantic recall over archive snapshots (the read surface of Tier-2).
+        Shredded archives are excluded — the snapshot survives but the record is gone."""
+        rows = self.db.execute(
+            "SELECT a.archive_id, a.txid, a.title, a.snapshot, a.namespace, a.created, "
+            "       a.n_bytes, a.shredded, a.transport, "
+            "       vec_distance_cosine(v.embedding, ?) AS dist "
+            "FROM vec_archives v JOIN archives a ON a.archive_id = v.rowid "
+            "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist",
+            (q_vec, q_vec, max(k * 3, 15)),
+        ).fetchall()
+        out = []
+        for r in rows:
+            if r["shredded"]:
+                continue
+            if namespace and r["namespace"] != namespace:
+                continue
+            out.append(r)
+            if len(out) >= k:
+                break
+        return out
+
+    def get_archive(self, txid: str):
+        return self.db.execute("SELECT * FROM archives WHERE txid = ?", (txid,)).fetchone()
+
+    def mark_archive_shredded(self, txid: str, purge_snapshot: bool = True) -> None:
+        """Mark an archive crypto-shredded (its key has been destroyed).
+
+        With ``purge_snapshot`` (the default — "hard" shred), also erase the local
+        cleartext snapshot and its FTS + vector rows, so NOTHING readable about the
+        record survives locally — only an audit stub (txid, title label, dates, the
+        shredded flag). Otherwise ("soft" shred) the snapshot is kept for browsing
+        while the on-chain payload is already unrecoverable (key gone)."""
+        row = self.db.execute(
+            "SELECT archive_id FROM archives WHERE txid = ?", (txid,)
+        ).fetchone()
+        if not row:
+            return
+        aid = row["archive_id"]
+        self.db.execute("DELETE FROM vec_archives WHERE rowid = ?", (aid,))
+        if purge_snapshot:
+            self.db.execute("DELETE FROM fts_archives WHERE rowid = ?", (aid,))
+            self.db.execute(
+                "UPDATE archives SET shredded = 1, embedded = 0, snapshot = '', tags = '{}' "
+                "WHERE archive_id = ?",
+                (aid,),
+            )
+        else:
+            self.db.execute("UPDATE archives SET shredded = 1 WHERE archive_id = ?", (aid,))
+        self.db.commit()
+
+    def list_archives(self, namespace: str | None = None) -> list:
+        if namespace:
+            return self.db.execute(
+                "SELECT txid, title, namespace, n_bytes, created, shredded, transport "
+                "FROM archives WHERE namespace = ? ORDER BY created DESC", (namespace,)
+            ).fetchall()
+        return self.db.execute(
+            "SELECT txid, title, namespace, n_bytes, created, shredded, transport "
+            "FROM archives ORDER BY created DESC"
+        ).fetchall()
+
     # ---------- counts / health ----------
 
     def stats(self) -> dict:
@@ -372,6 +516,9 @@ class Store:
         out["wikilinks"] = self.db.execute("SELECT COUNT(*) AS n FROM wikilinks").fetchone()["n"]
         out["priority_docs"] = self.db.execute(
             "SELECT COUNT(*) AS n FROM docs WHERE is_priority = 1"
+        ).fetchone()["n"]
+        out["archives"] = self.db.execute(
+            "SELECT COUNT(*) AS n FROM archives WHERE shredded = 0"
         ).fetchone()["n"]
         return out
 

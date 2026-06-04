@@ -60,6 +60,30 @@ def _write_env_var(key: str, value: str) -> None:
 _load_env_file()
 
 
+def archive_passphrase() -> str:
+    """The Tier-2 archive passphrase. Sourced from ~/.lbrain/env (chmod 600), NEVER
+    config.toml. The env value may be the literal passphrase OR a runtime reference
+    ``gcp-secret:<project>/<secret>`` (resolved from GCP Secret Manager, like the wallet)
+    so the actual secret lives only in IAM-controlled storage and the local file holds a
+    pointer. Empty if unset; callers prompt interactively."""
+    val = os.environ.get("LBRAIN_ARCHIVE_PASSPHRASE", "").strip()
+    if val.startswith(("gcp-secret:", "gcp:")):
+        from .archive import _fetch_gcp_secret  # lazy: avoids import cycle
+
+        body = val.split(":", 1)[1]
+        if "/" not in body:
+            return ""
+        project, secret = body.split("/", 1)
+        return _fetch_gcp_secret(project, secret).strip()
+    return val
+
+
+def set_archive_passphrase(passphrase: str) -> None:
+    """Persist the archive passphrase to the 600 env file (same secret pattern as keys)."""
+    _write_env_var("LBRAIN_ARCHIVE_PASSPHRASE", passphrase)
+    os.environ["LBRAIN_ARCHIVE_PASSPHRASE"] = passphrase
+
+
 @dataclass
 class Config:
     sources: list[Path] = field(default_factory=list)
@@ -106,6 +130,13 @@ class Config:
     # --- supersession-aware retrieval (Zep-inspired) — bury superseded, surface live truth ---
     supersede_aware: bool = True  # de-rank docs another doc explicitly supersedes
     supersede_penalty: float = 0.25  # multiplicative score penalty for a superseded doc
+    # --- Tier 2: permanent verifiable archive (Arweave substrate) ---
+    arweave_enabled: bool = False  # opt-in to real permaweb writes (else offline local store)
+    arweave_transport: str = "local"  # "local" (offline, content-addressed) | "arweave"/"l1"
+    arweave_wallet_path: str = ""  # JWK path; secret routed to ~/.lbrain/env, not plaintext
+    arweave_gateway: str = "https://arweave.net"  # fetch/GraphQL gateway
+    turbo_endpoint: str = "https://turbo.ardrive.io"  # ar.io Turbo (v2 bundled uploads)
+    archive_namespace: str = "private"  # default silo: private working/research memory
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
     @classmethod
@@ -165,6 +196,13 @@ class Config:
             core_memory_chars=raw.get("core_memory_chars", cls.core_memory_chars),
             supersede_aware=raw.get("supersede_aware", cls.supersede_aware),
             supersede_penalty=raw.get("supersede_penalty", cls.supersede_penalty),
+            arweave_enabled=raw.get("arweave_enabled", cls.arweave_enabled),
+            arweave_transport=raw.get("arweave_transport", cls.arweave_transport),
+            arweave_wallet_path=raw.get("arweave_wallet_path")
+            or os.environ.get("LBRAIN_ARWEAVE_WALLET", cls.arweave_wallet_path),
+            arweave_gateway=raw.get("arweave_gateway", cls.arweave_gateway),
+            turbo_endpoint=raw.get("turbo_endpoint", cls.turbo_endpoint),
+            archive_namespace=raw.get("archive_namespace", cls.archive_namespace),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
 
@@ -207,6 +245,12 @@ class Config:
             f"core_memory_chars = {self.core_memory_chars}",
             f"supersede_aware = {str(self.supersede_aware).lower()}",
             f"supersede_penalty = {self.supersede_penalty}",
+            f"arweave_enabled = {str(self.arweave_enabled).lower()}",
+            f'arweave_transport = "{self.arweave_transport}"',
+            f'arweave_wallet_path = "{self.arweave_wallet_path}"',
+            f'arweave_gateway = "{self.arweave_gateway}"',
+            f'turbo_endpoint = "{self.turbo_endpoint}"',
+            f'archive_namespace = "{self.archive_namespace}"',
             f'db_path = "{self.db_path}"',
             "sources = [",
         ]

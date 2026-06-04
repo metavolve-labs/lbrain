@@ -17,8 +17,12 @@ dependencies = [
     "tiktoken>=0.7",
     "rank-bm25>=0.2.2",
     "mcp>=1.0",
+    "cryptography>=44",  # Tier-2 archive: AES-256-GCM + Argon2id (cryptography 44+ ships Argon2id)
     "tomli>=2.0; python_version < '3.11'",
 ]
+
+[project.optional-dependencies]
+arweave = ["arweave-python-client>=1.0"]  # real permaweb writes (Tier-2 arweave transport)
 
 [project.scripts]
 lbrain = "lbrain.cli:main"

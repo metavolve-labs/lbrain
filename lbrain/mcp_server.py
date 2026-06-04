@@ -5,6 +5,7 @@ Tools surfaced:
 - lair_search    : exact-keyword FTS5 search (no embedding call)
 - lair_protocol_check : "Should I commit this text to a lair?" decision
 - lair_check_action   : cross-check a proposed action against feedback rules
+- lair_deep_recall    : Tier-2 deep-recall over the permanent encrypted episodic archive
 - lair_stats     : brain statistics
 """
 
@@ -133,6 +134,36 @@ def lair_check_action(action_text: str) -> str:
 
 
 @mcp.tool()
+def lair_deep_recall(query: str, k: int = 5, namespace: str | None = None) -> str:
+    """Deep-recall over the Tier-2 permanent archive: semantic search across snapshots of
+    full, encrypted, immutable episodic records (sessions). Returns matching records with
+    their txids — fetch the full decrypted record by txid via the `lbrain retrieve` CLI.
+
+    Args:
+        query: Natural-language description of the episode/session to recall.
+        k: Number of records to surface (default 5).
+        namespace: Optional silo filter (e.g. 'private').
+    """
+    cfg = Config.load()
+    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    embedder = make_embedder(cfg)
+    try:
+        rows = store.search_archives(embedder.embed_one(query), k=k, namespace=namespace)
+        if not rows:
+            return "No archived records matched."
+        out = [f"--- {len(rows)} archived record(s) ---\n"]
+        for i, r in enumerate(rows, 1):
+            out.append(f"[{i}] {r['title']}  (dist={r['dist']:.3f})")
+            out.append(f"    txid {r['txid']}  ·  {r['namespace']}  ·  {r['n_bytes']} bytes")
+            out.append(f"    {r['snapshot'].strip().replace(chr(10), ' ')[:300]}\n")
+        out.append("Fetch a full record: `lbrain retrieve --txid <txid>`")
+        return "\n".join(out)
+    finally:
+        embedder.close()
+        store.close()
+
+
+@mcp.tool()
 def lair_stats() -> str:
     """Return brain statistics: doc count, chunk count, embedding coverage, etc."""
     cfg = Config.load()
@@ -145,7 +176,8 @@ def lair_stats() -> str:
             f"chunks: {s['chunks']}\n"
             f"embedded: {s['embedded']} ({cov:.1f}% coverage)\n"
             f"priority docs: {s['priority_docs']}\n"
-            f"wikilinks: {s['wikilinks']}"
+            f"wikilinks: {s['wikilinks']}\n"
+            f"tier-2 archives: {s.get('archives', 0)}"
         )
     finally:
         store.close()
