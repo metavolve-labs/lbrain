@@ -58,6 +58,13 @@ CREATE TABLE IF NOT EXISTS associations (
     PRIMARY KEY (a_path, b_path)
 );
 
+-- Key/value metadata. Records the embedding fingerprint (dim/model/provider) the
+-- vectors were built with, so a later config change can't silently corrupt the space.
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS summaries (
     summary_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     title            TEXT NOT NULL,
@@ -99,6 +106,15 @@ class Store:
         self.db_path = db_path
         self.embedding_dim = embedding_dim
         self.db = sqlite3.connect(str(db_path))
+        # Concurrency hardening — without these, the long-lived MCP server and a
+        # concurrent CLI/cron writer collide: default rollback journal serializes
+        # readers/writers and the default busy_timeout of 0 raises "database is
+        # locked" instantly. WAL lets a reader coexist with a writer; busy_timeout
+        # makes contenders wait instead of erroring; foreign_keys enforces the
+        # ON DELETE CASCADE the schema already declares.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA foreign_keys=ON")
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
@@ -153,6 +169,53 @@ class Store:
         except Exception:
             self.db.rollback()
             raise
+
+    # ---------- embedding-config fingerprint (silent-corruption guard) ----------
+
+    def get_meta(self, key: str) -> str | None:
+        row = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value) -> None:
+        self.db.execute(
+            "INSERT INTO meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, str(value)),
+        )
+        self.db.commit()
+
+    def embedding_config_status(self, dim: int, model: str, provider: str) -> str:
+        """Compare the live embedding config against the one the stored vectors
+        were built with. Returns 'unset' (no vectors yet), 'match', 'model_changed'
+        (same dim, different model/provider — old vectors live in a different space),
+        or 'dim_changed' (vector width differs — the vec tables must be rebuilt)."""
+        stored_dim = self.get_meta("embedding_dim")
+        if stored_dim is None:
+            return "unset"
+        if int(stored_dim) != int(dim):
+            return "dim_changed"
+        if (self.get_meta("embedding_model"), self.get_meta("embedding_provider")) != (model, provider):
+            return "model_changed"
+        return "match"
+
+    def stamp_embedding_config(self, dim: int, model: str, provider: str) -> None:
+        """Record the fingerprint of the vectors currently in the store."""
+        self.set_meta("embedding_dim", dim)
+        self.set_meta("embedding_model", model)
+        self.set_meta("embedding_provider", provider)
+
+    def reset_vectors(self, dim: int) -> None:
+        """Drop + recreate the vector tables at a new dimension and mark every
+        chunk/summary/archive un-embedded. Required when the embedding dim changes
+        (vec0 column width is fixed at creation); a full re-embed must follow."""
+        for name in ("vec_chunks", "vec_summaries", "vec_archives"):
+            self.db.execute(f"DROP TABLE IF EXISTS {name}")
+            self.db.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{dim}])")
+        self.db.execute("UPDATE chunks SET embedded = 0")
+        self.db.execute("UPDATE summaries SET embedded = 0")
+        self.db.execute("UPDATE archives SET embedded = 0")
+        self.embedding_dim = dim
+        self.db.commit()
 
     # ---------- docs ----------
 
@@ -250,15 +313,36 @@ class Store:
             (rel_path,),
         ).fetchone()
 
-    def prune_missing(self) -> list[str]:
+    def prune_missing(
+        self,
+        source_roots: list | None = None,
+        max_fraction: float = 0.5,
+        force: bool = False,
+    ) -> list[str]:
         """Drop docs whose source file no longer exists on disk — and their
-        chunks, vectors, FTS rows, and wikilinks. (FK cascade does not fire
-        without PRAGMA foreign_keys, and vec_chunks has no FK at all, so we
-        delete every dependent row explicitly.) Returns the pruned rel_paths."""
+        chunks, vectors, FTS rows, and wikilinks. (vec_chunks has no FK, so we
+        delete every dependent row explicitly.) Returns the pruned rel_paths.
+
+        Two safety guards against the catastrophic "an unmounted source dir looks
+        like every file vanished, so nuke the whole index" failure mode:
+          - if any provided source_root is itself missing, prune NOTHING (the mount
+            is gone, not the docs);
+          - refuse to prune more than ``max_fraction`` of the corpus unless ``force``."""
         import os
+
+        if source_roots:
+            for root in source_roots:
+                if not os.path.isdir(str(root)):
+                    return []  # a source root vanished → mount gone, not docs; skip prune
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
         gone = [r["rel_path"] for r in rows if not os.path.exists(r["abs_path"])]
+        if gone and not force and rows and len(gone) / len(rows) > max_fraction:
+            raise RuntimeError(
+                f"prune would remove {len(gone)}/{len(rows)} docs "
+                f"(>{int(max_fraction * 100)}%) — refusing. A source directory is "
+                "probably unmounted. Re-run with --force-prune to override."
+            )
         for rel in gone:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
@@ -326,6 +410,20 @@ class Store:
         return [(r["chunk_id"], r["etext"]) for r in rows]
 
     def write_embeddings(self, chunk_ids: list[int], blobs: list[bytes]) -> None:
+        # Guard against a truncated/short provider response silently embedding
+        # fewer chunks than requested (zip() would otherwise drop the tail with no
+        # error). Both the count and each blob's byte-width must match exactly.
+        if len(chunk_ids) != len(blobs):
+            raise ValueError(
+                f"embedding count mismatch: {len(chunk_ids)} chunks vs {len(blobs)} vectors"
+            )
+        expected = self.embedding_dim * 4  # little-endian f32
+        for cid, blob in zip(chunk_ids, blobs):
+            if len(blob) != expected:
+                raise ValueError(
+                    f"embedding for chunk {cid} is {len(blob)} bytes, expected {expected} "
+                    f"({self.embedding_dim}-dim f32)"
+                )
         # sqlite-vec virtual tables don't support UPSERT; use DELETE+INSERT
         for cid, blob in zip(chunk_ids, blobs):
             self.db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (cid,))
@@ -346,11 +444,12 @@ class Store:
             "JOIN docs d ON d.rel_path = c.rel_path"
         ).fetchall()
 
-    def clear_summaries(self) -> None:
+    def clear_summaries(self, commit: bool = True) -> None:
         self.db.execute("DELETE FROM vec_summaries")
         self.db.execute("DELETE FROM fts_summaries")
         self.db.execute("DELETE FROM summaries")
-        self.db.commit()
+        if commit:
+            self.db.commit()
 
     def insert_summary(self, title, text, source_paths, source_chunk_ids, created) -> int:
         import json
@@ -510,7 +609,15 @@ class Store:
         out = {}
         out["docs"] = self.db.execute("SELECT COUNT(*) AS n FROM docs").fetchone()["n"]
         out["chunks"] = self.db.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
+        # Coverage = chunks with a REAL vector in vec_chunks, not just the
+        # embedded=1 flag. The flag and the vector table can drift (a killed
+        # process between INSERT and UPDATE, a dropped vec table); reporting the
+        # flag would let "100% coverage" lie about missing vectors.
         out["embedded"] = self.db.execute(
+            "SELECT COUNT(*) AS n FROM chunks c "
+            "WHERE EXISTS (SELECT 1 FROM vec_chunks v WHERE v.rowid = c.chunk_id)"
+        ).fetchone()["n"]
+        out["embedded_flagged"] = self.db.execute(
             "SELECT COUNT(*) AS n FROM chunks WHERE embedded = 1"
         ).fetchone()["n"]
         out["wikilinks"] = self.db.execute("SELECT COUNT(*) AS n FROM wikilinks").fetchone()["n"]

@@ -260,7 +260,7 @@ def _llm_snapshot(text: str, key: str, provider: str, model: str | None) -> str:
             model = model or "gemini-2.5-flash"
             r = client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                params={"key": key},
+                headers={"x-goog-api-key": key},  # header, not ?key= — this runs in the capture hook whose stderr is logged
                 json={
                     "systemInstruction": {"parts": [{"text": SNAPSHOT_SYSTEM}]},
                     "contents": [{"role": "user", "parts": [{"text": user}]}],

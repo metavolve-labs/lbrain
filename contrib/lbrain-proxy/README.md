@@ -23,8 +23,13 @@ gcloud run deploy lbrain-proxy \
   --set-env-vars LBRAIN_PROXY_RATE_PER_MIN=120
 ```
 
+`--allow-unauthenticated` removes Cloud Run's IAM gate; the **app-layer token check is
+the gate** (clients authenticate with the tokens you issue). That gate now **fails
+closed** — with `LBRAIN_PROXY_TOKENS` unset the proxy returns `503` to every request
+rather than relaying your real key — so you MUST set tokens for it to serve at all.
+
 - `GEMINI_API_KEY` — the REAL key, injected from Secret Manager (never in the image).
-- `LBRAIN_PROXY_TOKENS` — comma-separated tokens you issue per user (revoke by removing one + redeploy). Empty = open (don't do that in prod).
+- `LBRAIN_PROXY_TOKENS` — comma-separated tokens you issue per user (revoke by removing one + redeploy). **Required** — empty means the proxy fails closed (serves no one). Clients send their token in the `x-goog-api-key` header (LBrain does this automatically).
 - Add a Cloud Run **max-instances** cap + a billing budget alert to bound cost.
 
 ## Issue a token to a user

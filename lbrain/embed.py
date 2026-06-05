@@ -44,8 +44,18 @@ class EmbedClient:
             )
             r.raise_for_status()
             data = r.json()["data"]
+            if len(data) != len(batch):
+                raise RuntimeError(
+                    f"OpenAI returned {len(data)} embeddings for {len(batch)} inputs"
+                )
+            # Responses are not order-guaranteed; align by index before packing.
+            data.sort(key=lambda d: d.get("index", 0))
             for d in data:
                 vec = d["embedding"]
+                if len(vec) != self.dim:
+                    raise RuntimeError(
+                        f"OpenAI returned a {len(vec)}-dim vector, expected {self.dim}"
+                    )
                 out.append(struct.pack(f"<{len(vec)}f", *vec))
         return out
 
@@ -99,10 +109,25 @@ class GeminiEmbedClient:
                 }
                 for t in batch
             ]
-            r = self._client.post(url, params={"key": self.api_key}, json={"requests": reqs})
+            # Key travels in the x-goog-api-key HEADER, never the URL query string:
+            # on an HTTP error httpx's exception message embeds the request URL, so a
+            # ?key= param would leak the live key into any log that records the error
+            # (e.g. the capture hook's stderr redirect).
+            r = self._client.post(
+                url, headers={"x-goog-api-key": self.api_key}, json={"requests": reqs}
+            )
             r.raise_for_status()
-            for e in r.json()["embeddings"]:
+            embs = r.json()["embeddings"]
+            if len(embs) != len(batch):
+                raise RuntimeError(
+                    f"Gemini returned {len(embs)} embeddings for {len(batch)} inputs"
+                )
+            for e in embs:
                 vec = e["values"]
+                if len(vec) != self.dim:
+                    raise RuntimeError(
+                        f"Gemini returned a {len(vec)}-dim vector, expected {self.dim}"
+                    )
                 norm = math.sqrt(sum(x * x for x in vec)) or 1.0
                 vec = [x / norm for x in vec]
                 out.append(struct.pack(f"<{len(vec)}f", *vec))

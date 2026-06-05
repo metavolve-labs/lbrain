@@ -85,7 +85,7 @@ def synthesize(api_key: str, model: str, members, provider: str = "gemini") -> s
         if provider == "gemini":
             r = client.post(
                 f"{GEMINI_BASE}/models/{model}:generateContent",
-                params={"key": api_key},
+                headers={"x-goog-api-key": api_key},  # header, not ?key= — keeps the key out of error/log URLs
                 json={
                     "systemInstruction": {"parts": [{"text": SYNTH_SYSTEM}]},
                     "contents": [{"role": "user", "parts": [{"text": user}]}],
@@ -136,9 +136,13 @@ def consolidate(
     if not clusters:
         return 0
 
-    store.clear_summaries()
+    # Build the entire new summary layer (synthesis + embedding — the failure-prone
+    # network calls) BEFORE touching the live layer. Only once every summary is in
+    # hand do we destroy the old set and write the new one, inside a single
+    # transaction. A failure mid-build leaves the existing summaries fully intact,
+    # instead of wiping them and then crashing with nothing to show.
     now = _time.time()
-    made = 0
+    built = []  # (title, text, paths, cids, blob)
     for i, members in enumerate(clusters, 1):
         paths = sorted({m["rel_path"] for m in members})
         # Skip degenerate clusters that are just one doc talking to itself.
@@ -147,9 +151,16 @@ def consolidate(
         text = synthesize(synth_key, synth_model, members, provider=provider)
         title = _title_for(members)
         cids = [m["chunk_id"] for m in members]
-        sid = store.insert_summary(title, text, paths, cids, now)
-        store.write_summary_embedding(sid, embedder.embed_one(text))
-        made += 1
+        blob = embedder.embed_one(text)
+        built.append((title, text, paths, cids, blob))
         log(f"    [{i}/{len(clusters)}] {title} — {len(members)} fragments across {len(paths)} docs")
-    store.db.commit()
-    return made
+
+    if not built:
+        return 0
+
+    with store.transaction():
+        store.clear_summaries(commit=False)
+        for title, text, paths, cids, blob in built:
+            sid = store.insert_summary(title, text, paths, cids, now)
+            store.write_summary_embedding(sid, blob)
+    return len(built)

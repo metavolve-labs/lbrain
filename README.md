@@ -90,17 +90,27 @@ Tools surfaced: `lair_query`, `lair_search`, `lair_protocol_check`, `lair_check_
 For agents running in containers / Kubernetes / outside Claude Code, run LBrain as an HTTP MCP service:
 
 ```bash
-# Local (no container):
-lbrain mcp --transport streamable-http --host 0.0.0.0 --port 7370
+# Local (no container): bind 127.0.0.1 unless you front it with authenticated ingress
+# (the server has no built-in auth). Use --host 0.0.0.0 only inside a trusted network.
+lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
 
 # Docker:
 docker build -t lbrain .
-docker run --rm -p 7370:7370 -v $(pwd)/brain-data:/data \
+# Use a NAMED volume (brain-data) — the container runs as non-root (uid 10001) and a
+# host bind mount would inherit host ownership, breaking writes to brain.db. Bind the
+# published port to localhost — the MCP server has NO built-in auth, so never publish it
+# on a public interface (`-p 7370:7370`); for remote access put an authenticated,
+# TLS-terminating reverse proxy in front.
+docker run --rm -p 127.0.0.1:7370:7370 -v brain-data:/data \
   -e OPENAI_API_KEY=$OPENAI_API_KEY lbrain
 
 # docker-compose (Kite Apprentice / Maestro pattern):
 docker compose -f docker-compose.kite.yml up
 ```
+
+> ⚠️ The streamable-http MCP server exposes the full tool surface (the whole memory
+> corpus is readable) with no authentication. Run it only inside a trusted container
+> network or behind authenticated ingress — never directly on the public internet.
 
 The agent's MCP client connects to `http://lbrain:7370/mcp` and gets the same 5 tools. Use this for:
 

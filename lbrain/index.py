@@ -62,7 +62,13 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         post = frontmatter.loads(text)
         body = post.content
         meta = dict(post.metadata)
-    except Exception:
+    except Exception as e:
+        # Malformed YAML silently strips ALL of a doc's metadata (type, supersedes,
+        # name) — warn so the doc doesn't vanish from type filters / supersession
+        # logic without anyone noticing.
+        import sys
+
+        print(f"[lbrain] WARNING: frontmatter parse failed for {path}: {e}", file=sys.stderr)
         body = text
         meta = {}
 
