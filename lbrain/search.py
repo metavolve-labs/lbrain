@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+import sys
 from dataclasses import dataclass, field
 
 from .config import Config
@@ -238,15 +239,18 @@ def search(
     if cfg.hebbian and len(top) > 1:
         try:
             store.strengthen_associations([h.rel_path for h in top])
-        except Exception:
-            pass
+        except Exception as e:
+            # A swallowed write here silently disables Hebbian learning while the
+            # query still returns — log to stderr (never stdout: it carries the MCP
+            # stdio protocol) so the failure is visible, not invisible.
+            print(f"[lbrain] WARNING: Hebbian association write failed: {e}", file=sys.stderr)
 
     # Reinforce-on-use: the docs this query surfaced gain salience next time.
     if cfg.temporal_decay and top:
         try:
             store.record_retrievals([h.rel_path for h in top], now)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[lbrain] WARNING: retrieval-count write failed: {e}", file=sys.stderr)
 
     # 9. Consolidation layer (Tier 3) — surface a dense summary AHEAD of the raw
     #    fragments when the query has landed in that summary's territory: one
@@ -271,8 +275,8 @@ def search(
                     ))
                     top = top[:k]
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[lbrain] WARNING: summary-injection lookup failed: {e}", file=sys.stderr)
 
     return top
 

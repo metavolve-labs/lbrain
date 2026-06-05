@@ -52,7 +52,12 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
     cfg = Config.load()
     cfg.embedding_provider = provider
     if api_base:
-        cfg.gemini_base_url = api_base.rstrip("/")
+        # Validate before assignment — direct attribute set bypasses __post_init__,
+        # and `write()` would otherwise persist an unvalidated (possibly plaintext)
+        # base URL that bricks every later command on reload.
+        from .config import _validate_base_url
+
+        cfg.gemini_base_url = _validate_base_url(api_base.rstrip("/"))
     if provider == "gemini":
         cfg.embedding_model = "gemini-embedding-001"
         if gemini_key:
@@ -99,7 +104,8 @@ def add_source(path: str):
 @main.command(name="import")
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--prune/--no-prune", default=True, help="Drop docs no longer on disk")
-def import_cmd(paths: tuple[str, ...], prune: bool):
+@click.option("--force-prune", is_flag=True, help="Override the prune safety guards (mount-gone / >50%)")
+def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
     """Walk source directories and ingest markdown into the brain."""
     cfg = Config.load()
     sources = [Path(p).expanduser().resolve() for p in paths] if paths else cfg.sources
@@ -120,13 +126,16 @@ def import_cmd(paths: tuple[str, ...], prune: bool):
         with store.transaction():
             for path in files:
                 doc = parse(path, repo_root=src)
-                # Supersession edges are cheap and resolved at search time, so keep
-                # them current for every doc — even ones whose chunks are unchanged
-                # (a doc can gain/lose a Supersedes marker without re-chunking).
-                store.replace_supersessions(doc)
                 existing_hash = store.get_doc_hash(doc.rel_path)
+                # Supersession edges are resolved at search time, so keep them current
+                # for every doc — even ones whose chunks are unchanged (a Supersedes
+                # marker can be added/removed without re-chunking). With foreign_keys=ON
+                # the supersessions FK (src_path → docs.rel_path) requires the docs row
+                # to already exist, so this MUST run after the row is present: in the
+                # unchanged branch the row exists already; otherwise after upsert_doc.
                 if existing_hash == doc.doc_hash:
                     unchanged_docs += 1
+                    store.replace_supersessions(doc)
                     continue
                 if existing_hash is None:
                     new_docs += 1
@@ -134,6 +143,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool):
                     updated_docs += 1
                     store.delete_doc_chunks(doc.rel_path)
                 store.upsert_doc(doc)
+                store.replace_supersessions(doc)
                 store.replace_wikilinks(doc)
                 chunks = chunk_doc(
                     doc,
@@ -146,8 +156,13 @@ def import_cmd(paths: tuple[str, ...], prune: bool):
 
     pruned: list[str] = []
     if prune:
-        with store.transaction():
-            pruned = store.prune_missing()
+        try:
+            with store.transaction():
+                pruned = store.prune_missing(source_roots=sources, force=force_prune)
+        except RuntimeError as e:
+            store.close()
+            click.secho(f"✗ {e}", fg="red")
+            sys.exit(1)
 
     stats = store.stats()
     store.close()
@@ -186,6 +201,34 @@ def embed(stale: bool, batch: int):
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = make_embedder(cfg)
 
+    # Guard against silently corrupting the vector space when the embedding config
+    # changes. Use the embedder's RESOLVED model (make_embedder may rewrite a stale
+    # default) so the fingerprint we check and stamp are identical.
+    provider = cfg.embedding_provider
+    model = getattr(embedder, "model", cfg.embedding_model)
+    status = store.embedding_config_status(cfg.embedding_dim, model, provider)
+    if status in ("dim_changed", "model_changed"):
+        reason = "embedding_dim" if status == "dim_changed" else "embedding model/provider"
+        if stale:
+            click.secho(
+                f"✗ {reason} changed since these vectors were built; the old vectors live "
+                "in a different space and mixing them gives meaningless distances. "
+                "Re-embed the whole corpus with `lbrain embed --all`.",
+                fg="red",
+            )
+            store.close()
+            sys.exit(1)
+        # reset_vectors drops + recreates ALL three vec tables (chunks, summaries,
+        # archives) and zeroes every embedded flag, so no stale old-model vectors
+        # survive in any layer. `--all` then re-embeds chunks below; summaries and
+        # archives are restored on the next `lbrain consolidate` / archive capture.
+        click.secho(
+            f"  {reason} changed — rebuilding all vector tables and re-embedding all chunks.\n"
+            "    (summaries/archives invalidated; re-run `lbrain consolidate` / re-capture to restore them.)",
+            fg="yellow",
+        )
+        store.reset_vectors(cfg.embedding_dim)
+
     if stale:
         pending = store.stale_chunks()
     else:
@@ -209,6 +252,9 @@ def embed(stale: bool, batch: int):
             blobs = embedder.embed(texts, batch_size=batch)
             store.write_embeddings(ids, blobs)
             click.echo(f"    {min(i + batch, len(pending))}/{len(pending)} done")
+    # Stamp the fingerprint of the vectors now in the store (enables the
+    # model/dim-change guard on the next run).
+    store.stamp_embedding_config(cfg.embedding_dim, model, provider)
     embedder.close()
     store.close()
     dt = time.time() - t0

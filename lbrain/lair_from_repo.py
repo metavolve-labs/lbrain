@@ -278,7 +278,7 @@ def generate_lair(cfg: Config, system: str, user: str, model: str) -> str:
     with httpx.Client(timeout=180.0) as c:
         r = c.post(
             f"{GEMINI_BASE}/models/{model}:generateContent",
-            params={"key": key},
+            headers={"x-goog-api-key": key},  # header, not ?key= — keeps the key out of error/log URLs
             json={
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],

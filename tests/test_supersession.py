@@ -39,6 +39,27 @@ def test_prose_mention_of_supersede_is_not_an_edge():
     assert parse(p, repo_root=d).supersedes == []
 
 
+def test_import_new_doc_with_supersedes_marker_under_fk():
+    """Regression: with foreign_keys=ON (now set in Store.__init__), a brand-new doc
+    that declares a Supersedes marker must import without an FK violation. The
+    supersessions FK (src_path → docs.rel_path) requires the docs row to exist, so
+    the import loop must record the edge AFTER upsert_doc, not before."""
+    db = Path(tempfile.mkdtemp()) / "t.db"
+    store = Store(db, embedding_dim=8)
+    assert store.db.execute("PRAGMA foreign_keys").fetchone()[0] == 1  # precondition
+    d = Path(tempfile.mkdtemp())
+    p = _doc(d, "brand-new", "# New\n**Supersedes:** [[older]]\nbody")
+    doc = parse(p, repo_root=d)
+    # Mirror cli.import_cmd's ordering for a NEW doc, inside one transaction.
+    with store.transaction():
+        assert store.get_doc_hash(doc.rel_path) is None  # it is new
+        store.upsert_doc(doc)
+        store.replace_supersessions(doc)  # must NOT raise FOREIGN KEY constraint failed
+        store.replace_wikilinks(doc)
+    assert store.superseded_slugs() == {"older"}
+    store.close()
+
+
 def test_superseded_doc_is_buried_below_live_truth():
     db = Path(tempfile.mkdtemp()) / "t.db"
     store = Store(db, embedding_dim=8)

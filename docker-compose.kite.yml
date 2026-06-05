@@ -35,9 +35,13 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
       LBRAIN_HOME: /data
     volumes:
-      - ./brain-data:/data
+      # Named volume (not a host bind mount): Docker initializes its ownership to the
+      # image's non-root lbrain user (uid 10001), so brain.db is writable on first run.
+      # A bind mount (./brain-data) would inherit host ownership and break non-root writes.
+      - brain-data:/data
       # Mount source corpus read-only for initial import + re-imports.
-      # (Adjust paths to wherever the agent's curated corpus lives.)
+      # (Adjust paths to wherever the agent's curated corpus lives. Ensure the files are
+      #  world-readable so uid 10001 can read them.)
       - ./sources:/sources:ro
     ports:
       - "127.0.0.1:7370:7370"   # bind localhost-only by default; remove host bind for compose-internal-only
@@ -62,6 +66,5 @@ services:
     # Override with the agent's actual entrypoint:
     command: ["sh", "-c", "echo 'Replace agent service with your actual Apprentice/Maestro image.'; sleep infinity"]
 
-# Named volume pattern (alternative to ./brain-data bind mount):
-# volumes:
-#   brain-data:
+volumes:
+  brain-data:   # Docker initializes ownership to the image's lbrain user (uid 10001)

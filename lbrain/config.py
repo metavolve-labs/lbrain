@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 try:
     import tomllib  # Python 3.11+
@@ -15,6 +17,20 @@ CONFIG_DIR = Path(os.environ.get("LBRAIN_HOME", Path.home() / ".lbrain"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 ENV_PATH = CONFIG_DIR / "env"
 DB_PATH = CONFIG_DIR / "brain.db"
+
+
+def _validate_base_url(url: str) -> str:
+    """Embeddings (and their text + key) must go over TLS to a real host. Reject a
+    poisoned/plaintext ``gemini_base_url`` that would exfiltrate to http:// or a
+    schemeless target — but allow http://localhost for local proxy development."""
+    p = urlparse(url or "")
+    if p.scheme == "https" and p.hostname:
+        return url
+    if p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1", "::1"):
+        return url
+    raise ValueError(
+        f"gemini_base_url must be https:// (or http://localhost for dev) — got {url!r}"
+    )
 
 
 def _load_env_file() -> None:
@@ -53,8 +69,15 @@ def _write_env_var(key: str, value: str) -> None:
     ENV_PATH.write_text("\n".join(lines) + "\n")
     try:
         ENV_PATH.chmod(0o600)
-    except OSError:
-        pass
+    except OSError as e:
+        # Don't crash, but DON'T stay silent — the documented 600 guarantee did not
+        # hold (e.g. a filesystem that ignores Unix perms), so the secret may be
+        # world-readable. The operator needs to know.
+        print(
+            f"[lbrain] WARNING: could not chmod 600 {ENV_PATH} ({e}); "
+            "the secret file may be readable by other users on this filesystem.",
+            file=sys.stderr,
+        )
 
 
 _load_env_file()
@@ -138,6 +161,11 @@ class Config:
     turbo_endpoint: str = "https://turbo.ardrive.io"  # ar.io Turbo (v2 bundled uploads)
     archive_namespace: str = "private"  # default silo: private working/research memory
     db_path: Path = field(default_factory=lambda: DB_PATH)
+
+    def __post_init__(self):
+        # Validate on every construction — catches a poisoned GEMINI_BASE_URL env
+        # var or config value before it can redirect embeddings off-TLS.
+        self.gemini_base_url = _validate_base_url(self.gemini_base_url)
 
     @classmethod
     def load(cls) -> "Config":
@@ -260,8 +288,8 @@ class Config:
         CONFIG_PATH.write_text("\n".join(lines) + "\n")
         try:
             CONFIG_PATH.chmod(0o600)
-        except OSError:
-            pass
+        except OSError as e:
+            print(f"[lbrain] WARNING: could not chmod 600 {CONFIG_PATH} ({e}).", file=sys.stderr)
         # The secret never goes into the (potentially world-readable) config above.
         # Persist it to ~/.lbrain/env (chmod 600); _load_env_file() reads it at import.
         if self.openai_api_key:
