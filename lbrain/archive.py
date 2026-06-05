@@ -239,6 +239,44 @@ class ArweaveL1Transport:
         return r.content
 
 
+def verify_on_chain(txid: str, gateway: str = "https://arweave.net", timeout: float = 20.0) -> dict:
+    """Is this txid ACTUALLY settled on Arweave? Hits the gateway's
+    ``/tx/<id>/status`` endpoint directly — deliberately bypassing any local
+    mirror, so a local-only "ghost" txid (one that was content-addressed but never
+    broadcast, or whose upload failed) reports ``settled=False`` instead of looking
+    retrievable. This is the proof step the local-first ``get()`` can't give.
+
+    Returns: ``{settled, confirmations, block_height, http, error}``. HTTP 200 = on
+    chain; 202 = accepted-but-pending (not yet mined); 404 = ghost / not found.
+    """
+    import httpx
+
+    url = f"{gateway.rstrip('/')}/tx/{txid}/status"
+    try:
+        r = httpx.get(url, timeout=timeout, follow_redirects=True)
+    except Exception as e:
+        return {"settled": False, "confirmations": None, "block_height": None, "http": 0, "error": str(e)}
+    if r.status_code == 200:
+        try:
+            j = r.json()
+        except Exception:
+            j = {}
+        return {
+            "settled": True,
+            "confirmations": j.get("number_of_confirmations"),
+            "block_height": j.get("block_height"),
+            "http": 200,
+            "error": None,
+        }
+    return {
+        "settled": False,
+        "confirmations": None,
+        "block_height": None,
+        "http": r.status_code,
+        "error": "pending" if r.status_code == 202 else "not found",
+    }
+
+
 def make_transport(cfg):
     """Pick a transport from config. Defaults to the offline local store; the real
     Arweave path is opt-in (``arweave_enabled = true`` + ``arweave_transport``)."""

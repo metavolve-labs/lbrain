@@ -864,7 +864,9 @@ def archive_status():
 
 @main.command(name="archives")
 @click.option("--namespace", default=None, help="Restrict to a silo")
-def archives_cmd(namespace):
+@click.option("--verify", is_flag=True,
+              help="Check each Arweave record is actually settled on-chain (bypasses the local mirror)")
+def archives_cmd(namespace, verify):
     """List Tier-2 archived records."""
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
@@ -873,6 +875,8 @@ def archives_cmd(namespace):
     if not rows:
         click.echo("  No archives yet. Create one with `lbrain archive`.")
         return
+    gateway = getattr(cfg, "arweave_gateway", "https://arweave.net")
+    arweave_total = settled = 0
     click.secho(f"--- {len(rows)} archived record(s) ---", fg="cyan")
     for r in rows:
         import datetime as _dt
@@ -880,6 +884,31 @@ def archives_cmd(namespace):
         flag = "  ⨯ SHREDDED" if r["shredded"] else ""
         click.secho(f"  {r['txid']}{flag}", fg=("red" if r["shredded"] else "yellow"))
         click.echo(f"     {r['title']}  ·  {when}  ·  {r['namespace']}  ·  {r['n_bytes']}B  ·  {r['transport']}")
+        if verify and not r["shredded"]:
+            if r["transport"] in ("arweave", "arweave-l1", "l1"):
+                arweave_total += 1
+                from .archive import verify_on_chain
+
+                v = verify_on_chain(r["txid"], gateway)
+                if v["settled"]:
+                    settled += 1
+                    click.secho(
+                        f"     ✓ on-chain — {v['confirmations']} confirmations (block {v['block_height']})",
+                        fg="green",
+                    )
+                else:
+                    click.secho(
+                        f"     ✗ NOT settled on-chain — {v['error']} (HTTP {v['http']}). "
+                        "Local-only ghost: re-archive to push it to the permaweb.",
+                        fg="red",
+                    )
+            else:
+                click.secho("     • local-only transport — not on the permaweb substrate", fg="yellow")
+    if verify and arweave_total:
+        click.secho(
+            f"\n  {settled}/{arweave_total} Arweave record(s) confirmed settled on-chain.",
+            fg=("green" if settled == arweave_total else "yellow"),
+        )
 
 
 if __name__ == "__main__":

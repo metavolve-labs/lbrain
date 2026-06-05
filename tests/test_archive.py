@@ -12,11 +12,52 @@ import os
 import pytest
 
 from lbrain import crypto
-from lbrain.archive import Archiver, LocalTransport, _content_txid, make_snapshot
+from lbrain.archive import Archiver, LocalTransport, _content_txid, make_snapshot, verify_on_chain
 from lbrain.crypto import CryptoError, Keystore
 from lbrain.store import Store
 
 PASS = "correct horse battery staple"
+
+
+# --------------------------------------------------------------------------- on-chain verify
+
+
+class _FakeResp:
+    def __init__(self, status_code, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def test_verify_on_chain_settled(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(
+        httpx, "get",
+        lambda *a, **k: _FakeResp(200, {"number_of_confirmations": 345, "block_height": 1932366}),
+    )
+    v = verify_on_chain("any-txid")
+    assert v["settled"] is True and v["confirmations"] == 345 and v["block_height"] == 1932366
+
+
+def test_verify_on_chain_ghost_is_not_settled(monkeypatch):
+    """A local-only ghost txid (gateway 404) must report settled=False — the whole
+    point of bypassing the local-first mirror."""
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(404))
+    v = verify_on_chain("ghost-txid")
+    assert v["settled"] is False and v["error"] == "not found" and v["http"] == 404
+
+
+def test_verify_on_chain_pending(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _FakeResp(202))
+    v = verify_on_chain("pending-txid")
+    assert v["settled"] is False and v["error"] == "pending"
 
 
 # --------------------------------------------------------------------------- crypto
