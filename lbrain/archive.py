@@ -42,6 +42,24 @@ def _content_txid(data: bytes) -> str:
     return base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
 
 
+def _ascii_tag(s: str) -> str:
+    """arweave-python's ``encode_tag`` hardcodes ``.encode('ascii')``, so a single
+    non-ASCII char in a tag name/value (e.g. an em-dash in a session title) raises
+    UnicodeEncodeError and aborts the entire upload. Transliterate to a safe ASCII
+    form here: the tag is only the GraphQL-queryable index handle, and the full
+    Unicode title also lives inside the encrypted payload, so nothing is lost."""
+    import unicodedata
+
+    subs = {
+        "—": "-", "–": "-",        # em / en dash
+        "‘": "'", "’": "'",        # smart single quotes
+        "“": '"', "”": '"',        # smart double quotes
+        "…": "...", " ": " ",      # ellipsis, nbsp
+    }
+    s = "".join(subs.get(ch, ch) for ch in s)
+    return unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
+
+
 class LocalTransport:
     """Offline, content-addressed blob store at ``~/.lbrain/archive/<txid>.bin``.
 
@@ -141,12 +159,17 @@ class ArweaveL1Transport:
 
     name = "arweave-l1"
 
-    def __init__(self, wallet_path: str, gateway: str = "https://arweave.net"):
+    def __init__(self, wallet_path: str, gateway: str = "https://arweave.net",
+                 archive_dir: Path | None = None):
         # Load the wallet LAZILY: only uploads (put) need it. Retrieval (get) is a plain
         # gateway fetch, so reads must not depend on wallet/secret availability or auth.
         self._wallet_path = wallet_path
         self._wallet = None
         self.gateway = gateway.rstrip("/")
+        # Optional on-disk mirror. When set, put() drops a copy and get() serves from it
+        # first — so a txid this node captured is retrievable offline / instantly, even
+        # before gateway propagation, and local-only "ghost" txids resolve instead of 404.
+        self.archive_dir = Path(archive_dir) if archive_dir else None
 
     @property
     def wallet(self):
@@ -162,7 +185,8 @@ class ArweaveL1Transport:
 
         tx = Transaction(self.wallet, data=data)
         for k, v in tags.items():
-            tx.add_tag(k, str(v))
+            # ASCII-sanitize: the lib's encode_tag can't handle non-ASCII (see _ascii_tag).
+            tx.add_tag(_ascii_tag(str(k)), _ascii_tag(str(v)))
         # The uploader streams merkle chunk proofs computed from the tx's file_handler
         # over the RAW bytes (self.data is base64-encoded, so it can't be used here).
         # An in-memory data= tx has no handler, so point one at the bytes and prepare
@@ -193,9 +217,21 @@ class ArweaveL1Transport:
                 f"({uploader.uploaded_chunks}/{uploader.total_chunks} chunks, "
                 f"last HTTP {uploader.last_response_status} {uploader.last_response_error})"
             )
+        # Mirror locally so the bytes are retrievable immediately, before the gateway
+        # has propagated the new tx (and as a free offline cache thereafter).
+        if self.archive_dir is not None:
+            self.archive_dir.mkdir(parents=True, exist_ok=True)
+            (self.archive_dir / f"{tx.id}.bin").write_bytes(data)
         return tx.id
 
     def get(self, txid: str) -> bytes:
+        # Local-first: if this node holds the blob (we captured it, or it's a
+        # local/ghost txid), serve it without a gateway round-trip that may 404.
+        if self.archive_dir is not None:
+            p = self.archive_dir / f"{txid}.bin"
+            if p.exists():
+                return p.read_bytes()
+
         import httpx
 
         r = httpx.get(f"{self.gateway}/{txid}", timeout=60.0, follow_redirects=True)
@@ -213,6 +249,7 @@ def make_transport(cfg):
         return ArweaveL1Transport(
             getattr(cfg, "arweave_wallet_path", ""),
             getattr(cfg, "arweave_gateway", "https://arweave.net"),
+            archive_dir=CONFIG_DIR / "archive",
         )
     return LocalTransport(CONFIG_DIR / "archive")
 
