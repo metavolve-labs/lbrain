@@ -19,15 +19,19 @@ dependencies = [
     "click>=8.1,<9",
     "tiktoken>=0.7,<1",
     "mcp>=1.0,<2",
-    "cryptography>=44,<46",  # Tier-2 archive: AES-256-GCM + Argon2id (cryptography 44+ ships Argon2id)
     "tomli>=2.0,<3; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
-arweave = ["arweave-python-client>=1.0,<2"]  # real permaweb writes (Tier-2 arweave transport)
+# Tier-2 encrypted archive (lbrain.archive). cryptography (AES-256-GCM + Argon2id,
+# 44+ ships Argon2id) gates the whole optional subpackage: without it, the archive
+# CLI commands and the lair_deep_recall MCP tool simply don't register.
+archive = ["cryptography>=44,<46"]
+# …plus real permaweb writes via the Arweave L1 transport.
+arweave = ["cryptography>=44,<46", "arweave-python-client>=1.0,<2"]
 
 [project.scripts]
 lbrain = "lbrain.cli:main"
 
 [tool.setuptools]
-packages = ["lbrain"]
+packages = ["lbrain", "lbrain.archive"]

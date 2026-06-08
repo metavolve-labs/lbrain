@@ -24,13 +24,15 @@ Existing "RAG" tools index text and forget structure. The lair protocol *is* str
 - SQLite + sqlite-vec + FTS5 (native, no WASM, no daemon)
 - OpenAI text-embedding-3-small (~$0.12 per 6M-token corpus; pennies on updates)
 - `fastmcp` for MCP server
-- ~3,900 LOC (Tier-2 encrypted archive included). No moving parts.
+- ~2,750 LOC core + ~1,370 LOC optional Tier-2 archive subpackage. No moving parts.
 
 ## Install
 
 ```bash
 cd lbrain
-pip install -e .
+pip install -e .            # lean core (index → embed → search → MCP)
+# pip install -e ".[archive]"   # + encrypted Tier-2 archive
+# pip install -e ".[arweave]"   # + real permaweb (Arweave L1) writes
 
 # Initialize config + DB
 lbrain init --api-key=$OPENAI_API_KEY \
@@ -141,8 +143,21 @@ lbrain/
 ├── onboard.py        Interactive scaffolding for new projects
 ├── mcp_server.py     fastmcp tool surface
 ├── cli.py            click CLI entry point
-└── config.py         ~/.lbrain/config.toml
+├── config.py         ~/.lbrain/config.toml
+└── archive/          OPTIONAL Tier-2 subpackage (install via lbrain[archive])
+    ├── archiver.py   encrypt → transport (local/Arweave) → snapshot → index
+    ├── crypto.py     AES-256-GCM + Argon2id envelopes + per-item crypto-shred
+    ├── storage.py    archive tables + queries (lazy schema, shared connection)
+    ├── cli.py        archive/capture/recall/retrieve/shred commands (register hook)
+    └── mcp.py        lair_deep_recall tool (register hook)
 ```
+
+The `archive/` subpackage has a strict one-way dependency on the core (it imports core;
+core never imports it except through guarded, lazy registration). `pip install lbrain`
+gives the lean retrieval engine; `pip install lbrain[archive]` adds the encrypted Tier-2
+archive; `pip install lbrain[arweave]` adds real permaweb writes. Drop the extra (or the
+directory) and the core runs unchanged — the archive CLI commands and the
+`lair_deep_recall` MCP tool simply don't register.
 
 ## Truth hierarchy
 

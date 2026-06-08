@@ -108,28 +108,10 @@ def _write_env_var(key: str, value: str) -> None:
 _load_env_file()
 
 
-def archive_passphrase() -> str:
-    """The Tier-2 archive passphrase. Sourced from ~/.lbrain/env (chmod 600), NEVER
-    config.toml. The env value may be the literal passphrase OR a runtime reference
-    ``gcp-secret:<project>/<secret>`` (resolved from GCP Secret Manager, like the wallet)
-    so the actual secret lives only in IAM-controlled storage and the local file holds a
-    pointer. Empty if unset; callers prompt interactively."""
-    val = os.environ.get("LBRAIN_ARCHIVE_PASSPHRASE", "").strip()
-    if val.startswith(("gcp-secret:", "gcp:")):
-        from .archive import _fetch_gcp_secret  # lazy: avoids import cycle
-
-        body = val.split(":", 1)[1]
-        if "/" not in body:
-            return ""
-        project, secret = body.split("/", 1)
-        return _fetch_gcp_secret(project, secret).strip()
-    return val
-
-
-def set_archive_passphrase(passphrase: str) -> None:
-    """Persist the archive passphrase to the 600 env file (same secret pattern as keys)."""
-    _write_env_var("LBRAIN_ARCHIVE_PASSPHRASE", passphrase)
-    os.environ["LBRAIN_ARCHIVE_PASSPHRASE"] = passphrase
+# NOTE: archive passphrase resolution (archive_passphrase / set_archive_passphrase)
+# lives in the optional subpackage at lbrain.archive.config — the core config layer
+# has no archive-specific behavior. The arweave_* fields below are passive data the
+# archive layer reads (kept here so Config.write persists them round-trip).
 
 
 @dataclass

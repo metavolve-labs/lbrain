@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-06-08 — Archive extracted to an optional subpackage
+
+Finished the "second product sharing the repo" loose end from the polish pass: the
+Tier-2 encrypted Arweave archive is now a self-contained optional subpackage,
+`lbrain/archive/`, with a strict one-way dependency (archive → core, never the reverse).
+The core retrieval engine (index → embed → store → search → MCP) no longer knows the
+archive exists. **No data migration** — existing `brain.db` archive tables are reused
+as-is (verified live: `lbrain recall` deep-recalls real 7.9 MB records). 27/27 tests pass.
+
+### Structure
+- New subpackage `lbrain/archive/` (1,372 lines): `archiver.py` (moved from
+  `lbrain/archive.py`), `crypto.py` (moved from `lbrain/crypto.py`), `storage.py`
+  (the archive tables + queries, extracted from core `store.py` as `ArchiveStore`),
+  `cli.py` (the 7 archive commands + a `register(main)` hook), `mcp.py`
+  (`lair_deep_recall` + a `register(mcp)` hook), `config.py` (passphrase resolution,
+  moved out of core config).
+- Core shrank to 2,742 lines. `store.py` lost the `archives`/`vec_archives`/
+  `fts_archives` schema and 7 archive methods; `stats()` and `reset_vectors()` now
+  tolerate the archive layer being absent (table-existence guarded). `cli.py` and
+  `mcp_server.py` register the archive surface only via a guarded `try/except ImportError`.
+  The prompt-injection fence helpers moved to `amp.py` (`amp.fence` / `amp.UNTRUSTED_NOTICE`)
+  so both core and archive share one definition.
+
+### Genuinely optional
+- `cryptography` moved from a core dependency to the `archive` extra — it gates the whole
+  subsystem. `pip install lbrain` → lean core, no `cryptography`, archive commands/tool
+  absent. `pip install lbrain[archive]` → encrypted local archive. `pip install
+  lbrain[arweave]` → + real permaweb writes. **Verified:** with `cryptography` blocked,
+  the core CLI loads with 14 commands and the archive surface correctly does not register.
+
+### Accepted compromise
+- The `arweave_*` / `archive_namespace` fields stay on the core `Config` dataclass
+  (passive data, so `Config.write` round-trips them — moving them out would let
+  `add-source` silently drop a user's archive config). No core *logic* branches on them.
+
+---
+
 ## 2026-06-07 — The Polish Pass (significant revision)
 
 A systematic cleanup: cut the overengineered, default-OFF "brain-metaphor" layers,
