@@ -40,6 +40,13 @@ KEY_LEN = 32               # 256-bit keys (AES-256 / random DEK)
 SALT_LEN = 16
 NONCE_LEN = 12
 
+# Hardening: the wrapped-DEK envelope is portable and backup-able, so its embedded
+# KDF parameters are attacker-influenceable. Clamp them on the unwrap path so a
+# tampered/corrupt key file can't request a multi-TB Argon2 allocation (local DoS / OOM).
+ARGON2_MAX_TIME = 16
+ARGON2_MAX_MEMORY = 2 * 1024 * 1024  # KiB → 2 GiB
+ARGON2_MAX_LANES = 16
+
 
 class CryptoError(Exception):
     """Raised when an envelope is malformed or decryption/authentication fails."""
@@ -87,19 +94,18 @@ def encrypt(plaintext: bytes, passphrase: str) -> tuple[bytes, bytes]:
     return payload_env, _wrap_dek(dek, passphrase)
 
 
-def rewrap_key(key_env: bytes, old_passphrase: str, new_passphrase: str) -> bytes:
-    """Rotate the passphrase guarding a wrapped DEK — WITHOUT touching the permanent
-    on-chain ciphertext. Unwrap the DEK with the old passphrase, re-wrap with the new.
-    The DEK (hence every payload) is unchanged; only the local key envelope is rewritten."""
-    dek = _unwrap_dek(key_env, old_passphrase)
-    return _wrap_dek(dek, new_passphrase)
-
-
 def _unwrap_dek(key_env: bytes, passphrase: str) -> bytes:
     if key_env[: len(KEY_MAGIC)] != KEY_MAGIC:
         raise CryptoError("bad key envelope magic")
     off = len(KEY_MAGIC)
     time, memory, lanes, salt_len = struct.unpack_from(">IIIB", key_env, off)
+    if not (1 <= time <= ARGON2_MAX_TIME
+            and 1 <= memory <= ARGON2_MAX_MEMORY
+            and 1 <= lanes <= ARGON2_MAX_LANES):
+        raise CryptoError(
+            "key envelope KDF parameters out of bounds — refusing to derive "
+            "(corrupt or tampered key file)"
+        )
     off += struct.calcsize(">IIIB")
     salt = key_env[off : off + salt_len]
     off += salt_len
@@ -160,12 +166,19 @@ class Keystore:
         return p.read_bytes() if p.exists() else None
 
     def shred(self, txid: str) -> bool:
-        """Destroy the key for one archive → its permanent ciphertext is now
-        unrecoverable. Returns True if a key was present and removed."""
+        """Destroy the key for one archive → its permanent ciphertext can no longer
+        be decrypted. Returns True if a key was present and removed.
+
+        The security boundary is the ``unlink`` (no key → AES-GCM payload is
+        undecryptable). The in-place overwrite below is best-effort only and is a
+        NO-OP on copy-on-write / log-structured / wear-leveling filesystems (e.g.
+        WSL2 over NTFS, SSDs, btrfs/ZFS) and does nothing about prior backups or
+        filesystem snapshots — do NOT rely on it to scrub the bytes from the medium."""
         p = self._path(txid)
         if not p.exists():
             return False
-        # Best-effort overwrite before unlink (defense-in-depth; real shred is the unlink).
+        # Best-effort overwrite before unlink. NOT a guarantee on modern filesystems
+        # (see docstring); the actual shred is the unlink + the key being gone.
         try:
             n = p.stat().st_size
             with open(p, "r+b", buffering=0) as f:

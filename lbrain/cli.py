@@ -11,14 +11,10 @@ import click
 from . import __version__
 from . import amp
 from .config import CONFIG_DIR, CONFIG_PATH, Config
-from .embed import EmbedClient, make_embedder
+from .embed import make_embedder
 from .index import chunk as chunk_doc
 from .index import discover, parse
-from .lair_protocol import (
-    cognitive_nutrition_preamble,
-    detect_anti_pattern,
-    should_commit_to_lair,
-)
+from .lair_protocol import detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
 from .store import Store
@@ -218,13 +214,13 @@ def embed(stale: bool, batch: int):
             )
             store.close()
             sys.exit(1)
-        # reset_vectors drops + recreates ALL three vec tables (chunks, summaries,
-        # archives) and zeroes every embedded flag, so no stale old-model vectors
-        # survive in any layer. `--all` then re-embeds chunks below; summaries and
-        # archives are restored on the next `lbrain consolidate` / archive capture.
+        # reset_vectors drops + recreates both vec tables (chunks, archives) and
+        # zeroes every embedded flag, so no stale old-model vectors survive in any
+        # layer. `--all` then re-embeds chunks below; archives are restored on the
+        # next archive capture.
         click.secho(
             f"  {reason} changed — rebuilding all vector tables and re-embedding all chunks.\n"
-            "    (summaries/archives invalidated; re-run `lbrain consolidate` / re-capture to restore them.)",
+            "    (archives invalidated; re-capture to restore them.)",
             fg="yellow",
         )
         store.reset_vectors(cfg.embedding_dim)
@@ -271,8 +267,7 @@ def embed(stale: bool, batch: int):
     help="Filter by frontmatter type (user/feedback/project/reference)",
 )
 @click.option("--priority", is_flag=True, help="Only priority lairs")
-@click.option("--no-prime", is_flag=True, help="Suppress Cognitive Nutrition preamble")
-def query(query: str, k: int, doc_type: str | None, priority: bool, no_prime: bool):
+def query(query: str, k: int, doc_type: str | None, priority: bool):
     """Semantic + keyword hybrid search across the brain."""
     cfg = Config.load()
     if getattr(cfg, "amp_gating", True):
@@ -287,11 +282,6 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, no_prime: bo
     hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority)
     dt_ms = (time.time() - t0) * 1000
     kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
-
-    if not no_prime:
-        preamble = cognitive_nutrition_preamble(query, kept)
-        if preamble:
-            click.echo(preamble)
 
     core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
     if core:
@@ -351,60 +341,6 @@ def stats():
     click.echo(f"priority docs:  {s['priority_docs']}")
     click.echo(f"wikilinks:      {s['wikilinks']}")
     click.echo(f"tier-2 archives:{s.get('archives', 0):>3}")
-
-
-@main.command()
-@click.option("--threshold", default=None, type=float, help="Cosine distance cap (default: per provider)")
-@click.option("--min-size", default=4, type=int, help="Min chunks to form a cluster")
-@click.option("--max", "max_clusters", default=20, type=int, help="Cap clusters consolidated")
-@click.option("--model", default=None, help="Synthesis chat model (default: per provider)")
-def consolidate(threshold: float, min_size: int, max_clusters: int, model: str):
-    """Consolidate related chunks into dense summary memories (the neocortical layer).
-
-    Clusters chunks over their existing vectors and synthesizes one dense,
-    provenance-linked summary per cluster. Regenerable; never touches source.
-    """
-    cfg = Config.load()
-    _active_key = cfg.gemini_api_key if cfg.embedding_provider == "gemini" else cfg.openai_api_key
-    if not _active_key:
-        click.secho(
-            f"✗ No API key for embedding_provider='{cfg.embedding_provider}'.", fg="red"
-        )
-        sys.exit(1)
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = make_embedder(cfg)
-    from .consolidate import consolidate as run_consolidation
-
-    t0 = time.time()
-    n = run_consolidation(
-        cfg, store, embedder, synth_model=model,
-        distance_threshold=threshold, min_size=min_size, max_clusters=max_clusters,
-        log=click.echo,
-    )
-    embedder.close()
-    store.close()
-    click.secho(f"✓ Consolidated {n} dense summary memories in {time.time() - t0:.1f}s", fg="green")
-
-
-@main.command()
-def summaries():
-    """List the dense summary memories in the consolidation layer."""
-    cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    rows = store.list_summaries()
-    store.close()
-    if not rows:
-        click.echo("  No summaries yet. Run `lbrain consolidate`.")
-        return
-    click.secho(f"--- {len(rows)} dense summary memories ---", fg="cyan")
-    for r in rows:
-        import json
-
-        paths = json.loads(r["source_paths"])
-        click.secho(f"  [{r['summary_id']}] {r['title']}", fg="yellow")
-        click.echo(f"     {r['n_sources']} source docs · {r['len']} chars")
-        click.echo(f"     from: {', '.join(p.rsplit('/', 1)[-1] for p in paths[:6])}"
-                   + (" …" if len(paths) > 6 else ""))
 
 
 @main.command(name="commit-check")
@@ -805,12 +741,16 @@ def shred(txid, yes, soft):
     (txid, title, dates, flag), so nothing readable about the record survives locally.
     `--soft` keeps the snapshot for fast browsing (the on-chain payload is still unrecoverable).
 
-    Caveat: crypto-shred only holds if ~/.lbrain/keys/ is NOT backed up elsewhere — a
-    backed-up wrapped key plus the passphrase can still recover the payload.
+    Caveat: crypto-shred only holds if the wrapped key is GONE everywhere. It does
+    NOT hold against (a) a backed-up ~/.lbrain/keys/ + the passphrase, or (b) a
+    filesystem snapshot / backup that captured the key file before the shred (the
+    on-disk overwrite is best-effort and a no-op on CoW/SSD filesystems). Destroy
+    those copies too for the guarantee to be real.
     """
     mode = "soft (snapshot kept)" if soft else "HARD (snapshot purged)"
     if not yes and not click.confirm(
-        f"Permanently destroy the key for {txid} [{mode}]? The record will be UNRECOVERABLE.",
+        f"Permanently destroy the key for {txid} [{mode}]? Without a key backup the "
+        "record becomes undecryptable.",
         default=False,
     ):
         click.echo("  Aborted.")

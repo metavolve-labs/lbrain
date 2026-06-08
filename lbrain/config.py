@@ -54,8 +54,18 @@ def _load_env_file() -> None:
 
 def _write_env_var(key: str, value: str) -> None:
     """Upsert KEY=value into ~/.lbrain/env with 0600 perms (the secret store).
-    Keeps credentials out of the world-readable config.toml."""
+    Keeps credentials out of the world-readable config.toml.
+
+    The secret bytes are written through a file descriptor opened O_CREAT with mode
+    0600 *up front* (and via a same-dir temp file + atomic os.replace), so the secret
+    never exists on disk under the process umask (commonly 0644 = world-readable)
+    even for the instant between create and a later chmod. Closes the TOCTOU window
+    where another local user could read the file during that gap."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        CONFIG_DIR.chmod(0o700)  # the secret's parent dir, not just the file
+    except OSError:
+        pass
     lines, found = [], False
     if ENV_PATH.exists():
         for line in ENV_PATH.read_text().splitlines():
@@ -66,15 +76,30 @@ def _write_env_var(key: str, value: str) -> None:
                 lines.append(line)
     if not found:
         lines.append(f"{key}={value}")
-    ENV_PATH.write_text("\n".join(lines) + "\n")
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+
+    tmp = ENV_PATH.with_name(ENV_PATH.name + ".tmp")
     try:
-        ENV_PATH.chmod(0o600)
+        # O_CREAT with 0600 means the file is private from the moment it exists.
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, body)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(tmp, 0o600)  # belt-and-suspenders if umask widened the create mode
+        os.replace(tmp, ENV_PATH)  # atomic swap — readers see old or new, never partial
     except OSError as e:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
         # Don't crash, but DON'T stay silent — the documented 600 guarantee did not
         # hold (e.g. a filesystem that ignores Unix perms), so the secret may be
         # world-readable. The operator needs to know.
         print(
-            f"[lbrain] WARNING: could not chmod 600 {ENV_PATH} ({e}); "
+            f"[lbrain] WARNING: could not securely write {ENV_PATH} ({e}); "
             "the secret file may be readable by other users on this filesystem.",
             file=sys.stderr,
         )
@@ -119,28 +144,8 @@ class Config:
     chunk_tokens: int = 512
     chunk_overlap: int = 64
     priority_boost: float = 1.3
-    wikilink_boost: float = 1.15
-    bm25_weight: float = 0.4  # retained for back-compat; unused since RRF fusion
-    vector_weight: float = 0.6  # retained for back-compat; unused since RRF fusion
     rrf_k: int = 60  # Reciprocal Rank Fusion smoothing constant (higher = flatter)
     contextual_prefix: bool = False  # prepend doc macro-context to each chunk's embed/FTS text
-    # --- temporal dynamics (Tier 2a) — gentle, bounded; priority docs exempt ---
-    temporal_decay: bool = False  # apply freshness + salience factor and record retrievals
-    recency_weight: float = 0.15  # max ± lift from doc freshness (mtime half-life)
-    salience_weight: float = 0.10  # max lift from retrieval frequency (reinforce-on-use)
-    decay_half_life_days: float = 120.0  # freshness half-life
-    # --- associative memory (Tier 2b) — Hebbian co-retrieval + spreading activation ---
-    hebbian: bool = False  # learn co-retrieval edges and spread activation across them
-    spread_weight: float = 0.5  # how strongly an associated doc inherits a seed's score
-    assoc_min_strength: float = 2.0  # only spread along edges co-retrieved >= this many times
-    max_injected: int = 3  # cap associatively-recalled docs that didn't directly match
-    # --- cross-encoder reranking (Tier 2c) — optional, lightweight, flag-gated ---
-    rerank: bool = False  # second-stage cross-encoder precision reorder of top candidates
-    rerank_model: str = "Xenova/ms-marco-MiniLM-L-6-v2"  # fastembed name; ST maps automatically
-    rerank_top_n: int = 30  # rerank this many fused candidates before final top-k
-    # --- consolidation layer (Tier 3) — dense summary memories ---
-    use_summaries: bool = False  # surface the most relevant dense abstraction ahead of fragments
-    summary_max_dist: float = 0.55  # only surface a summary this cosine-close to the query
     # --- AMP (Augmented Memory Protocol) injection layer — gating, budgeting, provenance ---
     amp_gating: bool = True  # skip injection for trivial/low-signal queries (Gate 1)
     amp_min_chars: int = 3  # gate only empty/near-empty queries (content-driven, not length)
@@ -197,24 +202,8 @@ class Config:
             chunk_tokens=raw.get("chunk_tokens", cls.chunk_tokens),
             chunk_overlap=raw.get("chunk_overlap", cls.chunk_overlap),
             priority_boost=raw.get("priority_boost", cls.priority_boost),
-            wikilink_boost=raw.get("wikilink_boost", cls.wikilink_boost),
-            bm25_weight=raw.get("bm25_weight", cls.bm25_weight),
-            vector_weight=raw.get("vector_weight", cls.vector_weight),
             rrf_k=raw.get("rrf_k", cls.rrf_k),
             contextual_prefix=raw.get("contextual_prefix", cls.contextual_prefix),
-            temporal_decay=raw.get("temporal_decay", cls.temporal_decay),
-            recency_weight=raw.get("recency_weight", cls.recency_weight),
-            salience_weight=raw.get("salience_weight", cls.salience_weight),
-            decay_half_life_days=raw.get("decay_half_life_days", cls.decay_half_life_days),
-            hebbian=raw.get("hebbian", cls.hebbian),
-            spread_weight=raw.get("spread_weight", cls.spread_weight),
-            assoc_min_strength=raw.get("assoc_min_strength", cls.assoc_min_strength),
-            max_injected=raw.get("max_injected", cls.max_injected),
-            rerank=raw.get("rerank", cls.rerank),
-            rerank_model=raw.get("rerank_model", cls.rerank_model),
-            rerank_top_n=raw.get("rerank_top_n", cls.rerank_top_n),
-            use_summaries=raw.get("use_summaries", cls.use_summaries),
-            summary_max_dist=raw.get("summary_max_dist", cls.summary_max_dist),
             amp_gating=raw.get("amp_gating", cls.amp_gating),
             amp_min_chars=raw.get("amp_min_chars", cls.amp_min_chars),
             amp_budget_chars=raw.get("amp_budget_chars", cls.amp_budget_chars),
@@ -246,24 +235,8 @@ class Config:
             f"chunk_tokens = {self.chunk_tokens}",
             f"chunk_overlap = {self.chunk_overlap}",
             f"priority_boost = {self.priority_boost}",
-            f"wikilink_boost = {self.wikilink_boost}",
-            f"bm25_weight = {self.bm25_weight}",
-            f"vector_weight = {self.vector_weight}",
             f"rrf_k = {self.rrf_k}",
             f"contextual_prefix = {str(self.contextual_prefix).lower()}",
-            f"temporal_decay = {str(self.temporal_decay).lower()}",
-            f"recency_weight = {self.recency_weight}",
-            f"salience_weight = {self.salience_weight}",
-            f"decay_half_life_days = {self.decay_half_life_days}",
-            f"hebbian = {str(self.hebbian).lower()}",
-            f"spread_weight = {self.spread_weight}",
-            f"assoc_min_strength = {self.assoc_min_strength}",
-            f"max_injected = {self.max_injected}",
-            f"rerank = {str(self.rerank).lower()}",
-            f'rerank_model = "{self.rerank_model}"',
-            f"rerank_top_n = {self.rerank_top_n}",
-            f"use_summaries = {str(self.use_summaries).lower()}",
-            f"summary_max_dist = {self.summary_max_dist}",
             f"amp_gating = {str(self.amp_gating).lower()}",
             f"amp_min_chars = {self.amp_min_chars}",
             f"amp_budget_chars = {self.amp_budget_chars}",

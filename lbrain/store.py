@@ -19,9 +19,7 @@ CREATE TABLE IF NOT EXISTS docs (
     mtime    REAL NOT NULL,
     is_priority INTEGER NOT NULL DEFAULT 0,
     doc_type TEXT NOT NULL DEFAULT '',
-    metadata TEXT NOT NULL DEFAULT '{}',
-    last_retrieved REAL NOT NULL DEFAULT 0,
-    retrieval_count INTEGER NOT NULL DEFAULT 0
+    metadata TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -51,29 +49,11 @@ CREATE TABLE IF NOT EXISTS supersessions (
     FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS associations (
-    a_path   TEXT NOT NULL,
-    b_path   TEXT NOT NULL,
-    strength REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (a_path, b_path)
-);
-
 -- Key/value metadata. Records the embedding fingerprint (dim/model/provider) the
 -- vectors were built with, so a later config change can't silently corrupt the space.
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS summaries (
-    summary_id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    title            TEXT NOT NULL,
-    text             TEXT NOT NULL,
-    source_paths     TEXT NOT NULL DEFAULT '[]',
-    source_chunk_ids TEXT NOT NULL DEFAULT '[]',
-    n_sources        INTEGER NOT NULL DEFAULT 0,
-    created          REAL NOT NULL DEFAULT 0,
-    embedded         INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS archives (
@@ -95,8 +75,6 @@ CREATE TABLE IF NOT EXISTS archives (
 CREATE INDEX IF NOT EXISTS idx_wikilinks_tgt ON wikilinks(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_supersessions_tgt ON supersessions(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
-CREATE INDEX IF NOT EXISTS idx_assoc_a ON associations(a_path);
-CREATE INDEX IF NOT EXISTS idx_assoc_b ON associations(b_path);
 """
 
 
@@ -124,11 +102,6 @@ class Store:
         chunk_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(chunks)")}
         if "context" not in chunk_cols:
             self.db.execute("ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT ''")
-        doc_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(docs)")}
-        if "last_retrieved" not in doc_cols:
-            self.db.execute("ALTER TABLE docs ADD COLUMN last_retrieved REAL NOT NULL DEFAULT 0")
-        if "retrieval_count" not in doc_cols:
-            self.db.execute("ALTER TABLE docs ADD COLUMN retrieval_count INTEGER NOT NULL DEFAULT 0")
         arch_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(archives)")}
         if arch_cols and "source_hash" not in arch_cols:
             self.db.execute("ALTER TABLE archives ADD COLUMN source_hash TEXT NOT NULL DEFAULT ''")
@@ -141,14 +114,6 @@ class Store:
         self.db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS fts_chunks USING fts5("
             "text, rel_path UNINDEXED, chunk_idx UNINDEXED, tokenize='porter unicode61')"
-        )
-        # Consolidation layer (Tier 3) — dense summary memories + their own vec/FTS.
-        self.db.execute(
-            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_summaries USING vec0(embedding float[{embedding_dim}])"
-        )
-        self.db.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS fts_summaries USING fts5("
-            "text, title UNINDEXED, tokenize='porter unicode61')"
         )
         # Tier-2 archive layer — snapshots of permanent encrypted episodic records.
         # Siloed from the main retrieval path (its own vec/FTS); reached via deep-recall.
@@ -206,13 +171,12 @@ class Store:
 
     def reset_vectors(self, dim: int) -> None:
         """Drop + recreate the vector tables at a new dimension and mark every
-        chunk/summary/archive un-embedded. Required when the embedding dim changes
+        chunk/archive un-embedded. Required when the embedding dim changes
         (vec0 column width is fixed at creation); a full re-embed must follow."""
-        for name in ("vec_chunks", "vec_summaries", "vec_archives"):
+        for name in ("vec_chunks", "vec_archives"):
             self.db.execute(f"DROP TABLE IF EXISTS {name}")
             self.db.execute(f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{dim}])")
         self.db.execute("UPDATE chunks SET embedded = 0")
-        self.db.execute("UPDATE summaries SET embedded = 0")
         self.db.execute("UPDATE archives SET embedded = 0")
         self.embedding_dim = dim
         self.db.commit()
@@ -257,62 +221,6 @@ class Store:
         self.db.execute("DELETE FROM fts_chunks WHERE rel_path = ?", (rel_path,))
         self.db.execute("DELETE FROM chunks WHERE rel_path = ?", (rel_path,))
 
-    def record_retrievals(self, rel_paths: list[str], ts: float) -> None:
-        """Reinforce-on-use: bump retrieval_count + stamp last_retrieved for the
-        docs a query actually surfaced. Frequently-surfaced docs accrue salience
-        (the write path of the Ebbinghaus/Oblivion decay model)."""
-        seen = set()
-        for rel in rel_paths:
-            if rel in seen:
-                continue
-            seen.add(rel)
-            self.db.execute(
-                "UPDATE docs SET retrieval_count = retrieval_count + 1, last_retrieved = ? "
-                "WHERE rel_path = ?",
-                (ts, rel),
-            )
-        self.db.commit()
-
-    # ---------- associative memory (Hebbian co-retrieval graph) ----------
-
-    def strengthen_associations(self, rel_paths: list[str], inc: float = 1.0) -> None:
-        """Hebbian write: every unordered pair among the surfaced docs gains
-        ``inc`` strength. Stored canonically (a_path < b_path) as an undirected
-        edge. 'Docs that fire together wire together.'"""
-        uniq = sorted({r for r in rel_paths})
-        for i in range(len(uniq)):
-            for j in range(i + 1, len(uniq)):
-                a, b = uniq[i], uniq[j]
-                self.db.execute(
-                    "INSERT INTO associations (a_path, b_path, strength) VALUES (?, ?, ?) "
-                    "ON CONFLICT(a_path, b_path) DO UPDATE SET strength = strength + ?",
-                    (a, b, inc, inc),
-                )
-        self.db.commit()
-
-    def neighbors(self, rel_path: str, min_strength: float = 0.0, limit: int = 8) -> list[tuple[str, float]]:
-        """Strongest learned associations for a doc (both edge directions)."""
-        rows = self.db.execute(
-            "SELECT other, strength FROM ("
-            "  SELECT b_path AS other, strength FROM associations WHERE a_path = ? "
-            "  UNION ALL "
-            "  SELECT a_path AS other, strength FROM associations WHERE b_path = ? "
-            ") WHERE strength >= ? ORDER BY strength DESC LIMIT ?",
-            (rel_path, rel_path, min_strength, limit),
-        ).fetchall()
-        return [(r["other"], r["strength"]) for r in rows]
-
-    def representative_chunk(self, rel_path: str):
-        """First chunk + doc signals for a doc — used to inject an associatively
-        recalled doc that didn't directly match the query."""
-        return self.db.execute(
-            "SELECT c.chunk_idx, c.text, d.title, d.is_priority, d.doc_type, "
-            "       d.mtime, d.retrieval_count "
-            "FROM chunks c JOIN docs d ON d.rel_path = c.rel_path "
-            "WHERE c.rel_path = ? ORDER BY c.chunk_idx LIMIT 1",
-            (rel_path,),
-        ).fetchone()
-
     def prune_missing(
         self,
         source_roots: list | None = None,
@@ -347,7 +255,6 @@ class Store:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
             self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
-            self.db.execute("DELETE FROM associations WHERE a_path = ? OR b_path = ?", (rel, rel))
             self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
         return gone
 
@@ -432,62 +339,6 @@ class Store:
                 (cid, blob),
             )
             self.db.execute("UPDATE chunks SET embedded = 1 WHERE chunk_id = ?", (cid,))
-
-    # ---------- consolidation layer (dense summary memories) ----------
-
-    def all_chunk_vectors(self) -> list:
-        """Every embedded chunk with its vector — clustering input for Tier 3."""
-        return self.db.execute(
-            "SELECT v.rowid AS chunk_id, c.rel_path, c.text, d.is_priority, v.embedding "
-            "FROM vec_chunks v "
-            "JOIN chunks c ON c.chunk_id = v.rowid "
-            "JOIN docs d ON d.rel_path = c.rel_path"
-        ).fetchall()
-
-    def clear_summaries(self, commit: bool = True) -> None:
-        self.db.execute("DELETE FROM vec_summaries")
-        self.db.execute("DELETE FROM fts_summaries")
-        self.db.execute("DELETE FROM summaries")
-        if commit:
-            self.db.commit()
-
-    def insert_summary(self, title, text, source_paths, source_chunk_ids, created) -> int:
-        import json
-
-        cur = self.db.execute(
-            "INSERT INTO summaries (title, text, source_paths, source_chunk_ids, n_sources, created) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (title, text, json.dumps(source_paths), json.dumps(source_chunk_ids),
-             len(source_paths), created),
-        )
-        sid = cur.lastrowid
-        self.db.execute(
-            "INSERT INTO fts_summaries (rowid, text, title) VALUES (?, ?, ?)", (sid, text, title)
-        )
-        return sid
-
-    def write_summary_embedding(self, summary_id: int, blob: bytes) -> None:
-        self.db.execute("DELETE FROM vec_summaries WHERE rowid = ?", (summary_id,))
-        self.db.execute(
-            "INSERT INTO vec_summaries (rowid, embedding) VALUES (?, ?)", (summary_id, blob)
-        )
-        self.db.execute("UPDATE summaries SET embedded = 1 WHERE summary_id = ?", (summary_id,))
-
-    def search_summaries(self, q_vec: bytes, k: int = 2) -> list:
-        """Nearest dense summaries to a query vector (the abstraction layer)."""
-        return self.db.execute(
-            "SELECT s.summary_id, s.title, s.text, s.source_paths, s.n_sources, "
-            "       vec_distance_cosine(v.embedding, ?) AS dist "
-            "FROM vec_summaries v JOIN summaries s ON s.summary_id = v.rowid "
-            "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist",
-            (q_vec, q_vec, k),
-        ).fetchall()
-
-    def list_summaries(self) -> list:
-        return self.db.execute(
-            "SELECT summary_id, title, n_sources, length(text) AS len, source_paths "
-            "FROM summaries ORDER BY n_sources DESC"
-        ).fetchall()
 
     # ---------- Tier-2 archive layer (permanent verifiable episodic memory) ----------
 
