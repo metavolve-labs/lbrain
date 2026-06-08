@@ -11,6 +11,7 @@ Existing "RAG" tools index text and forget structure. The lair protocol *is* str
 ## What it does
 
 - **Hybrid retrieval** — BM25 (SQLite FTS5) + cosine (sqlite-vec) fused by Reciprocal Rank Fusion, then wikilink graph boost + priority-folder boost + supersession-aware de-ranking + frontmatter-type filter.
+- **Call-when-needed precision / recency** — opt-in per query (`rerank=True` for precise lookups; `recency=True` for "latest on X"). Off by default — both are *situational* (measured: rerank helps precise lookups but hurts broad coverage), so they're enabled per call, not globally.
 - **Always-on core memory** — an optional curated, user-authored block injected ahead of results (the essentials are always present); gated and token-budgeted by the AMP layer.
 - **Prompt-injection containment** — retrieved note text is fenced and framed as untrusted *data*, never instructions, before it reaches the agent.
 - **Lair Protocol check** — `should_commit_to_lair(text)` decides what's worth saving so you don't have to think about it.
@@ -31,6 +32,7 @@ Existing "RAG" tools index text and forget structure. The lair protocol *is* str
 ```bash
 cd lbrain
 pip install -e .            # lean core (index → embed → search → MCP)
+# pip install -e ".[rerank]"    # + call-when-needed cross-encoder precision pass
 # pip install -e ".[archive]"   # + encrypted Tier-2 archive
 # pip install -e ".[arweave]"   # + real permaweb (Arweave L1) writes
 
@@ -138,7 +140,8 @@ lbrain/
 ├── embed.py          OpenAI embeddings client (batched, stateless)
 ├── store.py          SQLite + sqlite-vec + FTS5 storage layer
 ├── search.py         Hybrid BM25 + cosine (RRF) + graph/priority/supersession boosts
-├── amp.py            Injection gating, token budgeting, provenance, core memory
+├── rerank.py         Optional cross-encoder precision pass (call-when-needed)
+├── amp.py            Injection gating, token budgeting, provenance, core memory + fence
 ├── lair_protocol.py  commit-check heuristic + feedback anti-pattern detector
 ├── onboard.py        Interactive scaffolding for new projects
 ├── mcp_server.py     fastmcp tool surface

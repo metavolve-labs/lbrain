@@ -267,7 +267,9 @@ def embed(stale: bool, batch: int):
     help="Filter by frontmatter type (user/feedback/project/reference)",
 )
 @click.option("--priority", is_flag=True, help="Only priority lairs")
-def query(query: str, k: int, doc_type: str | None, priority: bool):
+@click.option("--rerank", is_flag=True, help="Cross-encoder precision pass (for PRECISE lookups; not broad queries; needs lbrain[rerank])")
+@click.option("--recency", is_flag=True, help="Bounded mtime-freshness lift (for 'latest on X' queries)")
+def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool, recency: bool):
     """Semantic + keyword hybrid search across the brain."""
     cfg = Config.load()
     if getattr(cfg, "amp_gating", True):
@@ -279,7 +281,8 @@ def query(query: str, k: int, doc_type: str | None, priority: bool):
     embedder = make_embedder(cfg)
 
     t0 = time.time()
-    hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority)
+    hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
+                  rerank=rerank, recency=recency)
     dt_ms = (time.time() - t0) * 1000
     kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
 

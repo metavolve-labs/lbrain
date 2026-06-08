@@ -29,6 +29,9 @@ dependencies = [
 archive = ["cryptography>=44,<46"]
 # …plus real permaweb writes via the Arweave L1 transport.
 arweave = ["cryptography>=44,<46", "arweave-python-client>=1.0,<2"]
+# Call-when-needed cross-encoder reranker (search(..., rerank=True)). ONNX, no torch.
+# sentence-transformers also works as a fallback if already installed.
+rerank = ["fastembed>=0.3,<1"]
 
 [project.scripts]
 lbrain = "lbrain.cli:main"

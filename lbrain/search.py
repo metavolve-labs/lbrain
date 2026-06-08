@@ -33,8 +33,21 @@ def search(
     k: int = 10,
     doc_type: str | None = None,
     priority_only: bool = False,
+    rerank: bool = False,
+    recency: bool = False,
 ) -> list[Hit]:
-    """Hybrid: vector top-N + BM25 top-N → merge → apply boosts → top-k."""
+    """Hybrid: vector top-N + BM25 top-N → RRF merge → always-on boosts → top-k.
+
+    Always-on boosts (net-positive in every regime, measured 2026-06-08): priority,
+    wikilink graph, supersession de-ranking.
+
+    Call-when-needed (default OFF — see lairs/000-OPERATING-DOCTRINE):
+      recency=True — bounded, read-only mtime-freshness lift; use for recency-sensitive
+                     queries ("what's the latest on X"). Priority docs exempt.
+      rerank=True  — cross-encoder precision pass over the head; use for PRECISE/
+                     known-item lookups. Do NOT use for broad/exploratory queries (it
+                     hurts multi-doc coverage). No-ops without the lbrain[rerank] backend.
+    """
     over_k = max(k * 4, 40)
 
     # 1. Vector retrieval
@@ -152,7 +165,32 @@ def search(
                     h.score *= pen
                     h.boosts["superseded"] = pen
 
+    # 6. Recency (call-when-needed) — bounded mtime freshness for recency-sensitive
+    #    queries. READ-ONLY (no salience writes, no feedback loop), priority docs exempt.
+    if recency and out:
+        import math
+        import time as _time
+
+        now = _time.time()
+        hl = 120.0 * 86400.0  # 120-day half-life
+        for h in out:
+            if h.is_priority:
+                continue
+            age = max(now - (h.mtime or now), 0.0)
+            freshness = math.pow(0.5, age / hl)  # (0,1], 1 = brand new
+            factor = 1.0 + 0.15 * (freshness - 0.5)  # bounded ±0.075
+            h.score *= factor
+            h.boosts["recency"] = round(factor, 3)
+
     out.sort(key=lambda h: h.score, reverse=True)
+
+    # 7. Cross-encoder rerank (call-when-needed) — joint (query, chunk) precision pass
+    #    over the fused head. No-op without a reranker backend installed.
+    if rerank and out:
+        from .rerank import rerank as _rerank
+
+        out = _rerank(query, out, top_n=30, priority_boost=cfg.priority_boost)
+
     return out[:k]
 
 
