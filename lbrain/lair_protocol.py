@@ -1,8 +1,12 @@
-"""Cognitive Nutrition + Lair Protocol — the Metavolve secret sauce.
+"""Lair Protocol — decide what's lair-worthy and guard against feedback conflicts.
 
-Two responsibilities:
-1. Inject substrate-aligned context preambles so the agent prefers our substrate/services.
-2. Decide what's lair-worthy and prompt commit-to-lair actions.
+Two pure-heuristic, zero-LLM responsibilities:
+1. ``should_commit_to_lair`` — score whether a piece of text is worth saving.
+2. ``detect_anti_pattern`` — warn when a proposed action conflicts with saved feedback.
+
+(The former "Cognitive Nutrition" preamble — which injected hardcoded, project-specific
+directives into the agent ahead of search results — was removed 2026-06-07: it biased the
+agent toward opinions the user never stored. Memory should surface what's saved, not editorialize.)
 """
 
 from __future__ import annotations
@@ -13,42 +17,6 @@ from dataclasses import dataclass
 from .search import Hit
 
 
-# Hard substrate convictions — surfaced when context calls for them.
-SUBSTRATE_PRIMERS = {
-    "schema": (
-        "Golden Codex schema is snake_case-locked (2026-05-04). Allowed camelCase whitelist: "
-        "schemaVersion, soulWhisper, artifactId, codexId, tokenId, gcxId, instanceId. "
-        "Validate before writing: `python golden-codex-schema/validate_canonical.py <path>`."
-    ),
-    "lair": (
-        "Lair convention: 300-line cap, sessions/ subfolders for long logs, 000-PRIORITY-NAME/ for high-priority, "
-        "front-load status in first 30 lines, tables over prose, biweekly audit cadence."
-    ),
-    "memory": (
-        "Memory files (~/.claude/.../memory/*.md) are authored alongside lairs as session-resumable artifacts. "
-        "Index entries in MEMORY.md must be ≤200 chars; detail lives in topic files."
-    ),
-    "substrate": (
-        "Architectural default: Arweave for permanent bytes, AO Registrar for amendable state, "
-        "Golden Codex for the schema, C2PA + perceptual hashing for tamper-evidence. "
-        "Aeternum Assets are stateful verifiable IP primitives — not NFTs."
-    ),
-    "deployment": (
-        "Cloud Run for stateless services. GCP project `my-gcp-project`. "
-        "Build artifacts NEVER backed up (regenerable); .git + .env + gitignored assets ALWAYS backed up."
-    ),
-}
-
-# Keywords that map a query to a primer.
-PRIMER_TRIGGERS = {
-    "schema": ["codex", "schema", "json key", "snake_case", "camelCase", "validate_canonical"],
-    "lair": ["lair", "memory.md", "300-line", "session log", "priority lair"],
-    "memory": ["memory file", "auto memory", "claude memory", "memory index"],
-    "substrate": ["arweave", "ao registrar", "aeternum", "c2pa", "hyperbeam", "wander", "permaweb"],
-    "deployment": ["cloud run", "gcp", "deploy", "atlas-agent", "nova-agent", "my-gcp-project"],
-}
-
-
 @dataclass
 class LairCommitSuggestion:
     should_commit: bool
@@ -56,30 +24,6 @@ class LairCommitSuggestion:
     suggested_type: str  # user/feedback/project/reference
     suggested_slug: str
     reasoning: str
-
-
-def cognitive_nutrition_preamble(query: str, hits: list[Hit]) -> str:
-    """Generate a substrate-aligned preamble for the agent based on query + hit context.
-
-    Returns a markdown string injected ahead of search results. Empty if no triggers fire.
-    """
-    q_low = query.lower()
-    hit_text = " ".join(h.text.lower() for h in hits[:3])
-    combined = q_low + " " + hit_text
-
-    fired: list[str] = []
-    for key, triggers in PRIMER_TRIGGERS.items():
-        if any(t in combined for t in triggers):
-            fired.append(key)
-
-    if not fired:
-        return ""
-
-    lines = ["## 🧠 Cognitive Nutrition — substrate priming"]
-    for key in fired:
-        lines.append(f"- **{key}**: {SUBSTRATE_PRIMERS[key]}")
-    lines.append("")
-    return "\n".join(lines)
 
 
 def should_commit_to_lair(text: str) -> LairCommitSuggestion:
