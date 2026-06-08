@@ -280,7 +280,7 @@ def verify_on_chain(txid: str, gateway: str = "https://arweave.net", timeout: fl
 def make_transport(cfg):
     """Pick a transport from config. Defaults to the offline local store; the real
     Arweave path is opt-in (``arweave_enabled = true`` + ``arweave_transport``)."""
-    from .config import CONFIG_DIR
+    from ..config import CONFIG_DIR
 
     transport = getattr(cfg, "arweave_transport", "local")
     if getattr(cfg, "arweave_enabled", False) and transport in ("arweave", "arweave-l1", "l1"):
@@ -414,10 +414,14 @@ class Archiver:
     """Ties together crypto, the transport, the keystore, and LBrain's index."""
 
     def __init__(self, cfg, store, embedder=None, transport=None):
-        from .config import CONFIG_DIR
+        from ..config import CONFIG_DIR
+        from .storage import ArchiveStore
 
         self.cfg = cfg
         self.store = store
+        # The archive's own storage layer (its tables + queries), sharing the core
+        # Store's sqlite connection so there's a single writer. ensure_schema runs here.
+        self.astore = ArchiveStore(store.db, store.embedding_dim)
         self.embedder = embedder
         # transport override lets hook-driven capture force the offline local store
         # regardless of the global config (which may be arweave-enabled).
@@ -441,7 +445,7 @@ class Archiver:
         src_hash = _source_hash(payload)
 
         if skip_if_exists:
-            existing = self.store.get_archive_by_source(src_hash)
+            existing = self.astore.get_archive_by_source(src_hash)
             if existing is not None:
                 return ArchiveResult(
                     txid=existing["txid"], namespace=existing["namespace"],
@@ -470,7 +474,7 @@ class Archiver:
         text = _decode_text(payload)
         snapshot = make_snapshot(text, self.cfg, model=snapshot_model, force_extractive=force_extractive)
 
-        self.store.insert_archive(
+        self.astore.insert_archive(
             txid=txid,
             namespace=namespace,
             title=title,
@@ -483,7 +487,7 @@ class Archiver:
         )
         if self.embedder is not None:
             try:
-                self.store.write_archive_embedding(txid, self.embedder.embed_one(snapshot))
+                self.astore.write_archive_embedding(txid, self.embedder.embed_one(snapshot))
             except Exception:
                 pass  # embedding is best-effort; snapshot is still FTS-searchable
 
@@ -515,7 +519,7 @@ class Archiver:
         Note: this only achieves true erasure if ``~/.lbrain/keys/`` is not backed up
         elsewhere (a backed-up wrapped key + the passphrase can still recover the payload)."""
         had_key = self.keystore.shred(txid)
-        self.store.mark_archive_shredded(txid, purge_snapshot=purge_snapshot)
+        self.astore.mark_archive_shredded(txid, purge_snapshot=purge_snapshot)
         return had_key
 
 

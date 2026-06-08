@@ -11,9 +11,9 @@ import os
 
 import pytest
 
-from lbrain import crypto
+from lbrain.archive import crypto
 from lbrain.archive import Archiver, LocalTransport, _content_txid, make_snapshot, verify_on_chain
-from lbrain.crypto import CryptoError, Keystore
+from lbrain.archive.crypto import CryptoError, Keystore
 from lbrain.store import Store
 
 PASS = "correct horse battery staple"
@@ -174,8 +174,8 @@ def test_archive_retrieve_byte_identical(tmp_path, monkeypatch):
     assert res.txid and res.n_bytes == len(payload)
     # Byte-identical round-trip (the core DoD).
     assert arc.retrieve(res.txid, PASS) == payload
-    # Indexed snapshot is semantically recallable.
-    hits = store.search_archives(emb.embed_one("what did Tad approve"), k=3)
+    # Indexed snapshot is semantically recallable (via the archive storage layer).
+    hits = arc.astore.search_archives(emb.embed_one("what did Tad approve"), k=3)
     assert any(h["txid"] == res.txid for h in hits)
     store.close()
 
@@ -197,7 +197,7 @@ def test_crypto_shred_makes_record_undecryptable(tmp_path, monkeypatch):
         arc.retrieve(res.txid, PASS)
     # Hard shred ALSO erases the local cleartext snapshot + its FTS/vector rows —
     # nothing readable about the record survives locally, only an audit stub.
-    row = store.get_archive(res.txid)
+    row = arc.astore.get_archive(res.txid)
     assert row["shredded"] == 1
     assert row["snapshot"] == ""
     fts = store.db.execute(
@@ -217,7 +217,7 @@ def test_soft_shred_keeps_snapshot(tmp_path, monkeypatch):
     res = arc.archive(b"keep my snapshot for browsing", title="soft", passphrase=PASS)
 
     arc.shred(res.txid, purge_snapshot=False)  # soft
-    row = store.get_archive(res.txid)
+    row = arc.astore.get_archive(res.txid)
     assert row["shredded"] == 1
     assert row["snapshot"]  # snapshot retained for browsing
     # Payload still unrecoverable (key was destroyed regardless of soft/hard).
