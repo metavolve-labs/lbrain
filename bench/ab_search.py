@@ -15,16 +15,16 @@ from lbrain.embed import EmbedClient
 from lbrain.search import search
 from lbrain.store import Store
 
-# Representative of the real corpus: compound tokens (C2PA, snake_case, HyperBEAM),
-# semantic phrases, priority-doc topics, and the deleted-content negatives.
+# Corpus-agnostic: exercises the retrieval characteristics that matter — compound/technical
+# tokens, snake_case vs camelCase, multi-word semantic phrases, and supersession negatives.
 QUERIES = [
-    "Wander sovereign signing red-team blocker",
-    "C2PA manifest hash perceptual hash extension tags",
-    "museum trojan horse institutional title curator commission",
+    "hybrid vector keyword RRF fusion ranking",
+    "content addressable storage dedup sha256",
+    "OAuth token refresh race condition retry backoff",
     "HyperBEAM compute_cached function_clause crash recovery",
-    "Density Imperative dense curation teaches",
-    "escrow royalty enforcement Lua settle split",
-    "Sam Williams outreach audience calibration registers",
+    "kubernetes pod eviction OOMKilled recovery",
+    "Argon2id crypto-shred encrypted archive envelope",
+    "sqlite-vec FTS5 hybrid index rebuild",
     "snake_case schema validation camelCase whitelist",
     "Ebbinghaus forgetting curve memory decay",
     "Arweave UDL v0.2 ANS-110 atomic asset tags",

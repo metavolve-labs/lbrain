@@ -24,7 +24,7 @@ Existing "RAG" tools index text and forget structure. The lair protocol *is* str
 - Python 3.10+
 - SQLite + sqlite-vec + FTS5 (native, no WASM, no daemon)
 - OpenAI text-embedding-3-small (~$0.12 per 6M-token corpus; pennies on updates)
-- `fastmcp` for MCP server
+- the official `mcp` SDK (FastMCP) for the MCP server
 - ~2,750 LOC core + ~1,370 LOC optional Tier-2 archive subpackage. No moving parts.
 
 ## Install
@@ -84,8 +84,8 @@ Three minutes of opinionated questions → working CLAUDE.md + three priority la
 ## Register MCP with Claude Code
 
 ```bash
-chmod +x /path/to/repos/lbrain/scripts/lbrain-mcp
-claude mcp add -s user lbrain -- /path/to/repos/lbrain/scripts/lbrain-mcp
+chmod +x /path/to/lbrain/scripts/lbrain-mcp
+claude mcp add -s user lbrain -- /path/to/lbrain/scripts/lbrain-mcp
 ```
 
 Tools surfaced: `lair_query`, `lair_search`, `lair_protocol_check`, `lair_check_action`, `lair_stats`.
@@ -144,7 +144,7 @@ lbrain/
 ├── amp.py            Injection gating, token budgeting, provenance, core memory + fence
 ├── lair_protocol.py  commit-check heuristic + feedback anti-pattern detector
 ├── onboard.py        Interactive scaffolding for new projects
-├── mcp_server.py     fastmcp tool surface
+├── mcp_server.py     MCP tool surface (FastMCP)
 ├── cli.py            click CLI entry point
 ├── config.py         ~/.lbrain/config.toml
 └── archive/          OPTIONAL Tier-2 subpackage (install via lbrain[archive])
@@ -165,6 +165,10 @@ directory) and the core runs unchanged — the archive CLI commands and the
 ## Truth hierarchy
 
 Source files (markdown lairs and memory entries) are authoritative. The SQLite index is a derivative cache. If they disagree, trust the file and run `lbrain import && lbrain embed --stale`.
+
+## License
+
+BSD 3-Clause — see [LICENSE](LICENSE). Copyright (c) 2026 Metavolve Labs, Inc.
 
 ---
 
