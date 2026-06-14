@@ -2,7 +2,7 @@
 
 LBrain's Tier-1 is the hot retrieval/curation layer (sqlite-vec + FTS5 + the Lair
 Protocol): "selectivity at the surface." This module is Tier-2: "permanence at the
-substrate." The policy is fixed (see ``docs/ARWEAVE_INTEGRATION_HANDOFF.md``):
+substrate." The policy is fixed:
 
     STORE FULL, READ SNAPSHOT.
 
@@ -94,8 +94,7 @@ def _load_arweave_wallet(wallet_ref: str):
     Supported ``wallet_ref`` forms:
       - ``gcp-secret:<project>/<secret>`` (or ``gcp:…``) — fetch the JWK from GCP Secret
         Manager at runtime and build the wallet IN MEMORY (``Wallet.from_data``). The
-        private key is never written to disk. This is how the the archiver agent holds the
-        same wallet (secret ``MY_ARWEAVE_JWK`` in ``my-gcp-project``).
+        private key is never written to disk (e.g. ``gcp-secret:my-project/my-arweave-jwk``).
       - a filesystem path to a JWK json.
     """
     import json
@@ -149,7 +148,7 @@ def _fetch_gcp_secret(project: str, secret: str) -> str:
 class ArweaveL1Transport:
     """Real permaweb writes via direct Arweave L1 (arweave-python-client).
 
-    Same direct-L1 approach the the archiver agent uses. Signs with the wallet JWK, tags
+    Direct-L1 permaweb archival. Signs with the wallet JWK, tags
     the tx (GraphQL-queryable), and posts it. NOTE: L1 settlement costs AR — for the
     text-sized sessions this archive targets that is pennies, but a funded wallet is
     required, so this path is exercised in real use, not in the offline test suite.

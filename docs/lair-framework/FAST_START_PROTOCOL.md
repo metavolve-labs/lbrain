@@ -155,17 +155,17 @@ Produce the filled LAIR.md now.
 
 ## (d) Worked example — a sample repo → lair
 
-Inputs: README H1 `# ExampleMCPHub`, blockquote `## Mission`, live `/mcp` + `/.well-known/*` endpoints (resolve), `firebase.json` + `server.py` present, MCP tool + pricing tables, footer motto. Parent CLAUDE.md lists it as sibling product, revenue-bearing (x402). `git log -1 --format=%cs` → `2026-05-29`.
+Inputs: README H1 `# ExampleHub`, blockquote `## Mission`, live `/mcp` + `/.well-known/*` endpoints (resolve), `firebase.json` + `server.py` present, MCP tool + pricing tables, footer motto. Parent CLAUDE.md lists it as sibling product, revenue-bearing (x402). `git log -1 --format=%cs` → `2026-05-29`.
 
-Pre-inferred: Status=OPERATIONAL (live endpoints + deploy artifacts); Priority=HIGH (revenue-bearing sibling product); folder=`000-PRIORITY-STUDIOMCPHUB/`.
+Pre-inferred: Status=OPERATIONAL (live endpoints + deploy artifacts); Priority=HIGH (revenue-bearing sibling product); folder=`000-PRIORITY-EXAMPLEHUB/`.
 
 ```markdown
-# ExampleMCPHub
+# ExampleHub
 
 **Status**: OPERATIONAL
 **Priority**: HIGH
 **Last Updated**: 2026-05-29
-**Mission**: The creative infrastructure MCP layer that gives any AI agent a paid studio of creative tools.
+**Mission**: An MCP service that exposes a paid tool surface to AI agents.
 
 ---
 

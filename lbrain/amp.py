@@ -51,7 +51,7 @@ def gate(query: str, min_chars: int = 3, min_content_words: int = 1) -> tuple[bo
     """AMP Gate 1 (rule-based, ~0ms): should memory be injected for this query at all?
 
     Returns (proceed, reason). Content-driven, NOT length-driven — a short but real
-    query ("UDL terms", "the verifier") must pass; only greetings, empties, and zero-content
+    query ("UDL terms", "RRF") must pass; only greetings, empties, and zero-content
     strings are gated. Conservative by design: when unsure, it proceeds.
     """
     q = (query or "").strip()

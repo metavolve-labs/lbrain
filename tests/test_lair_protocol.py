@@ -40,7 +40,7 @@ def test_commitment_phrase_without_decision_verb():
 
 
 def test_explicit_save_intent_still_fires():
-    sug = should_commit_to_lair("Remember that the GCP project is my-gcp-project.")
+    sug = should_commit_to_lair("Remember that the GCP project is my-project-12345.")
     assert sug.should_commit is True
 
 

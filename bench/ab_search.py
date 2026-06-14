@@ -15,8 +15,8 @@ from lbrain.embed import EmbedClient
 from lbrain.search import search
 from lbrain.store import Store
 
-# Representative of the real corpus: compound tokens (C2PA, snake_case, HyperBEAM),
-# semantic phrases, priority-doc topics, and the deleted-content negatives.
+# Corpus-agnostic: exercises the retrieval characteristics that matter — compound/technical
+# tokens, snake_case vs camelCase, multi-word semantic phrases, and supersession negatives.
 QUERIES = [
     "hybrid vector keyword RRF fusion ranking",
     "content addressable storage dedup sha256",

@@ -33,7 +33,7 @@ command -v "$LB" >/dev/null 2>&1 || exit 0
 
 # Shared state dirs to watch for the read-delta (lairs + both memory silos).
 # Override with LBRAIN_WATCH_DIRS (colon-separated) if the layout changes.
-DEFAULT_WATCH="/path/to/repos/golden_codex_pipeline/lairs:/root/.claude/projects/-path-to-repos/memory:/root/.claude/projects/-path-to-repos-golden-codex-pipeline/memory"
+DEFAULT_WATCH="$HOME/lairs:$HOME/.lbrain/memory"
 IFS=':' read -r -a WATCH_DIRS <<< "${LBRAIN_WATCH_DIRS:-$DEFAULT_WATCH}"
 
 now=$(date +%s)

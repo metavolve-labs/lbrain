@@ -11,10 +11,10 @@
 #     http://lbrain:7370/mcp and registers the 5 lair_* tools at startup.
 #
 # Two-brain pattern (recommended for production):
-#   1. SHARED brain (read-only mount of Tad's full corpus) — Cognitive Nutrition + global
+#   1. SHARED brain (read-only mount of your full corpus) — global recall + global
 #      anti-pattern detection on substrate/schema/lair/deployment topics.
 #   2. TASK-SPECIFIC brain (per-agent, ephemeral or persisted) — curated subset for the
-#      agent's mission (e.g. Kite Buildathon brain pre-loaded with x402 / AP2 / AO docs).
+#      agent's mission (e.g. a hackathon brain pre-loaded with the relevant spec/integration docs).
 #
 # To use:
 #   1. cp .env.example .env  &&  set OPENAI_API_KEY
