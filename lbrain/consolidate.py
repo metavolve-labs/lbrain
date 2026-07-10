@@ -53,12 +53,29 @@ _SELF_EXCLUDE = (
 )
 
 
+def source_date(rel_path: str, mtime: float | None = None) -> str:
+    """Best-available date label for a source, so the synthesizer can anchor
+    time-bound facts ('as of <date>'). Editorial dates in filenames beat file
+    mtime (which drifts on rewrites)."""
+    import re
+    m = re.findall(r"\d{4}-\d{2}-\d{2}", rel_path)
+    if m:
+        return f"dated {m[-1]}"
+    m = re.findall(r"\d{4}-\d{2}(?!\d)", rel_path)
+    if m:
+        return f"dated {m[-1]}"
+    if mtime:
+        return f"last modified {time.strftime('%Y-%m-%d', time.localtime(mtime))}"
+    return "date unknown"
+
+
 def get_all_embedded_chunks(store: Store) -> list[dict]:
     """All embedded chunks EXCEPT abstraction-derived ones (no self-feeding)."""
     where = " AND ".join("c.rel_path NOT LIKE ?" for _ in _SELF_EXCLUDE)
     rows = store.db.execute(
-        "SELECT c.chunk_id, c.text, c.rel_path, v.embedding "
+        "SELECT c.chunk_id, c.text, c.rel_path, d.mtime, v.embedding "
         "FROM chunks c JOIN vec_chunks v ON c.chunk_id = v.rowid "
+        "JOIN docs d ON d.rel_path = c.rel_path "
         f"WHERE {where}",
         _SELF_EXCLUDE,
     ).fetchall()
@@ -76,6 +93,7 @@ def get_all_embedded_chunks(store: Store) -> list[dict]:
             "chunk_id": r["chunk_id"],
             "text": r["text"],
             "rel_path": r["rel_path"],
+            "date": source_date(r["rel_path"], r["mtime"]),
             # Unit-normalize once so clustering is dot-product only.
             "vector": [a / norm for a in vec],
         })
@@ -126,17 +144,42 @@ def cluster_signature(cluster_chunks: list[dict]) -> str:
     return h.hexdigest()[:12]
 
 
+def sanitize_wikilinks(text: str, source_paths: list[str]) -> tuple[str, int]:
+    """Deterministically strip [[wikilinks]] whose target is not one of the
+    cluster's source documents (full rel_path, basename, or stem) — LLM-emitted
+    links feed LBrain's ranking boosts, so hallucinated targets are not cosmetic."""
+    import re
+    allowed = set()
+    for sp in source_paths:
+        p = Path(sp)
+        allowed.update(x.lower() for x in (sp, p.name, p.stem))
+
+    removed = 0
+
+    def _check(m):
+        nonlocal removed
+        target = m.group(1).strip()
+        if target.lower() in allowed:
+            return m.group(0)
+        removed += 1
+        return target
+
+    return re.sub(r"\[\[([^\]]+)\]\]", _check, text), removed
+
+
 def synthesize_cluster(api_key: str, cluster_chunks: list[dict], model=DEFAULT_MODEL) -> str:
     texts = []
     for i, c in enumerate(cluster_chunks):
-        texts.append(f"--- Fragment {i+1} (Source: {c['rel_path']}) ---\n{c['text']}")
+        date = c.get("date", "date unknown")
+        texts.append(f"--- Fragment {i+1} (Source: {c['rel_path']}; {date}) ---\n{c['text']}")
 
     prompt = (
         "You are LBrain's cognitive consolidation engine. Synthesize the following memory fragments into a single, "
         "dense, coherent abstraction. Focus on extracting the highest-signal principles, facts, or architecture decisions. "
         "Filter out noise. Ensure you synthesize the information, do not just list it. "
         "Ground every statement in the fragments — do not add facts that are not present in them. "
-        "State time-bound facts as point-in-time observations (e.g. 'as of 2026-05-22, ...'), never as current state. "
+        "Each fragment header carries its source date: anchor EVERY time-bound fact to it as a point-in-time observation "
+        "(e.g. 'as of 2026-05-22, ...'), never as current state — plans, statuses, deadlines, and open items are all time-bound. "
         "Begin directly with a heading naming the topic — no preamble like 'Here is the synthesis'.\n"
         "Crucially: Embed wikilinks back to the source documents referenced where appropriate, for example [[filename]] — "
         "but ONLY for names that appear in the fragment Source paths above.\n\n"
@@ -204,6 +247,9 @@ def run_consolidation(
             continue
 
         sources = sorted(set(c["rel_path"] for c in cluster["chunks"]))
+        summary, stripped = sanitize_wikilinks(summary, sources)
+        if stripped:
+            click.echo(f"    stripped {stripped} unsourced wikilink(s)")
         first_line = next((ln.strip("# ").strip() for ln in summary.splitlines() if ln.strip()), "")
         content = (
             "---\n"
