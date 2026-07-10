@@ -525,6 +525,39 @@ def remember(text: str, write: bool):
     click.echo(f"  ✍️  wrote {out}  (run `lbrain import {mem_dir} && lbrain embed --stale` to index)")
 
 
+@main.command()
+@click.option("--threshold", default=0.92, help="Cosine similarity threshold for clustering (0.0 to 1.0)")
+@click.option("--model", default=None, help="Gemini model for synthesis (default: models/gemini-3.1-pro)")
+@click.option("--limit", default=0, help="Synthesize at most N new clusters this run (0 = no limit)")
+@click.option("--dry-run", is_flag=True, help="Cluster and report only — no API calls, no files written")
+def consolidate(threshold: float, model: str, limit: int, dry_run: bool):
+    """Cluster related chunks and synthesize dense abstraction memories (GATED).
+
+    Output goes to ~/.lbrain/abstractions/ — NOT a source tree, so nothing
+    enters retrieval automatically. To serve abstractions (after measuring),
+    add that directory to `sources` in config.toml, then import + embed.
+    Idempotent: re-runs skip clusters that already have an abstraction file.
+    """
+    from .consolidate import ABSTRACTIONS_DIR, DEFAULT_MODEL, run_consolidation
+    cfg = Config.load()
+    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    try:
+        generated, skipped, total = run_consolidation(
+            cfg, store,
+            threshold=threshold,
+            model=model or DEFAULT_MODEL,
+            limit=limit,
+            dry_run=dry_run,
+        )
+    finally:
+        store.close()
+    if dry_run:
+        click.echo(f"  ✓ Dry run: {total} clusters; {skipped} already synthesized, {total - skipped} would be new.")
+    else:
+        click.echo(f"  ✓ Consolidation complete: {generated} new, {skipped} skipped (existing), {total} clusters total.")
+        click.echo(f"  Output: {ABSTRACTIONS_DIR}  (gated — measure via A/B before adding to sources)")
+
+
 # ---------------------------------------------------------------------------
 # Optional Tier-2 archive commands — registered only if the archive extra is
 # installed (importing lbrain.archive.cli requires `cryptography`). Without it,
