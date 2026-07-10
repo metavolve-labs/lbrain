@@ -135,7 +135,9 @@ def synthesize_cluster(api_key: str, cluster_chunks: list[dict], model=DEFAULT_M
         "You are LBrain's cognitive consolidation engine. Synthesize the following memory fragments into a single, "
         "dense, coherent abstraction. Focus on extracting the highest-signal principles, facts, or architecture decisions. "
         "Filter out noise. Ensure you synthesize the information, do not just list it. "
-        "Ground every statement in the fragments — do not add facts that are not present in them.\n"
+        "Ground every statement in the fragments — do not add facts that are not present in them. "
+        "State time-bound facts as point-in-time observations (e.g. 'as of 2026-05-22, ...'), never as current state. "
+        "Begin directly with a heading naming the topic — no preamble like 'Here is the synthesis'.\n"
         "Crucially: Embed wikilinks back to the source documents referenced where appropriate, for example [[filename]] — "
         "but ONLY for names that appear in the fragment Source paths above.\n\n"
         + "\n\n".join(texts)
