@@ -25,6 +25,63 @@ class Hit:
     mtime: float = 0.0
 
 
+# Temporal query signature — triggers the abstraction recency guardrail.
+_TEMPORAL_RE = __import__("re").compile(
+    r"\b(latest|recent(ly)?|current(ly)?|now|today|newest|most recent|status|"
+    r"state of|up[- ]?to[- ]?date|this (week|month)|what changed|updated?)\b",
+    __import__("re").IGNORECASE,
+)
+
+
+def _is_abstraction(h: Hit) -> bool:
+    """type: abstraction awareness. doc_type when the importer captured it;
+    filename convention as fallback (verified 2026-07-11: 10/50 live abstraction
+    docs carry an empty doc_type — never trust the field alone)."""
+    if h.doc_type == "abstraction":
+        return True
+    name = h.rel_path.rsplit("/", 1)[-1]
+    return name.startswith("abstraction-") or name.startswith("abstraction_")
+
+
+def _assemble_topk(out: list[Hit], k: int, cfg: Config, query: str, recency: bool) -> list[Hit]:
+    """Abstraction-aware final assembly (measured 2026-07-11: at ~46% corpus
+    share, uncapped abstractions cost recency −0.083 MRR and evicted gold docs
+    from the top-k; at low density they are net-safe enrichment).
+
+    Recency guardrail — on temporally-signed queries (regex or explicit
+    recency=True), source documents hold the high ground: abstraction hits are
+    stably demoted below ALL source hits. Deliberately stricter than a
+    timestamp comparison: an abstraction's mtime is its GENERATION time, not
+    its content's age, so freshness math would flatter exactly the stale
+    summaries this guards against.
+
+    Density cap — at most cfg.abstraction_topk_cap abstraction chunks in the
+    final top-k; excess abstractions yield their slots to source chunks.
+    """
+    guard = getattr(cfg, "abstraction_recency_guard", True)
+    if guard and (recency or _TEMPORAL_RE.search(query)):
+        demoted = [h for h in out if _is_abstraction(h)]
+        if demoted:
+            out = [h for h in out if not _is_abstraction(h)] + demoted
+            for h in demoted:
+                h.boosts["recency_guard"] = 0.0  # marker: demoted below sources
+
+    cap = getattr(cfg, "abstraction_topk_cap", 2)
+    if cap < 0:
+        return out[:k]
+    picked: list[Hit] = []
+    n_abs = 0
+    for h in out:
+        if _is_abstraction(h):
+            if n_abs >= cap:
+                continue
+            n_abs += 1
+        picked.append(h)
+        if len(picked) >= k:
+            break
+    return picked
+
+
 def search(
     cfg: Config,
     store: Store,
@@ -176,6 +233,10 @@ def search(
         for h in out:
             if h.is_priority:
                 continue
+            if _is_abstraction(h):
+                # mtime = generation time, not content age — a freshness lift here
+                # would flatter yesterday's synthesis of last month's state.
+                continue
             age = max(now - (h.mtime or now), 0.0)
             freshness = math.pow(0.5, age / hl)  # (0,1], 1 = brand new
             factor = 1.0 + 0.15 * (freshness - 0.5)  # bounded ±0.075
@@ -191,7 +252,9 @@ def search(
 
         out = _rerank(query, out, top_n=30, priority_boost=cfg.priority_boost)
 
-    return out[:k]
+    # 8. Abstraction-aware final assembly: recency guardrail + top-k density cap.
+    #    Applied LAST so the guarantees hold regardless of boosts or rerank.
+    return _assemble_topk(out, k, cfg, query, recency)
 
 
 def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:

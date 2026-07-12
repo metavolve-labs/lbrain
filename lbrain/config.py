@@ -140,6 +140,10 @@ class Config:
     # --- supersession-aware retrieval (Zep-inspired) — bury superseded, surface live truth ---
     supersede_aware: bool = True  # de-rank docs another doc explicitly supersedes
     supersede_penalty: float = 0.25  # multiplicative score penalty for a superseded doc
+    # --- consolidation serving (measured 2026-07-11: uncapped abstractions at ~46%
+    #     corpus share cost recency −0.083 MRR and evicted gold docs; low density is net-safe) ---
+    abstraction_topk_cap: int = 2  # max abstraction chunks in the final top-k (-1 = uncapped)
+    abstraction_recency_guard: bool = True  # temporal queries: source docs outrank abstractions
     # --- Tier 2: permanent verifiable archive (Arweave substrate) ---
     arweave_enabled: bool = False  # opt-in to real permaweb writes (else offline local store)
     arweave_transport: str = "local"  # "local" (offline, content-addressed) | "arweave"/"l1"
@@ -195,6 +199,8 @@ class Config:
             core_memory_chars=raw.get("core_memory_chars", cls.core_memory_chars),
             supersede_aware=raw.get("supersede_aware", cls.supersede_aware),
             supersede_penalty=raw.get("supersede_penalty", cls.supersede_penalty),
+            abstraction_topk_cap=raw.get("abstraction_topk_cap", cls.abstraction_topk_cap),
+            abstraction_recency_guard=raw.get("abstraction_recency_guard", cls.abstraction_recency_guard),
             arweave_enabled=raw.get("arweave_enabled", cls.arweave_enabled),
             arweave_transport=raw.get("arweave_transport", cls.arweave_transport),
             arweave_wallet_path=raw.get("arweave_wallet_path")
