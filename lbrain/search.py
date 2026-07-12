@@ -106,6 +106,13 @@ def search(
                      hurts multi-doc coverage). No-ops without the lbrain[rerank] backend.
     """
     over_k = max(k * 4, 40)
+    # When abstraction serving is capped, deepen the candidate pool: in an
+    # abstraction-dense corpus the SQL-level top-N cut fills with abstraction
+    # chunks BEFORE assembly can cap them, evicting source candidates upstream
+    # (measured 2026-07-11: one broad query lost its rank-1 gold doc to pool
+    # crowding with zero abstractions in the final top-k).
+    if getattr(cfg, "abstraction_topk_cap", 2) >= 0:
+        over_k *= 2
 
     # 1. Vector retrieval
     q_vec = embedder.embed_one(query)
