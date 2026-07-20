@@ -358,11 +358,20 @@ class Store:
 
 
 def _safe_meta(meta: dict) -> dict:
-    """Strip non-JSON-serializable values from frontmatter."""
-    out = {}
-    for k, v in meta.items():
-        if isinstance(v, (str, int, float, bool, list, dict)) or v is None:
-            out[k] = v
-        else:
-            out[k] = str(v)
-    return out
+    """Strip non-JSON-serializable values from frontmatter.
+
+    Recurses into nested dicts/lists: a datetime (unquoted YAML date) nested
+    under a container — e.g. `metadata.modified` stamped by the auto-memory
+    hook — passed the old top-level isinstance check unchanged and then aborted
+    json.dumps, failing the ENTIRE import batch. Every non-JSON-native leaf,
+    at any depth, is coerced to str (extending the original top-level intent).
+    """
+    def _coerce(v):
+        if isinstance(v, dict):
+            return {k: _coerce(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_coerce(x) for x in v]
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        return str(v)
+    return {k: _coerce(v) for k, v in meta.items()}
