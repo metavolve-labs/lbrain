@@ -271,7 +271,7 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
         return []
     rows = store.db.execute(
         "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
-        "       d.title, d.is_priority, d.doc_type "
+        "       d.title, d.is_priority, d.doc_type, d.mtime "
         "FROM fts_chunks "
         "JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
         "JOIN docs d ON d.rel_path = c.rel_path "
@@ -290,6 +290,7 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
             keyword_score=-r["rank"],
             doc_type=r["doc_type"],
             is_priority=bool(r["is_priority"]),
+            mtime=r["mtime"],
         )
         for r in rows
     ]

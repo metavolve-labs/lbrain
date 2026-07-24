@@ -1,0 +1,82 @@
+"""Config.write → Config.load round-trip — every dataclass field survives.
+
+Red-team 2026-07-24: write() is a manually-maintained line list and had already
+drifted (abstraction_topk_cap / abstraction_recency_guard were loaded but never
+persisted), which means a rollback value written to config could be silently
+resurrected to the class default by any later cfg.write(). This test is the
+hard gate against that class of drift: set every field to a NON-default value,
+write, reload, compare.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from pathlib import Path
+
+from lbrain import config as config_mod
+from lbrain.config import Config
+
+# Secrets round-trip through ~/.lbrain/env + os.environ, not config.toml —
+# excluded here (their write path is _write_env_var, covered elsewhere).
+EXCLUDED = {"openai_api_key", "gemini_api_key"}
+
+
+def non_default(name: str, value):
+    """A deterministic non-default value of the same type."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, int):
+        return value + 7
+    if isinstance(value, float):
+        return value + 0.125
+    if isinstance(value, str):
+        if name == "gemini_base_url":
+            return "https://proxy.example.com/v1beta"
+        if name == "serve_mode":
+            return "structured"
+        if name == "embedding_provider":
+            return "gemini"
+        if name == "arweave_transport":
+            # "arweave", NOT "local" — "local" IS the default, which made this
+            # gate vacuous for the field (2026-07-24 review finding)
+            return "arweave"
+        if name == "archive_namespace":
+            return "shared"
+        return value + "-x"
+    if isinstance(value, Path):
+        return Path(str(value) + ".alt")
+    if isinstance(value, list):
+        return [Path("/tmp/lbrain-test-source")]
+    raise AssertionError(f"unhandled field type for {name}: {type(value)}")
+
+
+def test_write_load_roundtrip_every_field(tmp_path, monkeypatch):
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr(config_mod, "ENV_PATH", tmp_path / "env")
+
+    cfg = Config()
+    for f in dataclasses.fields(Config):
+        if f.name in EXCLUDED:
+            continue
+        nd = non_default(f.name, getattr(cfg, f.name))
+        # a "non-default" equal to the default makes the gate vacuous for
+        # that field — fail loudly instead of silently weakening the test
+        assert nd != getattr(cfg, f.name), f"non_default collides with default: {f.name}"
+        setattr(cfg, f.name, nd)
+
+    cfg.write()
+    loaded = Config.load()
+
+    drifted = []
+    for f in dataclasses.fields(Config):
+        if f.name in EXCLUDED:
+            continue
+        want, got = getattr(cfg, f.name), getattr(loaded, f.name)
+        # sources/db_path round-trip as Paths
+        if want != got:
+            drifted.append((f.name, want, got))
+    assert not drifted, (
+        "Config.write() dropped or altered fields (add them to the write() "
+        f"line list!): {drifted}"
+    )

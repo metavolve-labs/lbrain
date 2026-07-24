@@ -1,18 +1,26 @@
 """Admissibility gate — rung 1 (deterministic, serve-path-safe, no LLM).
 
 Judges whether a retrieved record is EVIDENTIALLY SUFFICIENT for a specific
-query, not merely topically relevant. Born from the measured near-domain
-inversion (NMPFP pilot -> v3 confirmatory: authentic-but-insufficient records
-drive failure-to-abstain 25-72% across model families; relevance-ranked
-retrieval serves exactly those records).
+query, not merely topically relevant. Rationale (post-v3b calibration,
+2026-07-24): relevance-ranked retrieval preferentially serves
+authentic-but-insufficient near-domain records. What is MEASURED: attribution
+blur collapses value EXTRACTION/utility (~26-64% C-utility vs ~100%/~80% on
+clean-structured input), and near-miss records waste serve budget. What is NOT
+claimed: that serving them induces spontaneous misattribution — v3b showed 0-1%
+confabulation without an explicit interpolation invitation (the earlier
+"induces misattribution 25-72%" rationale was a pre-v3b overclaim; the
+real-corpus 18% residual's mechanism remains an open question). The gate
+therefore exists to LABEL what actually binds and to FLAG ambiguity-dense
+result sets — not to prevent confabulation.
 
 Verdicts:
   ADMISSIBLE        — record binds a typed answer candidate to THIS query's
                       specific terms; safe to serve as grounding.
   INADMISSIBLE_NEAR — the hazard class: strong domain overlap, but the query's
                       distinctive specifics are absent or no typed candidate
-                      binds to them. Serving this record measurably INDUCES
-                      misattribution. Withhold or flag; trigger re-query.
+                      binds to them. Flag it and prefer re-query — a near-miss
+                      served as if it answered is how sibling values get cited
+                      (the "924 for 780" trap).
   IRRELEVANT        — low overlap; standard no-hit handling.
 
 Design: three deterministic signals, no model in the path —
@@ -92,7 +100,10 @@ def _candidates(sentence: str, kind: str) -> list[str]:
     if kind == "quantity":
         return NUM_CAND.findall(sentence)
     if kind == "date":
-        return [m if isinstance(m, str) else m[0] for m in DATE_CAND.findall(sentence)] \
+        # group(0), NOT findall: DATE_CAND's month alternation is a capturing
+        # group, so findall would yield just the month word ('july') instead of
+        # the full match ('july 18, 2026') — 2026-07-24 review finding.
+        return [m.group(0).strip() for m in DATE_CAND.finditer(sentence)] \
             + NUM_CAND.findall(sentence)
     return ID_CAND.findall(sentence)
 
