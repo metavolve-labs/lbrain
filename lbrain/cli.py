@@ -17,6 +17,7 @@ from .index import discover, parse
 from .lair_protocol import detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
+from .serve import render_response, resolve_mode
 from .store import Store
 
 
@@ -269,7 +270,10 @@ def embed(stale: bool, batch: int):
 @click.option("--priority", is_flag=True, help="Only priority lairs")
 @click.option("--rerank", is_flag=True, help="Cross-encoder precision pass (for PRECISE lookups; not broad queries; needs lbrain[rerank])")
 @click.option("--recency", is_flag=True, help="Bounded mtime-freshness lift (for 'latest on X' queries)")
-def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool, recency: bool):
+@click.option("--mode", "serve_mode", default=None, type=click.Choice(["structured", "prose"]),
+              help="Serving mode: structured (attribution-bound records) or prose (legacy). Default: config serve_mode.")
+def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool, recency: bool,
+          serve_mode: str | None):
     """Semantic + keyword hybrid search across the brain."""
     cfg = Config.load()
     if getattr(cfg, "amp_gating", True):
@@ -279,34 +283,42 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
             return
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = make_embedder(cfg)
+    try:
+        t0 = time.time()
+        hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
+                      rerank=rerank, recency=recency)
+        dt_ms = (time.time() - t0) * 1000
+        mode, warn = resolve_mode(cfg, serve_mode)
+        if warn:
+            click.secho(warn, fg="yellow", nl=False)
+        if mode == "structured":
+            click.secho(f"--- structured serve ({dt_ms:.0f} ms retrieval) ---", fg="cyan")
+            click.echo(render_response(cfg, hits, query))
+            return
+        kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
 
-    t0 = time.time()
-    hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
-                  rerank=rerank, recency=recency)
-    dt_ms = (time.time() - t0) * 1000
-    kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
+        core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
+        if core:
+            click.secho(core, fg="green")
 
-    core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
-    if core:
-        click.secho(core, fg="green")
+        label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
+        click.secho(f"--- {label} ({dt_ms:.0f} ms) ---\n", fg="cyan")
+        for i, h in enumerate(kept, 1):
+            prefix = "★" if h.is_priority else " "
+            click.secho(
+                f"{prefix} [{i}] {h.title}  ({h.score:.3f})", fg="yellow"
+            )
+            click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
+            if h.doc_type:
+                click.echo(f"   type={h.doc_type}  v={h.vector_score:.2f}  kw={h.keyword_score:.2f}  boosts={h.boosts}")
+            text_preview = h.text.strip().replace("\n", " ")[:getattr(cfg, "amp_per_chunk_chars", 360)]
+            click.echo(f"   {text_preview}\n")
 
-    label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
-    click.secho(f"--- {label} ({dt_ms:.0f} ms) ---\n", fg="cyan")
-    for i, h in enumerate(kept, 1):
-        prefix = "★" if h.is_priority else " "
-        click.secho(
-            f"{prefix} [{i}] {h.title}  ({h.score:.3f})", fg="yellow"
-        )
-        click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
-        if h.doc_type:
-            click.echo(f"   type={h.doc_type}  v={h.vector_score:.2f}  kw={h.keyword_score:.2f}  boosts={h.boosts}")
-        text_preview = h.text.strip().replace("\n", " ")[:getattr(cfg, "amp_per_chunk_chars", 360)]
-        click.echo(f"   {text_preview}\n")
-
-    if getattr(cfg, "amp_provenance", True):
-        click.secho(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)), fg="cyan")
-    embedder.close()
-    store.close()
+        if getattr(cfg, "amp_provenance", True):
+            click.secho(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)), fg="cyan")
+    finally:
+        embedder.close()
+        store.close()
 
 
 @main.command()
@@ -316,15 +328,26 @@ def search_cmd(query: str, k: int):
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    t0 = time.time()
-    hits = keyword_only(store, query, k=k)
-    dt_ms = (time.time() - t0) * 1000
-    click.secho(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", fg="cyan")
-    for i, h in enumerate(hits, 1):
-        click.secho(f"  [{i}] {h.title}", fg="yellow")
-        click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
-        click.echo(f"   {h.text.strip().replace(chr(10), ' ')[:240]}\n")
-    store.close()
+    try:
+        t0 = time.time()
+        hits = keyword_only(store, query, k=k)
+        dt_ms = (time.time() - t0) * 1000
+        mode, warn = resolve_mode(cfg, None)
+        if warn:
+            click.secho(warn, fg="yellow", nl=False)
+        if mode == "structured":
+            click.secho(f"--- structured serve ({dt_ms:.0f} ms) ---", fg="cyan")
+            click.echo(render_response(cfg, hits, query, admissibility_on=False,
+                                       include_core=False, include_provenance=False,
+                                       hits_label="keyword hits"))
+            return
+        click.secho(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", fg="cyan")
+        for i, h in enumerate(hits, 1):
+            click.secho(f"  [{i}] {h.title}", fg="yellow")
+            click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
+            click.echo(f"   {h.text.strip().replace(chr(10), ' ')[:240]}\n")
+    finally:
+        store.close()
 
 
 main.add_command(search_cmd, name="search")

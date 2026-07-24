@@ -144,6 +144,15 @@ class Config:
     #     corpus share cost recency −0.083 MRR and evicted gold docs; low density is net-safe) ---
     abstraction_topk_cap: int = 2  # max abstraction chunks in the final top-k (-1 = uncapped)
     abstraction_recency_guard: bool = True  # temporal queries: source docs outrank abstractions
+    # --- binding-aware serving (2026-07-24, docs/DESIGN-binding-aware-serving.md) ---
+    # Code default stays "prose" (legacy melt) — default-value ≠ configured-on ≠
+    # measured-useful; the live brain flips to "structured" via config only after
+    # the answer-presence A/B (measurement recorded alongside the flip).
+    serve_mode: str = "prose"  # "structured" (attribution-bound records) | "prose" (legacy)
+    serve_chunk_chars: int = 700  # structured per-record excerpt budget (prose keeps amp_per_chunk_chars)
+    serve_admissibility: bool = True  # question-shaped queries: annotate binds/near-miss + ambiguity gate
+    gate_min_near: int = 3  # ambiguity gate floor: min near-miss records among those served
+    gate_density: float = 0.5  # ambiguity gate: min fraction of served records that are near-miss
     # --- Tier 2: permanent verifiable archive (Arweave substrate) ---
     arweave_enabled: bool = False  # opt-in to real permaweb writes (else offline local store)
     arweave_transport: str = "local"  # "local" (offline, content-addressed) | "arweave"/"l1"
@@ -201,6 +210,11 @@ class Config:
             supersede_penalty=raw.get("supersede_penalty", cls.supersede_penalty),
             abstraction_topk_cap=raw.get("abstraction_topk_cap", cls.abstraction_topk_cap),
             abstraction_recency_guard=raw.get("abstraction_recency_guard", cls.abstraction_recency_guard),
+            serve_mode=raw.get("serve_mode", cls.serve_mode),
+            serve_chunk_chars=raw.get("serve_chunk_chars", cls.serve_chunk_chars),
+            serve_admissibility=raw.get("serve_admissibility", cls.serve_admissibility),
+            gate_min_near=raw.get("gate_min_near", cls.gate_min_near),
+            gate_density=raw.get("gate_density", cls.gate_density),
             arweave_enabled=raw.get("arweave_enabled", cls.arweave_enabled),
             arweave_transport=raw.get("arweave_transport", cls.arweave_transport),
             arweave_wallet_path=raw.get("arweave_wallet_path")
@@ -234,6 +248,17 @@ class Config:
             f"core_memory_chars = {self.core_memory_chars}",
             f"supersede_aware = {str(self.supersede_aware).lower()}",
             f"supersede_penalty = {self.supersede_penalty}",
+            # NOTE: write() must emit every field load() reads — the 2026-07-24
+            # red-team found abstraction_* loaded but not persisted (a rollback
+            # written to config could be silently resurrected by any cfg.write()).
+            # Guarded by tests/test_config_roundtrip.py.
+            f"abstraction_topk_cap = {self.abstraction_topk_cap}",
+            f"abstraction_recency_guard = {str(self.abstraction_recency_guard).lower()}",
+            f'serve_mode = "{self.serve_mode}"',
+            f"serve_chunk_chars = {self.serve_chunk_chars}",
+            f"serve_admissibility = {str(self.serve_admissibility).lower()}",
+            f"gate_min_near = {self.gate_min_near}",
+            f"gate_density = {self.gate_density}",
             f"arweave_enabled = {str(self.arweave_enabled).lower()}",
             f'arweave_transport = "{self.arweave_transport}"',
             f'arweave_wallet_path = "{self.arweave_wallet_path}"',
