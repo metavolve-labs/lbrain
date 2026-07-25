@@ -27,6 +27,129 @@ def main():
     """LBrain by Metavolve Labs — AI-native engineering memory with the Lair Protocol."""
 
 
+# Settings whose value silently changes system behavior and which are therefore
+# worth showing with provenance. Ordered for reading, not alphabetically.
+_DOCTOR_FIELDS = [
+    "embedding_provider", "embedding_model", "embedding_dim",
+    "serve_mode", "serve_admissibility", "serve_chunk_chars",
+    "gate_min_near", "gate_density",
+    "rerank", "temporal_decay", "supersede_aware", "use_summaries",
+    "arweave_enabled", "arweave_transport", "db_path",
+]
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def doctor(as_json: bool):
+    """Print the EFFECTIVE runtime state, with per-setting provenance.
+
+    Answers the only question that matters before asserting what LBrain does:
+    *is this value configured, or is it a code default?* Reading a default out of
+    the source and reporting it as live behavior is how four working features got
+    disabled on 2026-06-08 and how the embedding provider was misreported on
+    2026-07-25. This command makes the check one second of work instead of an act
+    of will — the admissibility gate, applied to our own configuration.
+
+    Exits non-zero if the stored vectors disagree with the live embedding config,
+    so it can gate a script.
+    """
+    import dataclasses
+    import json as _json
+
+    raw: dict = {}
+    cfg_exists = CONFIG_PATH.exists()
+    if cfg_exists:
+        try:
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - 3.10 backport
+            import tomli as tomllib
+        try:
+            raw = tomllib.loads(CONFIG_PATH.read_text())
+        except Exception as e:
+            click.secho(f"✗ config.toml exists but failed to parse: {e}", fg="red")
+            raw = {}
+
+    cfg = Config.load()
+    defaults = {f.name: f.default for f in dataclasses.fields(Config)}
+
+    rows = []
+    for name in _DOCTOR_FIELDS:
+        if not hasattr(cfg, name):
+            continue
+        value = getattr(cfg, name)
+        in_file = name in raw
+        default = defaults.get(name, dataclasses.MISSING)
+        differs = default is not dataclasses.MISSING and value != default
+        source = "config" if in_file else "DEFAULT"
+        rows.append({"setting": name, "value": value, "source": source,
+                     "differs_from_default": bool(differs)})
+
+    # Keys present in config.toml that Config does not load are SILENT NO-OPS: the
+    # operator believes the setting is on, and nothing reads it. That false belief
+    # is the same class of error as reading a code default and calling it live.
+    _field_names = {f.name for f in dataclasses.fields(Config)}
+    inert = sorted(k for k in raw if k not in _field_names)
+
+    # --- stored-vector fingerprint vs live config (the silent-corruption guard) ---
+    drift = None
+    stats = {}
+    try:
+        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        stored = {k: store.get_meta(k) for k in
+                  ("embedding_provider", "embedding_model", "embedding_dim")}
+        model = cfg.embedding_model
+        if cfg.embedding_provider == "gemini" and not model.startswith("models/"):
+            model = f"models/{model}"  # factory normalizes; compare like-for-like
+        drift = store.embedding_config_status(
+            cfg.embedding_dim, model, cfg.embedding_provider)
+        stats = store.stats()
+        store.close()
+    except Exception as e:
+        drift = f"unreadable: {e}"
+        stored = {}
+
+    if as_json:
+        click.echo(_json.dumps({
+            "config_path": str(CONFIG_PATH), "config_exists": cfg_exists,
+            "settings": rows, "inert_config_keys": inert,
+            "stored_fingerprint": stored,
+            "embedding_drift": drift, "stats": stats,
+        }, indent=2, default=str))
+    else:
+        click.secho(f"config:  {CONFIG_PATH}"
+                    f"{'' if cfg_exists else '   ⚠ MISSING — every value below is a CODE DEFAULT'}",
+                    fg=("green" if cfg_exists else "red"))
+        click.echo()
+        for r in rows:
+            tag = ("[config]" if r["source"] == "config" else "[DEFAULT]")
+            colour = "green" if r["source"] == "config" else "yellow"
+            click.echo(f"  {r['setting']:<22} {str(r['value'])[:44]:<46} ", nl=False)
+            click.secho(tag, fg=colour)
+        if inert:
+            click.echo()
+            click.secho(f"  ⚠ {len(inert)} key(s) in config.toml that NOTHING READS "
+                        f"(set, but inert):", fg="yellow")
+            for k in inert:
+                click.echo(f"      {k} = {raw[k]!r}")
+        click.echo()
+        if stored:
+            click.echo(f"  stored vectors:  {stored.get('embedding_model')} "
+                       f"({stored.get('embedding_dim')}d, {stored.get('embedding_provider')})")
+        if drift == "match":
+            click.secho("  ✓ stored vectors match the live embedding config", fg="green")
+        elif drift == "unset":
+            click.secho("  · no vectors stored yet (fresh brain)", fg="yellow")
+        else:
+            click.secho(f"  ✗ EMBEDDING DRIFT: {drift} — re-embed required "
+                        f"before these vectors can be trusted", fg="red")
+        if stats:
+            click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
+                       f"  embedded: {stats.get('embedded')}")
+
+    if isinstance(drift, str) and drift not in ("match", "unset"):
+        raise SystemExit(1)
+
+
 @main.command()
 @click.option("--provider", type=click.Choice(["gemini", "openai"]), default="gemini",
               help="Embedding provider (default: gemini, GCP-native, no third-party lock-in)")

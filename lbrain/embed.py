@@ -1,4 +1,4 @@
-"""Embedding clients. Batched, stateless. OpenAI or Gemini (GCP-native).
+"""Embedding clients. Batched, stateless. Gemini (GCP-native, default) or OpenAI.
 
 The active provider is chosen by `Config.embedding_provider` via `make_embedder`.
 Both clients return little-endian f32 blobs (sqlite-vec wire format) at the same
@@ -142,7 +142,7 @@ class GeminiEmbedClient:
 
 def make_embedder(cfg):
     """Factory: return the embedder for the configured provider."""
-    provider = getattr(cfg, "embedding_provider", "openai")
+    provider = getattr(cfg, "embedding_provider", "gemini")
     if provider == "gemini":
         model = cfg.embedding_model or "gemini-embedding-001"
         if model.startswith("text-embedding"):  # stale OpenAI default in config

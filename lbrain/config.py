@@ -117,11 +117,15 @@ _load_env_file()
 @dataclass
 class Config:
     sources: list[Path] = field(default_factory=list)
-    embedding_provider: str = "openai"  # "openai" | "gemini" (GCP-native)
+    # GCP-native by default: matches the deployed configuration and the `lbrain init`
+    # default, so a missing/partial config.toml cannot silently fall back to a
+    # third-party provider and embed into a different vector space than the stored
+    # one. OpenAI remains fully supported as an explicit opt-in.
+    embedding_provider: str = "gemini"  # "gemini" (GCP-native, default) | "openai"
     openai_api_key: str = ""
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"  # override → proxy/self-host
-    embedding_model: str = "text-embedding-3-small"
+    embedding_model: str = "gemini-embedding-001"
     embedding_dim: int = 1536
     chunk_tokens: int = 512
     chunk_overlap: int = 64
