@@ -35,7 +35,11 @@ def non_default(name: str, value):
         if name == "serve_mode":
             return "structured"
         if name == "embedding_provider":
-            return "gemini"
+            # "openai", NOT "gemini" — gemini became the DEFAULT on 2026-07-25
+            # (code defaults realigned to the deployed GCP-native config), which
+            # made this gate vacuous for the field. Same failure mode as
+            # arweave_transport below; the assert at the bottom caught it.
+            return "openai"
         if name == "arweave_transport":
             # "arweave", NOT "local" — "local" IS the default, which made this
             # gate vacuous for the field (2026-07-24 review finding)
