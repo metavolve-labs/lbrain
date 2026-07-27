@@ -30,10 +30,11 @@ presents it as fact.
 We profiled **eight model architectures from seven organizations** on the same near-domain retrieval
 task. Failure rates swung **1.3% / 35.7% / 16.7%** depending only on how the *records* were
 structured — a ~27× spread — while architecture explained ≈**0%** of the variance, with identical
-ordering in 8 of 8 models. A smarter model didn't help. Telling the model not to guess didn't help.
+ordering in 8 of 8 models. Changing models didn't remove the effect. Telling the model not to guess
+didn't remove it either.
 
-**The record handed to the model decides the outcome.** So the fix belongs before generation, on the
-input side, and it has to be deterministic — a gate that can't fail the way the generator fails.
+**Across the models we tested, record structure dominated the failure pattern.** So the fix belongs before generation, on the
+input side, and it has to be deterministic — a gate judged without another model call.
 
 ## Where it does *not* help
 
@@ -52,7 +53,7 @@ out to be an artifact of our own prompt. The retractions are published with the 
 
 - **Hybrid retrieval** — vector + BM25 keyword, fused by reciprocal rank fusion.
 - **Deterministic admissibility gate** — classifies each record against the question as admissible,
-  near-miss, or irrelevant. **No model call.**
+  near-miss, or irrelevant, without another model call.
 - **Supersession** — a replaced note stops being *served* but is never deleted. Persistence and
   activation are separate concerns.
 - **Honest dating** — each record states whether its date came from the content, the filename, or the
