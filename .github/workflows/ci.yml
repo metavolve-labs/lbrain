@@ -19,7 +19,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install
-        run: pip install -e .
+        run: pip install -e ".[dev]"
       - name: Test
         # No network, no API key, no model download — the suite must pass cold.
         run: python -m pytest -q
