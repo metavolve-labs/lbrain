@@ -9,6 +9,8 @@ description = "LBrain by Metavolve Labs — AI-native engineering memory with th
 requires-python = ">=3.10"
 authors = [{name = "Metavolve Labs, Inc."}]
 license = {text = "BSD-3-Clause"}
+readme = "README.md"
+keywords = ["ai", "llm", "memory", "rag", "mcp", "agents", "retrieval", "local-first"]
 # Upper bounds cap surprise major upgrades from a clean build. For reproducible /
 # supply-chain-safe builds, generate and commit a hash-locked lockfile
 # (`pip-compile --generate-hashes` or `uv lock`) and install with --require-hashes.
@@ -42,3 +44,8 @@ lbrain = "lbrain.cli:main"
 
 [tool.setuptools]
 packages = ["lbrain", "lbrain.archive"]
+
+[project.urls]
+Homepage = "https://lbrain.ai"
+Source = "https://github.com/metavolve-labs/lbrain"
+Issues = "https://github.com/metavolve-labs/lbrain/issues"
