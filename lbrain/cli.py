@@ -170,6 +170,7 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
     Out-of-the-box: `lbrain init --gemini-key <KEY> --source ./docs --source ./notes`
     The key is written to ~/.lbrain/env (chmod 600), never to plaintext config.
     """
+    existing_config = CONFIG_PATH.exists()
     cfg = Config.load()
     if api_base:
         # Validate before assignment — direct attribute set bypasses __post_init__,
@@ -198,6 +199,15 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
             cfg.openai_api_key = api_key
     if sources:
         cfg.sources = [Path(s).expanduser().resolve() for s in sources]
+    # New installs get structured serving. The CODE default stays "prose" on
+    # purpose (fail-open to the legacy pipeline on an unrecognized value, and a
+    # one-line rollback) — but a fresh install must produce the output the README
+    # documents, `binds` annotations included. Without this, a stranger runs the
+    # documented query and gets flat results with no admissibility flag: the
+    # product's whole claim, invisible. Only written when there is no config yet,
+    # so an existing install is never silently switched out from under its owner.
+    if not existing_config:
+        cfg.serve_mode = "structured"
     cfg.write()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     stats = store.stats()
