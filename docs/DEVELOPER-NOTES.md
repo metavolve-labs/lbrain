@@ -197,6 +197,53 @@ documented path works. A clean venv is cheap and settles it in seconds.
 
 ---
 
+## 10. Importing an existing pile of notes: yesterday's doctrine, served as today's
+
+**This is the one to read before your first import.** It is not a malfunction, it changes what you
+should believe, and it is invisible unless you look for it.
+
+**Symptom.** LBrain confidently serves a decision you reversed a year ago. Or two contradictory records
+come back with equal standing and no indication which one won.
+
+**What's happening.** Two mechanisms interact badly on a cold corpus:
+
+1. **A record is `dated` only if its *filename* carries a date** (`decision-2025-11-03.md`). Content dates
+   are not parsed — a file whose body says `Date: 2026-05-14` still reports `file-dated`, taken from the
+   filesystem mtime.
+2. **Bulk imports flatten mtimes.** Copy, clone, sync, restore from backup, or unzip an export and every
+   file's mtime becomes *today*. Every record now claims the same age.
+
+Together: newest-wins has nothing to discriminate on, supersession has no lineage to follow, and the
+structured serving that makes LBrain trustworthy on a curated corpus becomes an amplifier on an
+un-curated one — **it presents stale records with exactly the same confident attribution as current
+ones.** The failure is worse than plain search precisely because the presentation is better.
+
+**Check whether you have it.** Run any query and look at the date labels:
+
+```bash
+lbrain query "some decision you know changed"
+```
+
+If nearly every record reads `file-dated <today's date>`, your corpus is flat. Nothing is wrong with the
+install; the history simply did not survive the import.
+
+**Fix — pick one, honestly.**
+
+- **Vet pass (preferred).** Walk the imported corpus before trusting it. Anything superseded gets marked
+  or renamed with its real date. This is real work on a large archive, and it is the only path that ends
+  with a corpus you can trust unattended.
+- **Restore the dates.** Where the real date is recoverable — from git history, filename convention,
+  content headers, an export manifest — put it in the **filename**. That is what promotes a record from
+  `file-dated` to `dated` and gives supersession something to order by.
+- **Run a calibration period.** If you are not going to vet, then know what you have: treat early answers
+  as leads rather than doctrine, check the cited record yourself, and correct as you go. **State this
+  expectation to yourself up front** — the danger is not an imperfect corpus, it is an imperfect corpus
+  you have started trusting because the output looks authoritative.
+
+**Not a bug — but not nothing either.** The honest date labels exist so this is *visible* rather than
+silent, and that is the difference between a limitation and a trap. If you find a case where a record is
+labelled `dated` with a date that is not the one in its filename, that is a real defect. Report it.
+
 ## Adding an entry
 
 Add one whenever you catch yourself about to file a bug and discover the cause was local. Keep the shape:
