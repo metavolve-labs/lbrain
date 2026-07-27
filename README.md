@@ -1,4 +1,8 @@
-# LBrain
+<p align="center">
+  <a href="https://lbrain.ai"><img src="https://lbrain.ai/assets/lockup.jpg" alt="LBrain — a dragon coiled around a circuit-etched L" width="620"></a>
+</p>
+
+<h1 align="center">LBrain</h1>
 
 **Memory for AI agents that cites its sources — and says when it doesn't know.**
 
