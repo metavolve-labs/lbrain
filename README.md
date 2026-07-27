@@ -97,6 +97,10 @@ lbrain doctor
 Prints the **effective** config with per-setting provenance — `[config]` vs `[DEFAULT]` — and whether
 your stored vectors match your current embedding settings. Include its output in any issue.
 
+[`docs/DEVELOPER-NOTES.md`](docs/DEVELOPER-NOTES.md) covers the symptoms that look like bugs and aren't —
+switching embedding providers on an existing brain, two brains on one machine, imported-but-not-embedded
+records, and why a note can vanish from results without being deleted.
+
 ## More
 
 - [`docs/DESIGN-binding-aware-serving.md`](docs/DESIGN-binding-aware-serving.md) — the serving design and its review record
