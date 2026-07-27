@@ -34,8 +34,8 @@ These are not style preferences — they're the constraints the project is built
 violates one will be sent back regardless of how clean the code is.
 
 **1. The serve path stays deterministic.** `serve.py` and `admissibility.py` must not call a language
-model. The entire premise is a gate that cannot fail the way a generator fails. If a feature seems to
-need a model call in that path, it belongs somewhere else.
+model. The entire premise is a gate whose behaviour is inspectable and reproducible. If a feature
+seems to need a model call in that path, it belongs somewhere else.
 
 **2. Retrieved text is data, never instructions.** Anything read out of the corpus gets fenced and
 labelled before it reaches an agent. Don't add a path that emits unfenced corpus content.
