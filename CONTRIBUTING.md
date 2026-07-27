@@ -15,6 +15,10 @@ whether your stored vectors match your current embedding settings, and any confi
 but inert. Most reports resolve from that output alone — usually a provider mismatch, or an index
 that was never re-embedded after a settings change.
 
+Then check [`docs/DEVELOPER-NOTES.md`](docs/DEVELOPER-NOTES.md) — a running list of symptoms that read as
+bugs and are local nuances with their own fix. If yours is there, you're already done; if it's *nearly*
+there, say so in the issue, because a near-miss on that list usually means the note needs to be clearer.
+
 Please include: what you expected, what happened, the `doctor` output, and your Python version.
 
 ## Development setup
