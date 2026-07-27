@@ -140,9 +140,67 @@ class GeminiEmbedClient:
         self._client.close()
 
 
+class LocalEmbedClient:
+    """On-device embeddings via fastembed (ONNX, no torch, no network, no API key).
+
+    This is the zero-friction path: a new user gets a working brain from
+    `pip install lbrain[local]` with no credential step at all, and their text never
+    leaves the machine — the privacy claim becomes structural rather than promissory.
+
+    Default model is BAAI/bge-small-en-v1.5 (384-dim, ~67 MB) — small enough that the
+    first-run download is not an install blocker. Vectors are L2-normalized to match
+    the hosted clients so cosine math is provider-agnostic.
+
+    NOTE: 384 != the hosted default of 1536. Switching an EXISTING brain to this
+    provider is a re-embed migration, not a config flip; `Store.embedding_config_status`
+    reports `dim_changed` and the vec tables must be rebuilt. Fresh installs are
+    unaffected.
+    """
+
+    DEFAULT_MODEL = "BAAI/bge-small-en-v1.5"
+    DEFAULT_DIM = 384
+
+    def __init__(self, model: str = DEFAULT_MODEL, dim: int = DEFAULT_DIM):
+        try:
+            from fastembed import TextEmbedding
+        except ModuleNotFoundError as e:  # pragma: no cover - install-path guidance
+            raise RuntimeError(
+                "local embeddings need the extra: pip install 'lbrain[local]'"
+            ) from e
+        if model.startswith(("text-embedding", "gemini-")):  # stale hosted model in config
+            model = self.DEFAULT_MODEL
+        self.model = model
+        self.dim = dim
+        self._enc = TextEmbedding(model_name=model)
+
+    def embed(self, texts: list[str], batch_size: int = 64) -> list[bytes]:
+        out: list[bytes] = []
+        for vec in self._enc.embed(texts, batch_size=batch_size):
+            v = [float(x) for x in vec]
+            if len(v) != self.dim:
+                raise RuntimeError(
+                    f"{self.model} returned a {len(v)}-dim vector, expected {self.dim} "
+                    f"— set embedding_dim to {len(v)} in ~/.lbrain/config.toml"
+                )
+            norm = math.sqrt(sum(x * x for x in v)) or 1.0
+            out.append(struct.pack(f"<{len(v)}f", *[x / norm for x in v]))
+        if len(out) != len(texts):
+            raise RuntimeError(f"local embedder returned {len(out)} vectors for {len(texts)} inputs")
+        return out
+
+    def embed_one(self, text: str) -> bytes:
+        return self.embed([text])[0]
+
+    def close(self) -> None:
+        return None
+
+
 def make_embedder(cfg):
     """Factory: return the embedder for the configured provider."""
     provider = getattr(cfg, "embedding_provider", "gemini")
+    if provider == "local":
+        model = cfg.embedding_model or LocalEmbedClient.DEFAULT_MODEL
+        return LocalEmbedClient(model, cfg.embedding_dim)
     if provider == "gemini":
         model = cfg.embedding_model or "gemini-embedding-001"
         if model.startswith("text-embedding"):  # stale OpenAI default in config
