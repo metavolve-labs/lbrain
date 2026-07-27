@@ -86,22 +86,7 @@ def test_write_load_roundtrip_every_field(tmp_path, monkeypatch):
     )
 
 
-def _isolate(monkeypatch, home):
-    """Point every module that resolves a config path at `home`.
-
-    Config.write() uses lbrain.config.CONFIG_DIR, not lbrain.cli's — patching only
-    the CLI leaves writes going to the real ~/.lbrain. Both, or neither.
-    """
-    import lbrain.cli as cli, lbrain.config as config
-    home.mkdir(parents=True, exist_ok=True)
-    for mod in (cli, config):
-        monkeypatch.setattr(mod, "CONFIG_DIR", home, raising=False)
-        monkeypatch.setattr(mod, "CONFIG_PATH", home / "config.toml", raising=False)
-    monkeypatch.setenv("LBRAIN_HOME", str(home))
-    return cli
-
-
-def test_init_gives_new_installs_structured_serving(tmp_path, monkeypatch):
+def test_init_gives_new_installs_structured_serving(tmp_path, isolate_lbrain_home):
     """A fresh install must produce the output the README documents.
 
     The code default is "prose" deliberately (fail-open + one-line rollback), so
@@ -110,8 +95,8 @@ def test_init_gives_new_installs_structured_serving(tmp_path, monkeypatch):
     invisible. Regression guard for exactly that.
     """
     from click.testing import CliRunner
-    home = tmp_path / "home"
-    cli = _isolate(monkeypatch, home)
+    import lbrain.cli as cli
+    home = isolate_lbrain_home
     src = tmp_path / "notes"; src.mkdir()
 
     res = CliRunner().invoke(cli.main, ["init", "--provider", "local", "--source", str(src)])
@@ -119,11 +104,11 @@ def test_init_gives_new_installs_structured_serving(tmp_path, monkeypatch):
     assert 'serve_mode = "structured"' in (home / "config.toml").read_text()
 
 
-def test_init_does_not_switch_an_existing_install(tmp_path, monkeypatch):
+def test_init_does_not_switch_an_existing_install(tmp_path, isolate_lbrain_home):
     """Re-running init on a configured brain must not change how it serves."""
     from click.testing import CliRunner
-    home = tmp_path / "home"
-    cli = _isolate(monkeypatch, home)
+    import lbrain.cli as cli
+    home = isolate_lbrain_home
     (home / "config.toml").write_text('serve_mode = "prose"\n')
     src = tmp_path / "notes"; src.mkdir()
 
