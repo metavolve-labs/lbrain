@@ -1,175 +1,115 @@
-# LBrain by Metavolve Labs
+# LBrain
 
-**AI-native engineering memory with the Lair Protocol.**
+**Memory for AI agents that cites its sources — and says when it doesn't know.**
 
-LBrain indexes structured markdown lairs and memory files and gives an AI agent fast hybrid (semantic + keyword) search over everything you've chosen to remember — surfacing what's *stored*, never editorializing.
+Your agent reads a pile of your notes and answers confidently from the wrong one. LBrain serves each
+record with its **source, its date, and a flag for whether it actually answers the question asked**.
+
+```bash
+pip install "lbrain[local]"
+lbrain init --source ~/notes
+lbrain import && lbrain embed --stale
+lbrain query "what did we decide about the deploy flag"
+```
+
+No API key. No account. Nothing leaves your machine.
+
+```
+⟪note⟫
+│ Deploy runbook          runbook.md · chunk 0 · dated 2026-05-14 · binds
+│ The staging deploy uses tag v2 and the rollback flag is --safe.
+⟪/note⟫
+```
+
+`binds` means the record answers the question. `near-miss` means it's the right subject but doesn't
+contain the answer — the case where retrieval quietly hands over the neighbour's value and the model
+presents it as fact.
 
 ## Why
 
-Existing "RAG" tools index text and forget structure. The lair protocol *is* structure — priority hierarchies, wikilink graphs, frontmatter types, governance cadence. LBrain reads those signals and treats them as first-class retrieval inputs. The protocol is the product; the search engine just respects it.
+We profiled **eight model architectures from seven organizations** on the same near-domain retrieval
+task. Failure rates swung **1.3% / 35.7% / 16.7%** depending only on how the *records* were
+structured — a ~27× spread — while architecture explained ≈**0%** of the variance, with identical
+ordering in 8 of 8 models. A smarter model didn't help. Telling the model not to guess didn't help.
 
-## What it does
+**The record handed to the model decides the outcome.** So the fix belongs before generation, on the
+input side, and it has to be deterministic — a gate that can't fail the way the generator fails.
 
-- **Hybrid retrieval** — BM25 (SQLite FTS5) + cosine (sqlite-vec) fused by Reciprocal Rank Fusion, then wikilink graph boost + priority-folder boost + supersession-aware de-ranking + frontmatter-type filter.
-- **Call-when-needed precision / recency** — opt-in per query (`rerank=True` for precise lookups; `recency=True` for "latest on X"). Off by default — both are *situational* (measured: rerank helps precise lookups but hurts broad coverage), so they're enabled per call, not globally.
-- **Always-on core memory** — an optional curated, user-authored block injected ahead of results (the essentials are always present); gated and token-budgeted by the AMP layer.
-- **Prompt-injection containment** — retrieved note text is fenced and framed as untrusted *data*, never instructions, before it reaches the agent.
-- **Lair Protocol check** — `should_commit_to_lair(text)` decides what's worth saving so you don't have to think about it.
-- **Anti-pattern detection** — cross-checks proposed actions against your saved `feedback_*.md` rules.
-- **Onboarding flow** — three-minute questionnaire scaffolds CLAUDE.md + starter priority lairs.
-- **MCP server** — direct integration with Claude Code (`claude mcp add -s user lbrain -- /path/to/lbrain-mcp`).
+## Where it does *not* help
 
-## Stack
+- **Not a hallucination fix.** This is about answering from *retrieved records*. It does nothing
+  about a model inventing facts from its weights with no retrieval involved.
+- **Small, clean corpora barely benefit.** If your notes are short and unambiguous, ordinary search
+  is fine. The gain appears when records are numerous, overlapping, and stale in places.
+- **Not a reasoning upgrade.** It changes what the model is given, not what it does with it.
+- **The gate is conservative** — it will sometimes flag `near-miss` on a record you'd have accepted.
+  That is the trade: fewer confident wrong answers, slightly more "I don't know."
 
-- Python 3.10+
-- SQLite + sqlite-vec + FTS5 (native, no WASM, no daemon)
-- OpenAI text-embedding-3-small (~$0.12 per 6M-token corpus; pennies on updates)
-- the official `mcp` SDK (FastMCP) for the MCP server
-- ~2,750 LOC core + ~1,370 LOC optional Tier-2 archive subpackage. No moving parts.
+We also killed three of our own claims while building this, including a headline result that turned
+out to be an artifact of our own prompt. The retractions are published with the findings.
 
-## Install
+## How it works
 
-```bash
-cd lbrain
-pip install -e .            # lean core (index → embed → search → MCP)
-# pip install -e ".[rerank]"    # + call-when-needed cross-encoder precision pass
-# pip install -e ".[archive]"   # + encrypted Tier-2 archive
-# pip install -e ".[arweave]"   # + real permaweb (Arweave L1) writes
+- **Hybrid retrieval** — vector + BM25 keyword, fused by reciprocal rank fusion.
+- **Deterministic admissibility gate** — classifies each record against the question as admissible,
+  near-miss, or irrelevant. **No model call.**
+- **Supersession** — a replaced note stops being *served* but is never deleted. Persistence and
+  activation are separate concerns.
+- **Honest dating** — each record states whether its date came from the content, the filename, or the
+  filesystem. No invented timestamps.
+- **Untrusted-data fencing** — retrieved text is fenced and labelled as data, never instructions, so
+  a note can't hijack the agent reading it.
 
-# Initialize config + DB
-lbrain init --api-key=$OPENAI_API_KEY \
-            --source=/path/to/your/lairs \
-            --source=/path/to/your/memory
+## Use it with your agent
 
-# Walk + ingest
-lbrain import
-
-# Embed
-lbrain embed --stale
-```
-
-## Use
+Five MCP tools: `lair_query`, `lair_search`, `lair_protocol_check`, `lair_check_action`, `lair_stats`.
 
 ```bash
-# Hybrid semantic search
-lbrain query "how do we sign C2PA"
-
-# Filter by frontmatter type
-lbrain query "code style" --type feedback
-
-# Priority lairs only
-lbrain query "current quarter goals" --priority
-
-# Pure keyword (no embedding call, sub-50ms)
-lbrain search "snake_case lock"
-
-# "Should I save this?"
-lbrain commit-check "user said: don't auto-format imports in this repo"
-
-# "Does this action conflict with anything I've been told?"
-lbrain check-action "going to mock the database for these tests"
-
-# Brain stats
-lbrain stats
-```
-
-## Onboard a new project
-
-```bash
-lbrain onboard ~/repos/new-project
-```
-
-Three minutes of opinionated questions → working CLAUDE.md + three priority lairs + LAIR_RULES.md.
-
-## Register MCP with Claude Code
-
-```bash
-chmod +x /path/to/lbrain/scripts/lbrain-mcp
+# Claude Code
 claude mcp add -s user lbrain -- /path/to/lbrain/scripts/lbrain-mcp
+
+# Any client speaking streamable-http
+lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
 ```
 
-Tools surfaced: `lair_query`, `lair_search`, `lair_protocol_check`, `lair_check_action`, `lair_stats`.
+> ⚠️ The HTTP server has **no built-in auth** and exposes the whole corpus. Bind to `127.0.0.1`, or
+> put authenticated TLS ingress in front. Never publish it on a public interface.
 
-## Containerized deployment — for autonomous agents
+Or skip MCP entirely — `lbrain query`, `search`, `import`, `doctor` all work from the shell.
 
-For agents running in containers / Kubernetes / outside Claude Code, run LBrain as an HTTP MCP service:
+## Embeddings
+
+| Provider | Setup | Where your text goes |
+|---|---|---|
+| `local` *(default)* | none | nowhere — on-device ONNX, 384-dim |
+| `gemini` | your own key | Google, under your key |
+| `openai` | your own key | OpenAI, under your key |
+
+`lbrain init` selects `local` when no key is present. See [`docs/KEYS.md`](docs/KEYS.md).
+
+## Something wrong?
 
 ```bash
-# Local (no container): bind 127.0.0.1 unless you front it with authenticated ingress
-# (the server has no built-in auth). Use --host 0.0.0.0 only inside a trusted network.
-lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
-
-# Docker:
-docker build -t lbrain .
-# Use a NAMED volume (brain-data) — the container runs as non-root (uid 10001) and a
-# host bind mount would inherit host ownership, breaking writes to brain.db. Bind the
-# published port to localhost — the MCP server has NO built-in auth, so never publish it
-# on a public interface (`-p 7370:7370`); for remote access put an authenticated,
-# TLS-terminating reverse proxy in front.
-docker run --rm -p 127.0.0.1:7370:7370 -v brain-data:/data \
-  -e OPENAI_API_KEY=$OPENAI_API_KEY lbrain
-
-# docker-compose (Kite Apprentice / Maestro pattern):
-docker compose -f docker-compose.kite.yml up
+lbrain doctor
 ```
 
-> ⚠️ The streamable-http MCP server exposes the full tool surface (the whole memory
-> corpus is readable) with no authentication. Run it only inside a trusted container
-> network or behind authenticated ingress — never directly on the public internet.
+Prints the **effective** config with per-setting provenance — `[config]` vs `[DEFAULT]` — and whether
+your stored vectors match your current embedding settings. Include its output in any issue.
 
-The agent's MCP client connects to `http://lbrain:7370/mcp` and gets the same 5 tools. Use this for:
+## More
 
-- **Recall for autonomous loops** — agent calls `lair_query` at decision points to pull the relevant stored context (no editorializing — just what's saved).
-- **Anti-pattern guarding** — agent calls `lair_check_action` before destructive actions; the saved `feedback_*.md` rules become an automatic safety net.
-- **Lair-Protocol output capture** — agent calls `lair_protocol_check` on session outputs to decide what's save-worthy, eliminating the "remind me to remember this" round trip with the user.
+- [`docs/DESIGN-binding-aware-serving.md`](docs/DESIGN-binding-aware-serving.md) — the serving design and its review record
+- [`docs/lair-framework/`](docs/lair-framework/) — the organizing convention LBrain reads
+- [`contrib/`](contrib/) — session-capture hooks, a shared-key proxy
+- [`Dockerfile`](Dockerfile), [`docker-compose.kite.yml`](docker-compose.kite.yml) — containerized deployment
 
-### Two-brain pattern (recommended for production agents)
+**Truth hierarchy:** your source files are authoritative; the index is a derivative cache. If they
+disagree, trust the file and re-run `lbrain import && lbrain embed --stale`.
 
-1. **Shared brain** (read-only mount of your full corpus) — global recall + anti-pattern coverage.
-2. **Task-specific brain** (per-agent, curated subset) — focused, cheaper, faster. E.g. a Buildathon agent gets only the relevant submission/spec/integration lairs.
-
-Both can run in the same container with different brain.db files via `LBRAIN_HOME` switching, or as separate containers the agent queries in parallel.
-
-See `docker-compose.kite.yml` for a full Apprentice + LBrain wiring example.
-
-## Architecture
-
-```
-lbrain/
-├── index.py          File walker + frontmatter + chunker + wikilink extractor
-├── embed.py          OpenAI embeddings client (batched, stateless)
-├── store.py          SQLite + sqlite-vec + FTS5 storage layer
-├── search.py         Hybrid BM25 + cosine (RRF) + graph/priority/supersession boosts
-├── rerank.py         Optional cross-encoder precision pass (call-when-needed)
-├── amp.py            Injection gating, token budgeting, provenance, core memory + fence
-├── lair_protocol.py  commit-check heuristic + feedback anti-pattern detector
-├── onboard.py        Interactive scaffolding for new projects
-├── mcp_server.py     MCP tool surface (FastMCP)
-├── cli.py            click CLI entry point
-├── config.py         ~/.lbrain/config.toml
-└── archive/          OPTIONAL Tier-2 subpackage (install via lbrain[archive])
-    ├── archiver.py   encrypt → transport (local/Arweave) → snapshot → index
-    ├── crypto.py     AES-256-GCM + Argon2id envelopes + per-item crypto-shred
-    ├── storage.py    archive tables + queries (lazy schema, shared connection)
-    ├── cli.py        archive/capture/recall/retrieve/shred commands (register hook)
-    └── mcp.py        lair_deep_recall tool (register hook)
-```
-
-The `archive/` subpackage has a strict one-way dependency on the core (it imports core;
-core never imports it except through guarded, lazy registration). `pip install lbrain`
-gives the lean retrieval engine; `pip install lbrain[archive]` adds the encrypted Tier-2
-archive; `pip install lbrain[arweave]` adds real permaweb writes. Drop the extra (or the
-directory) and the core runs unchanged — the archive CLI commands and the
-`lair_deep_recall` MCP tool simply don't register.
-
-## Truth hierarchy
-
-Source files (markdown lairs and memory entries) are authoritative. The SQLite index is a derivative cache. If they disagree, trust the file and run `lbrain import && lbrain embed --stale`.
+Requires Python 3.10+. SQLite + sqlite-vec + FTS5 — no daemon, no server, no WASM.
 
 ## License
 
-BSD 3-Clause — see [LICENSE](LICENSE). Copyright (c) 2026 Metavolve Labs, Inc.
+BSD-3-Clause — see [LICENSE](LICENSE). Copyright (c) 2026 Metavolve Labs, Inc.
 
----
-
-*Metavolve Labs, Inc. — Build the infrastructure of memory for the AI age.*
+Patents pending. The licence covers the code; it does not grant patent rights.
