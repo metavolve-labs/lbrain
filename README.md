@@ -49,6 +49,10 @@ input side, and it has to be deterministic — a gate judged without another mod
 - **Not a reasoning upgrade.** It changes what the model is given, not what it does with it.
 - **The gate is conservative** — it will sometimes flag `near-miss` on a record you'd have accepted.
   That is the trade: fewer confident wrong answers, slightly more "I don't know."
+- **A cold import of old notes will serve old decisions as current.** Records are `dated` only when the
+  *filename* carries a date, and a bulk copy resets every mtime to today — so newest-wins has nothing to
+  order by. Read [this first](docs/DEVELOPER-NOTES.md#10-importing-an-existing-pile-of-notes-yesterdays-doctrine-served-as-todays)
+  before importing an archive: either vet it, restore the dates, or knowingly run a calibration period.
 
 We also killed three of our own claims while building this, including a headline result that turned
 out to be an artifact of our own prompt. The retractions are published with the findings.
