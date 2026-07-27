@@ -132,7 +132,7 @@ def doctor(as_json: bool):
             for k in inert:
                 click.echo(f"      {k} = {raw[k]!r}")
         click.echo()
-        if stored:
+        if stored and any(v is not None for v in stored.values()):
             click.echo(f"  stored vectors:  {stored.get('embedding_model')} "
                        f"({stored.get('embedding_dim')}d, {stored.get('embedding_provider')})")
         if drift == "match":
@@ -151,8 +151,9 @@ def doctor(as_json: bool):
 
 
 @main.command()
-@click.option("--provider", type=click.Choice(["gemini", "openai"]), default="gemini",
-              help="Embedding provider (default: gemini, GCP-native, no third-party lock-in)")
+@click.option("--provider", type=click.Choice(["local", "gemini", "openai"]), default=None,
+              help="Embedding provider. Default: auto — 'local' (on-device, no API key) "
+                   "when no key is configured, else 'gemini' (GCP-native).")
 @click.option("--gemini-key", envvar="GEMINI_API_KEY", default=None, help="Gemini API key (provider=gemini)")
 @click.option("--api-key", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (provider=openai)")
 @click.option("--api-base", default=None, help="Override the Gemini base URL (point at a proxy / self-hosted gateway)")
@@ -170,7 +171,6 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
     The key is written to ~/.lbrain/env (chmod 600), never to plaintext config.
     """
     cfg = Config.load()
-    cfg.embedding_provider = provider
     if api_base:
         # Validate before assignment — direct attribute set bypasses __post_init__,
         # and `write()` would otherwise persist an unvalidated (possibly plaintext)
@@ -178,7 +178,17 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
         from .config import _validate_base_url
 
         cfg.gemini_base_url = _validate_base_url(api_base.rstrip("/"))
-    if provider == "gemini":
+    # Auto-select: never make a first-time user find an API key before their first
+    # query. If no credential is present, fall back to on-device embeddings.
+    if provider is None:
+        provider = "gemini" if (gemini_key or cfg.gemini_api_key) else (
+            "openai" if (api_key or cfg.openai_api_key) else "local")
+    cfg.embedding_provider = provider
+    if provider == "local":
+        from .embed import LocalEmbedClient
+        cfg.embedding_model = LocalEmbedClient.DEFAULT_MODEL
+        cfg.embedding_dim = LocalEmbedClient.DEFAULT_DIM
+    elif provider == "gemini":
         cfg.embedding_model = "gemini-embedding-001"
         if gemini_key:
             cfg.gemini_api_key = gemini_key
@@ -192,7 +202,8 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     stats = store.stats()
     store.close()
-    active_key = cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key
+    active_key = ("(none needed — on-device)" if provider == "local"
+                  else cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key)
     click.secho(f"✓ LBrain initialized at {CONFIG_DIR}", fg="green")
     click.echo(f"  provider: {provider} ({cfg.embedding_model}, {cfg.embedding_dim}d)")
     click.echo(f"  config:   {CONFIG_PATH}")
@@ -309,7 +320,11 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
 def embed(stale: bool, batch: int):
     """Generate embeddings for chunks (re-embeds stale or all)."""
     cfg = Config.load()
-    _active_key = cfg.gemini_api_key if cfg.embedding_provider == "gemini" else cfg.openai_api_key
+    # provider="local" runs on-device and needs no credential — the whole point of
+    # the zero-friction install path. Only the hosted providers gate on a key.
+    _active_key = ("local" if cfg.embedding_provider == "local"
+                   else cfg.gemini_api_key if cfg.embedding_provider == "gemini"
+                   else cfg.openai_api_key)
     if not _active_key:
         click.secho(
             f"✗ No API key for embedding_provider='{cfg.embedding_provider}'. "

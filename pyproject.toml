@@ -29,6 +29,10 @@ dependencies = [
 archive = ["cryptography>=44,<46"]
 # …plus real permaweb writes via the Arweave L1 transport.
 arweave = ["cryptography>=44,<46", "arweave-python-client>=1.0,<2"]
+# On-device embeddings (ONNX, no torch, no API key). The zero-friction install path:
+# `pip install lbrain[local]` gives a working brain with no credential step and no
+# text leaving the machine. 384-dim (bge-small-en-v1.5) vs 1536 hosted — fresh brains only.
+local = ["fastembed>=0.3,<1"]
 # Call-when-needed cross-encoder reranker (search(..., rerank=True)). ONNX, no torch.
 # sentence-transformers also works as a fallback if already installed.
 rerank = ["fastembed>=0.3,<1"]
