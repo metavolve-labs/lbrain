@@ -35,6 +35,10 @@ arweave = ["cryptography>=44,<46", "arweave-python-client>=1.0,<2"]
 # `pip install lbrain[local]` gives a working brain with no credential step and no
 # text leaving the machine. 384-dim (bge-small-en-v1.5) vs 1536 hosted — fresh brains only.
 local = ["fastembed>=0.3,<1"]
+# Test runner. Separate from the runtime deps on purpose: `pip install lbrain`
+# must stay small. CI installs `.[dev]` — a bare `pip install -e .` has no pytest,
+# which is exactly how the first CI run failed.
+dev = ["pytest>=7"]
 # Call-when-needed cross-encoder reranker (search(..., rerank=True)). ONNX, no torch.
 # sentence-transformers also works as a fallback if already installed.
 rerank = ["fastembed>=0.3,<1"]

@@ -22,7 +22,7 @@ Please include: what you expected, what happened, the `doctor` output, and your 
 ```bash
 git clone https://github.com/metavolve-labs/lbrain
 cd lbrain
-pip install -e ".[local]"
+pip install -e ".[local,dev]"
 python -m pytest -q          # 79 tests, ~4s, no network required
 ```
 
