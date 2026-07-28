@@ -263,8 +263,22 @@ class Store:
                 if not os.path.isdir(str(root)):
                     return []  # a source root vanished → mount gone, not docs; skip prune
 
+        from pathlib import Path as _Path
+
+        from .index import is_backup_path
+
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
-        gone = [r["rel_path"] for r in rows if not os.path.exists(r["abs_path"])]
+        # "No longer indexable" is not the same as "no longer on disk". A doc that
+        # became EXCLUDED (a backup tree) still exists, so an existence-only prune
+        # left it serving forever: discover() stopped finding it, import reported
+        # `pruned: 0`, and its superseded text kept ranking against the record that
+        # corrected it. Verified live 2026-07-28 — the exclusion shipped without
+        # this and changed nothing a user would see.
+        gone = [
+            r["rel_path"]
+            for r in rows
+            if not os.path.exists(r["abs_path"]) or is_backup_path(_Path(r["abs_path"]))
+        ]
         if gone and not force and rows and len(gone) / len(rows) > max_fraction:
             raise RuntimeError(
                 f"prune would remove {len(gone)}/{len(rows)} docs "

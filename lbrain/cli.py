@@ -345,7 +345,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
     )
     if pruned:
         for rel in pruned[:10]:
-            click.echo(f"    pruned (file gone): {rel}")
+            click.echo(f"    pruned (gone or no longer indexable): {rel}")
         if len(pruned) > 10:
             click.echo(f"    … +{len(pruned) - 10} more")
     click.echo(
