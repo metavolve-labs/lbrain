@@ -45,7 +45,8 @@ presents it as fact.
 
 We profiled **eight model architectures from seven organizations** on the same near-domain retrieval
 task. Failure rates swung **1.3% / 35.7% / 16.7%** depending only on how the *records* were
-structured — a ~27× spread — while architecture explained ≈**0%** of the variance, with identical
+structured — a **34.4 percentage-point** absolute difference — while architecture explained ≈**0%** of the
+variance, with identical
 ordering in 8 of 8 models. Changing models didn't remove the effect. Telling the model not to guess
 didn't remove it either.
 
