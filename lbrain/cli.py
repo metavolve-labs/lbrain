@@ -152,8 +152,9 @@ def doctor(as_json: bool):
 
 @main.command()
 @click.option("--provider", type=click.Choice(["local", "gemini", "openai"]), default=None,
-              help="Embedding provider. Default: auto — 'local' (on-device, no API key) "
-                   "when no key is configured, else 'gemini' (GCP-native).")
+              help="Embedding provider. Default 'local' (on-device). A hosted provider is "
+                   "used ONLY if you pass --gemini-key/--api-key on the command line; "
+                   "a key in the environment is never treated as consent.")
 @click.option("--gemini-key", envvar="GEMINI_API_KEY", default=None, help="Gemini API key (provider=gemini)")
 @click.option("--api-key", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (provider=openai)")
 @click.option("--api-base", default=None, help="Override the Gemini base URL (point at a proxy / self-hosted gateway)")
@@ -165,10 +166,12 @@ def doctor(as_json: bool):
     help="Directory to index (repeatable)",
 )
 def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: tuple[str, ...]):
-    """Initialize LBrain config + DB (Gemini-native by default).
+    """Initialize LBrain config + DB — on-device by default.
 
-    Out-of-the-box: `lbrain init --gemini-key <KEY> --source ./docs --source ./notes`
-    The key is written to ~/.lbrain/env (chmod 600), never to plaintext config.
+    Out-of-the-box: `lbrain init --source ./docs --source ./notes` — no key, no
+    account, embeddings computed locally. To use a hosted provider instead, pass
+    the key explicitly: `lbrain init --gemini-key <KEY> --source ./docs`. The key
+    is written to ~/.lbrain/env (chmod 600), never to plaintext config.
     """
     existing_config = CONFIG_PATH.exists()
     cfg = Config.load()
@@ -182,8 +185,28 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
     # Auto-select: never make a first-time user find an API key before their first
     # query. If no credential is present, fall back to on-device embeddings.
     if provider is None:
-        provider = "gemini" if (gemini_key or cfg.gemini_api_key) else (
-            "openai" if (api_key or cfg.openai_api_key) else "local")
+        # An API key sitting in the environment must NEVER be read as consent to
+        # ship the user's corpus to a third party. `--gemini-key` carries
+        # envvar=GEMINI_API_KEY, and Config.load() reads the same variables, so
+        # the previous rule ("a key exists anywhere -> use the remote provider")
+        # silently sent every document to Google for any developer who had that
+        # variable exported — while the README promised nothing leaves your
+        # machine. Remote is now opt-IN, and only via an explicit flag on this
+        # invocation. An existing install is never switched out from under it.
+        ctx = click.get_current_context()
+
+        def _on_command_line(param: str) -> bool:
+            src = ctx.get_parameter_source(param)
+            return src is not None and getattr(src, "name", "") == "COMMANDLINE"
+
+        if existing_config and cfg.embedding_provider:
+            provider = cfg.embedding_provider
+        elif _on_command_line("gemini_key"):
+            provider = "gemini"
+        elif _on_command_line("api_key"):
+            provider = "openai"
+        else:
+            provider = "local"
     cfg.embedding_provider = provider
     if provider == "local":
         from .embed import LocalEmbedClient
@@ -214,6 +237,13 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
     store.close()
     active_key = ("(none needed — on-device)" if provider == "local"
                   else cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key)
+    if provider == "local" and (gemini_key or api_key or cfg.gemini_api_key or cfg.openai_api_key):
+        click.secho(
+            "  note: an API key was found in your environment. It was NOT used — indexing stays\n"
+            "        on-device. To embed with a hosted provider instead, pass it explicitly:\n"
+            "        lbrain init --gemini-key \"$GEMINI_API_KEY\"",
+            fg="yellow",
+        )
     click.secho(f"✓ LBrain initialized at {CONFIG_DIR}", fg="green")
     click.echo(f"  provider: {provider} ({cfg.embedding_model}, {cfg.embedding_dim}d)")
     click.echo(f"  config:   {CONFIG_PATH}")

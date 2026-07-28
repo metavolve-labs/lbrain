@@ -115,3 +115,36 @@ def test_init_does_not_switch_an_existing_install(tmp_path, isolate_lbrain_home)
     res = CliRunner().invoke(cli.main, ["init", "--provider", "local", "--source", str(src)])
     assert res.exit_code == 0, res.output
     assert 'serve_mode = "prose"' in (home / "config.toml").read_text()
+
+
+def test_ambient_api_key_is_not_consent_to_use_a_remote_provider(tmp_path, isolate_lbrain_home, monkeypatch):
+    """An exported GEMINI_API_KEY must not ship the corpus to Google.
+
+    Before 2026-07-27 `init` treated a key found anywhere — including the ambient
+    environment, via `--gemini-key`'s envvar and Config.load() — as a request to
+    embed remotely. A developer with that variable already exported ran the
+    documented command and had every document sent to a third party, while the
+    README promised nothing left their machine. Remote is opt-in, by flag only.
+    """
+    from click.testing import CliRunner
+    import lbrain.cli as cli
+
+    monkeypatch.setenv("GEMINI_API_KEY", "ambient-key-must-be-ignored")
+    src = tmp_path / "notes"; src.mkdir()
+    res = CliRunner().invoke(cli.main, ["init", "--source", str(src)])
+    assert res.exit_code == 0, res.output
+    cfg_text = (isolate_lbrain_home / "config.toml").read_text()
+    assert 'embedding_provider = "local"' in cfg_text, cfg_text
+    assert "NOT used" in res.output
+
+
+def test_explicit_key_flag_still_selects_the_hosted_provider(tmp_path, isolate_lbrain_home):
+    """Opt-in must keep working — the fix restricts consent, it doesn't remove it."""
+    from click.testing import CliRunner
+    import lbrain.cli as cli
+
+    src = tmp_path / "notes"; src.mkdir()
+    res = CliRunner().invoke(
+        cli.main, ["init", "--gemini-key", "explicitly-passed", "--source", str(src)])
+    assert res.exit_code == 0, res.output
+    assert 'embedding_provider = "gemini"' in (isolate_lbrain_home / "config.toml").read_text()

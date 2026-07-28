@@ -27,7 +27,8 @@ lbrain import && lbrain embed --stale
 lbrain query "what did we decide about the deploy flag"
 ```
 
-No API key. No account. Nothing leaves your machine.
+No API key. No account. Indexing and search run on-device — your documents and queries are never
+transmitted. LBrain downloads its ~67 MB embedding model once on first run; after that it works offline.
 
 ```
 ⟪note⟫
@@ -101,11 +102,13 @@ Or skip MCP entirely — `lbrain query`, `search`, `import`, `doctor` all work f
 
 | Provider | Setup | Where your text goes |
 |---|---|---|
-| `local` *(default)* | none | nowhere — on-device ONNX, 384-dim |
+| `local` *(default)* | none | nowhere — on-device ONNX, 384-dim (one-time model download) |
 | `gemini` | your own key | Google, under your key |
 | `openai` | your own key | OpenAI, under your key |
 
-`lbrain init` selects `local` when no key is present. See [`docs/KEYS.md`](docs/KEYS.md).
+`lbrain init` uses `local` unless you pass `--gemini-key`/`--api-key` **on the command line**. A key
+sitting in your environment is never treated as consent to send your corpus to a third party.
+See [`PRIVACY.md`](PRIVACY.md) for every network call LBrain can make, and when. See [`docs/KEYS.md`](docs/KEYS.md).
 
 ## Something wrong?
 
