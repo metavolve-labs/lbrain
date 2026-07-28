@@ -205,11 +205,11 @@ def test_discover_refuses_symlinks_that_escape_the_root(tmp_path):
     """A cloned repo containing `docs/notes.md -> ../../../.ssh/id_rsa` chose
     which of the user's files got indexed, embedded and served."""
     secret = tmp_path / "outside.md"
-    secret.write_text("SECRET-CANARY")
+    secret.write_text("SECRET-CANARY", encoding="utf-8")
     root = tmp_path / "repo" / "docs"
     root.mkdir(parents=True)
     (root / "notes.md").symlink_to(secret)
-    (root / "real.md").write_text("# legitimate")
+    (root / "real.md").write_text("# legitimate", encoding="utf-8")
 
     found = discover([tmp_path / "repo"])
 
@@ -221,7 +221,7 @@ def test_discover_still_follows_symlinks_that_stay_inside(tmp_path):
     """The guard is scoped to escapes — an in-corpus symlink is still indexed."""
     root = tmp_path / "repo"
     (root / "docs").mkdir(parents=True)
-    (root / "docs" / "target.md").write_text("# inside")
+    (root / "docs" / "target.md").write_text("# inside", encoding="utf-8")
     (root / "link.md").symlink_to(root / "docs" / "target.md")
 
     assert sorted(p.name for p in discover([root])) == ["link.md", "target.md"]
@@ -238,3 +238,74 @@ def test_cli_module_emits_the_untrusted_notice():
 
     src = inspect.getsource(cli_mod)
     assert "UNTRUSTED_NOTICE" in src
+
+
+# --- Windows install must be seamless (found while fixing #15) --------------
+
+def test_priority_detection_survives_windows_path_separators():
+    """`rel.split("/")` meant the 000-PRIORITY ranking boost silently never
+    fired on Windows — a ranking difference with no error message."""
+    import re
+
+    win = r"P5-AETERNUM\000-PRIORITY-WALLET-TRUST\LAIR.md"
+    posix = "P5-AETERNUM/000-PRIORITY-WALLET-TRUST/LAIR.md"
+    for rel in (win, posix):
+        assert any(p.startswith("000-PRIORITY") for p in re.split(r"[\\/]", rel)), rel
+
+
+def test_no_source_file_relies_on_the_locale_default_encoding():
+    """Windows resolves an omitted `encoding=` to cp1252, and the onboarding
+    templates contain \u2192 \u2713 \U0001f9e0 — none of which encode in cp1252, so
+    `lbrain init` raised UnicodeEncodeError before it ever reached the TOML bug.
+
+    Guards the whole class, not the sites we happened to find. AST-based: a
+    line-regex version false-positived on multi-line calls and missed a call
+    that passed `errors=` but not `encoding=`.
+    """
+    import ast
+    import pathlib
+
+    pkg = pathlib.Path(__file__).resolve().parent.parent / "lbrain"
+    offenders = []
+    for py in pkg.rglob("*.py"):
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not isinstance(fn, ast.Attribute):
+                continue
+            if fn.attr not in ("read_text", "write_text", "open"):
+                continue
+            # os.open returns a file descriptor — no text layer, no encoding
+            if isinstance(fn.value, ast.Name) and fn.value.id == "os":
+                continue
+            if any(k.arg == "encoding" for k in node.keywords):
+                continue
+            # binary mode needs no encoding
+            if any(
+                isinstance(a, ast.Constant) and isinstance(a.value, str) and "b" in a.value
+                for a in node.args
+            ):
+                continue
+            offenders.append(f"{py.name}:{node.lineno}")
+    assert not offenders, f"default-encoding IO (breaks on Windows): {offenders}"
+
+
+def test_onboarding_templates_are_not_cp1252_encodable():
+    """Pins WHY the encoding fix matters — if these ever become pure ASCII the
+    test above still stands, but this documents the original failure."""
+    from lbrain.onboard import STARTER_RULES
+
+    non_ascii = [c for c in STARTER_RULES if ord(c) > 127]
+    if non_ascii:
+        fails = [c for c in non_ascii if _cp1252_fails(c)]
+        assert fails, "templates are cp1252-safe now; the encoding guard still applies"
+
+
+def _cp1252_fails(ch: str) -> bool:
+    try:
+        ch.encode("cp1252")
+        return False
+    except UnicodeEncodeError:
+        return True

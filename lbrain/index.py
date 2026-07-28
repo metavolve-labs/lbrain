@@ -124,7 +124,13 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         doc_type = str(meta["type"])
 
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
-    is_priority = any(p.startswith("000-PRIORITY") for p in rel.split("/"))
+    # Split on BOTH separators: on Windows `rel` is "P5-X\000-PRIORITY-Y\LAIR.md",
+    # so rel.split("/") returned the whole string as one element and the
+    # 000-PRIORITY boost silently never fired — a ranking difference with no
+    # error message, which is worse than a crash.
+    is_priority = any(
+        part.startswith("000-PRIORITY") for part in re.split(r"[\\/]", rel)
+    )
 
     doc_hash = hashlib.sha1(body.encode("utf-8")).hexdigest()
     return Doc(

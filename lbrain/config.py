@@ -73,7 +73,7 @@ def _load_env_file() -> None:
     if not ENV_PATH.exists():
         return
     try:
-        for line in ENV_PATH.read_text().splitlines():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
@@ -102,7 +102,7 @@ def _write_env_var(key: str, value: str) -> None:
         pass
     lines, found = [], False
     if ENV_PATH.exists():
-        for line in ENV_PATH.read_text().splitlines():
+        for line in ENV_PATH.read_text(encoding="utf-8").splitlines():
             if line.strip().startswith(f"{key}="):
                 lines.append(f"{key}={value}")
                 found = True
@@ -235,7 +235,7 @@ class Config:
                 embedding_dim=LocalEmbedClient.DEFAULT_DIM,
                 gemini_base_url=os.environ.get("GEMINI_BASE_URL", cls.gemini_base_url),
             )
-        raw = tomllib.loads(CONFIG_PATH.read_text())
+        raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         sources = [Path(s).expanduser() for s in raw.get("sources", [])]
         api_key = raw.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
         gemini_key = (
@@ -331,7 +331,7 @@ class Config:
         for s in self.sources:
             lines.append(f"  {q(s)},")
         lines.append("]")
-        CONFIG_PATH.write_text("\n".join(lines) + "\n")
+        CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
         try:
             CONFIG_PATH.chmod(0o600)
         except OSError as e:
