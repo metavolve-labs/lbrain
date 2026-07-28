@@ -17,7 +17,7 @@ from .index import discover, parse
 from .lair_protocol import detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
-from .serve import render_response, resolve_mode
+from .serve import fence_block, render_response, resolve_mode, sanitize_field
 from .store import Store
 
 
@@ -475,22 +475,30 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
             return
         kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
 
+        # The CLI prose path emitted raw corpus text with no notice, no fence and
+        # no control-char stripping — weaker than the MCP prose path, which at
+        # least fenced. Our own CLAUDE.md tells agents to shell out to
+        # `lbrain query`, so this output lands straight in an agent's context;
+        # \x1b also reached a human's terminal intact. Red-team 2026-07-28, #5.
+        if kept:
+            click.secho(amp.UNTRUSTED_NOTICE, fg="red")
+
         core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
         if core:
-            click.secho(core, fg="green")
+            click.secho(fence_block(core.strip()), fg="green")
 
         label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
         click.secho(f"--- {label} ({dt_ms:.0f} ms) ---\n", fg="cyan")
         for i, h in enumerate(kept, 1):
             prefix = "★" if h.is_priority else " "
             click.secho(
-                f"{prefix} [{i}] {h.title}  ({h.score:.3f})", fg="yellow"
+                f"{prefix} [{i}] {sanitize_field(h.title, 120)}  ({h.score:.3f})", fg="yellow"
             )
-            click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
+            click.echo(f"   {sanitize_field(h.rel_path, 160)} :: chunk {h.chunk_idx}")
             if h.doc_type:
-                click.echo(f"   type={h.doc_type}  v={h.vector_score:.2f}  kw={h.keyword_score:.2f}  boosts={h.boosts}")
-            text_preview = h.text.strip().replace("\n", " ")[:getattr(cfg, "amp_per_chunk_chars", 360)]
-            click.echo(f"   {text_preview}\n")
+                click.echo(f"   type={sanitize_field(h.doc_type, 32)}  v={h.vector_score:.2f}  kw={h.keyword_score:.2f}  boosts={h.boosts}")
+            text_preview = h.text.strip()[:getattr(cfg, "amp_per_chunk_chars", 360)]
+            click.echo(fence_block(text_preview) + "\n")
 
         if getattr(cfg, "amp_provenance", True):
             click.secho(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)), fg="cyan")
@@ -519,11 +527,13 @@ def search_cmd(query: str, k: int):
                                        include_core=False, include_provenance=False,
                                        hits_label="keyword hits"))
             return
+        if hits:
+            click.secho(amp.UNTRUSTED_NOTICE, fg="red")
         click.secho(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", fg="cyan")
         for i, h in enumerate(hits, 1):
-            click.secho(f"  [{i}] {h.title}", fg="yellow")
-            click.echo(f"   {h.rel_path} :: chunk {h.chunk_idx}")
-            click.echo(f"   {h.text.strip().replace(chr(10), ' ')[:240]}\n")
+            click.secho(f"  [{i}] {sanitize_field(h.title, 120)}", fg="yellow")
+            click.echo(f"   {sanitize_field(h.rel_path, 160)} :: chunk {h.chunk_idx}")
+            click.echo(fence_block(h.text.strip()[:240]) + "\n")
     finally:
         store.close()
 

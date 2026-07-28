@@ -19,6 +19,40 @@ ENV_PATH = CONFIG_DIR / "env"
 DB_PATH = CONFIG_DIR / "brain.db"
 
 
+def _toml_str(value) -> str:
+    """Serialize a value as a TOML *basic string*, escaping what TOML treats as
+    special. Never build a config line by raw f-string interpolation.
+
+    The 2026-07-28 red-team (finding 15) found `f'db_path = "{self.db_path}"'`
+    emitted `db_path = "C:\\Users\\me\\.lbrain\\brain.db"` on Windows, where `\\U`
+    opens an 8-hex-digit unicode escape. `write()` reported success and every
+    later command died in `Config.load()` on TOMLDecodeError — i.e. 100% of
+    native Windows installs were bricked by their own `lbrain init`.
+
+    A directory name containing a quote or newline was also a config-injection
+    primitive; both are escapes here, not structure.
+    """
+    s = str(value)
+    out = ['"']
+    for ch in s:
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch < " " or ch == "\x7f":
+            out.append(f"\\u{ord(ch):04X}")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
 def _validate_base_url(url: str) -> str:
     """Embeddings (and their text + key) must go over TLS to a real host. Reject a
     poisoned/plaintext ``gemini_base_url`` that would exfiltrate to http:// or a
@@ -149,10 +183,14 @@ class Config:
     abstraction_topk_cap: int = 2  # max abstraction chunks in the final top-k (-1 = uncapped)
     abstraction_recency_guard: bool = True  # temporal queries: source docs outrank abstractions
     # --- binding-aware serving (2026-07-24, docs/DESIGN-binding-aware-serving.md) ---
-    # Code default stays "prose" (legacy melt) — default-value ≠ configured-on ≠
-    # measured-useful; the live brain flips to "structured" via config only after
-    # the answer-presence A/B (measurement recorded alongside the flip).
-    serve_mode: str = "prose"  # "structured" (attribution-bound records) | "prose" (legacy)
+    # Was "prose" pending the answer-presence A/B. That A/B has since been run
+    # (prose 5/8 reachable answers, structured 8/8) and structured has served the
+    # live brain since 2026-07-24 — so the measurement the old default was waiting
+    # on now exists, and "measured-useful" is satisfied. Prose is also the weaker
+    # containment path (red-team 2026-07-28, #4/#5), so a fresh install should not
+    # land on it by default. Rollback remains `serve_mode = "prose"` in config.toml
+    # or --mode prose per call.
+    serve_mode: str = "structured"  # "structured" (attribution-bound records) | "prose" (legacy)
     serve_chunk_chars: int = 700  # structured per-record excerpt budget (prose keeps amp_per_chunk_chars)
     serve_admissibility: bool = True  # question-shaped queries: annotate binds/near-miss + ambiguity gate
     gate_min_near: int = 3  # ambiguity gate floor: min near-miss records among those served
@@ -174,10 +212,27 @@ class Config:
     @classmethod
     def load(cls) -> "Config":
         if not CONFIG_PATH.exists():
+            # No config on disk = no provider has been CHOSEN. The old branch here
+            # returned provider="gemini" (the dataclass default) with both keys
+            # harvested from the environment, so `lbrain import ~/notes && lbrain
+            # embed --stale` — the README's own step 3, runnable without `init` —
+            # shipped the corpus to Google on a key the user never pointed at
+            # LBrain. Verified 2026-07-28 (red-team finding 12).
+            #
+            # Provider selection comes from config.toml, written by an explicit
+            # `init`, and nowhere else. Unconfigured falls back to on-device.
+            #
+            # The model/dim must move WITH the provider: make_embedder passes
+            # cfg.embedding_dim straight through, and the dataclass default (1536,
+            # gemini-embedding-001) would hand the 384-dim local model a hosted
+            # vector width. LocalEmbedClient guards the stale model NAME but not
+            # the dim.
+            from .embed import LocalEmbedClient
+
             return cls(
-                openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
-                gemini_api_key=os.environ.get("GEMINI_API_KEY")
-                or os.environ.get("GEMINI_3_API_KEY", ""),
+                embedding_provider="local",
+                embedding_model=LocalEmbedClient.DEFAULT_MODEL,
+                embedding_dim=LocalEmbedClient.DEFAULT_DIM,
                 gemini_base_url=os.environ.get("GEMINI_BASE_URL", cls.gemini_base_url),
             )
         raw = tomllib.loads(CONFIG_PATH.read_text())
@@ -231,12 +286,13 @@ class Config:
 
     def write(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        q = _toml_str
         lines = [
-            f'embedding_provider = "{self.embedding_provider}"',
+            f"embedding_provider = {q(self.embedding_provider)}",
             'openai_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
             'gemini_api_key = ""  # secret lives in ~/.lbrain/env (chmod 600), never here',
-            f'gemini_base_url = "{self.gemini_base_url}"',
-            f'embedding_model = "{self.embedding_model}"',
+            f"gemini_base_url = {q(self.gemini_base_url)}",
+            f"embedding_model = {q(self.embedding_model)}",
             f"embedding_dim = {self.embedding_dim}",
             f"chunk_tokens = {self.chunk_tokens}",
             f"chunk_overlap = {self.chunk_overlap}",
@@ -248,7 +304,7 @@ class Config:
             f"amp_budget_chars = {self.amp_budget_chars}",
             f"amp_per_chunk_chars = {self.amp_per_chunk_chars}",
             f"amp_provenance = {str(self.amp_provenance).lower()}",
-            f'core_memory_path = "{self.core_memory_path}"',
+            f"core_memory_path = {q(self.core_memory_path)}",
             f"core_memory_chars = {self.core_memory_chars}",
             f"supersede_aware = {str(self.supersede_aware).lower()}",
             f"supersede_penalty = {self.supersede_penalty}",
@@ -258,22 +314,22 @@ class Config:
             # Guarded by tests/test_config_roundtrip.py.
             f"abstraction_topk_cap = {self.abstraction_topk_cap}",
             f"abstraction_recency_guard = {str(self.abstraction_recency_guard).lower()}",
-            f'serve_mode = "{self.serve_mode}"',
+            f"serve_mode = {q(self.serve_mode)}",
             f"serve_chunk_chars = {self.serve_chunk_chars}",
             f"serve_admissibility = {str(self.serve_admissibility).lower()}",
             f"gate_min_near = {self.gate_min_near}",
             f"gate_density = {self.gate_density}",
             f"arweave_enabled = {str(self.arweave_enabled).lower()}",
-            f'arweave_transport = "{self.arweave_transport}"',
-            f'arweave_wallet_path = "{self.arweave_wallet_path}"',
-            f'arweave_gateway = "{self.arweave_gateway}"',
-            f'turbo_endpoint = "{self.turbo_endpoint}"',
-            f'archive_namespace = "{self.archive_namespace}"',
-            f'db_path = "{self.db_path}"',
+            f"arweave_transport = {q(self.arweave_transport)}",
+            f"arweave_wallet_path = {q(self.arweave_wallet_path)}",
+            f"arweave_gateway = {q(self.arweave_gateway)}",
+            f"turbo_endpoint = {q(self.turbo_endpoint)}",
+            f"archive_namespace = {q(self.archive_namespace)}",
+            f"db_path = {q(self.db_path)}",
             "sources = [",
         ]
         for s in self.sources:
-            lines.append(f'  "{s}",')
+            lines.append(f"  {q(s)},")
         lines.append("]")
         CONFIG_PATH.write_text("\n".join(lines) + "\n")
         try:
