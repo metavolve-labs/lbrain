@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.1.1 — 2026-07-28 — security + Windows. **Upgrade from 0.1.0.**
+
+**0.1.0 is yanked.** It is broken on Windows and contradicts its own privacy
+claim. If you pinned it, unpin.
+
+### Fixed — every native-Windows install was bricked by `lbrain init`
+- `config.toml` was built by raw f-string interpolation, so a Windows path
+  (`C:\Users\...`) emitted an invalid `\U` escape. `init` reported success and
+  every later command died in `Config.load()` with `TOMLDecodeError`.
+- The onboarding templates contain non-ASCII characters that do not encode in
+  cp1252, which Windows uses when `encoding=` is omitted — so `init` raised
+  `UnicodeEncodeError` while scaffolding lairs, *before* reaching the TOML bug.
+  All text I/O is now explicit UTF-8.
+- The `000-PRIORITY` ranking boost silently never fired on Windows: the path was
+  split on `/` only. Not a crash — a ranking difference with no error message.
+
+### Fixed — an ambient API key is not consent to send your corpus away
+- With no `config.toml`, the provider defaulted to a hosted embedder and adopted
+  `OPENAI_API_KEY` / `GEMINI_API_KEY` from the environment, so `lbrain import &&
+  lbrain embed --stale` could ship your corpus to a third party on a key you
+  never pointed at LBrain. Unconfigured now means **on-device**.
+- `lbrain archive` selected the OpenAI key whenever the provider was not
+  `"gemini"` — including `"local"` — and POSTed the raw session transcript to
+  `api.openai.com`. Only an explicitly named hosted provider can now leave the
+  machine, and the fallback is no longer silent.
+
+### Fixed — security
+- `lair_check_action` returned retrieved corpus text with no untrusted-data
+  notice, no fence and no sanitization, while presenting it as rules to an agent
+  that calls it *before* irreversible actions. A planted note was a direct
+  agent-hijack primitive. Now carries the same containment as `lair_query`.
+- The legacy prose serving path used a weaker fence than the structured path;
+  both now share one hardened implementation. The CLI had no containment at all.
+- `brain.db` — the entire corpus in cleartext — was created world-readable
+  (0644 in a 0755 directory). Now 0600 in a 0700 directory.
+- Import followed `*.md` symlinks out of the corpus root, so a cloned repo could
+  choose which of your files got indexed and served.
+
+### Changed
+- `serve_mode` now defaults to `structured` for new installs (measured 5/8 → 8/8
+  answer presence). Rollback: `serve_mode = "prose"`.
+- Records asserting an open state are annotated at serve time
+  (`unverified 27d`), so a claim with a shelf life says so where it is used.
+  Rollback: `serve_staleness = false`.
+- Pre-change backup trees are no longer indexed, and docs that become
+  unindexable are pruned — superseded copies were ranking against the records
+  that corrected them.
+
+Security findings adjudicated by hand against live code; 123 tests.
+
 ## 2026-06-08 — Archive extracted to an optional subpackage
 
 Finished the "second product sharing the repo" loose end from the polish pass: the
