@@ -195,6 +195,11 @@ class Config:
     serve_admissibility: bool = True  # question-shaped queries: annotate binds/near-miss + ambiguity gate
     gate_min_near: int = 3  # ambiguity gate floor: min near-miss records among those served
     gate_density: float = 0.5  # ambiguity gate: min fraction of served records that are near-miss
+    # Serve-time perishability marker. `lbrain stale` finds these only when
+    # someone remembers to run it; this annotates them at the point of USE.
+    # Not age-gated (staleness.py: "age is information to report, not a gate to
+    # pass"); safe because the emphasis detector fires on ~1% of chunks.
+    serve_staleness: bool = True
     # --- Tier 2: permanent verifiable archive (Arweave substrate) ---
     arweave_enabled: bool = False  # opt-in to real permaweb writes (else offline local store)
     arweave_transport: str = "local"  # "local" (offline, content-addressed) | "arweave"/"l1"
@@ -274,6 +279,7 @@ class Config:
             serve_admissibility=raw.get("serve_admissibility", cls.serve_admissibility),
             gate_min_near=raw.get("gate_min_near", cls.gate_min_near),
             gate_density=raw.get("gate_density", cls.gate_density),
+            serve_staleness=raw.get("serve_staleness", cls.serve_staleness),
             arweave_enabled=raw.get("arweave_enabled", cls.arweave_enabled),
             arweave_transport=raw.get("arweave_transport", cls.arweave_transport),
             arweave_wallet_path=raw.get("arweave_wallet_path")
@@ -319,6 +325,7 @@ class Config:
             f"serve_admissibility = {str(self.serve_admissibility).lower()}",
             f"gate_min_near = {self.gate_min_near}",
             f"gate_density = {self.gate_density}",
+            f"serve_staleness = {str(self.serve_staleness).lower()}",
             f"arweave_enabled = {str(self.arweave_enabled).lower()}",
             f"arweave_transport = {q(self.arweave_transport)}",
             f"arweave_wallet_path = {q(self.arweave_wallet_path)}",

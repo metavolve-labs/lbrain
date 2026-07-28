@@ -348,7 +348,48 @@ GATE_NOTICE = (
 TABLE_HEADER = "possible bindings (heuristic extraction — verify in the records below):"
 
 
-def _header(idx: int, h: Hit, verdict: str | None) -> str:
+def stale_marker(h: Hit, today: datetime.date | None = None) -> str:
+    """Serve-time perishability marker, or "" if the record asserts nothing open.
+
+    `lbrain stale` could already find these — but only when someone remembered
+    to run it, which is exactly what a tired human never does. The claim that
+    motivated that command was retrieved correctly, attributed correctly, dated
+    honestly, and served with the system's strongest trust marker while being
+    false. Nothing was broken; there was simply no representation of shelf life
+    at the point of USE. This puts it there.
+
+    Deliberately NOT age-gated. staleness.py's own finding: the motivating case
+    went false in eighteen days and every age threshold tested suppressed it —
+    "age is information to report, not a gate to pass." Safe to report on every
+    matching record because the emphasis-based detector fires on ~1% of chunks;
+    a naive keyword list fires on 74.9% and would be pure noise.
+    """
+    from . import staleness
+
+    if staleness.is_excluded(h.rel_path):
+        return ""                       # archives are stale by design
+    today = today or datetime.date.today()
+
+    exp = staleness.expired(h.text, today)
+    if exp:
+        return f"EXPIRED {exp}"         # DECIDABLE: the author named the date
+
+    if not staleness.volatility(h.text):
+        return ""
+    label, date = record_date(h)
+    # An age is only honest if it is measured from a CLAIM date. mtime moves
+    # when any byte changes, so a bulk patch makes every open claim in the
+    # corpus read "unverified 0d" — which says "just checked" about something
+    # nobody checked. Observed live: the 2026-07-28 reconciliation touched 831
+    # files and every perishable claim in them reported 0d. Say what we know.
+    if label in ("verified", "as-of", "dated"):
+        n = staleness.days_since(date, today)
+        if n is not None:
+            return f"unverified {n}d"
+    return "unverified (no claim date)"
+
+
+def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True) -> str:
     star = "★ " if h.is_priority else ""
     title = sanitize_field(h.title, 100)
     src = sanitize_field(h.rel_path, 160)
@@ -357,6 +398,10 @@ def _header(idx: int, h: Hit, verdict: str | None) -> str:
     parts = [f"src: {src}", f"chunk {h.chunk_idx}", f"type={dt}"]
     if date:
         parts.append(f"{label} {date}")
+    if staleness_on:
+        mark = stale_marker(h)
+        if mark:
+            parts.append(mark)
     if "superseded" in h.boosts:
         parts.append("SUPERSEDED")
     if _is_abstraction(h):
@@ -404,7 +449,10 @@ def render_response(
     for i, h in enumerate(hits, 1):
         ex = excerpt(h.text, terms, chunk_chars)
         v = judge(query, ex) if question else None  # judged on the EXACT text served
-        block = _header(i, h, v.verdict if v else None) + "\n" + fence_block(ex)
+        block = _header(
+            i, h, v.verdict if v else None,
+            staleness_on=getattr(cfg, "serve_staleness", True),
+        ) + "\n" + fence_block(ex)
         if kept and budget and used + len(block) > budget:
             break
         kept.append((h, v))

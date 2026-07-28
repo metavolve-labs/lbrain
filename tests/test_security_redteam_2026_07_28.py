@@ -309,3 +309,49 @@ def _cp1252_fails(ch: str) -> bool:
         return False
     except UnicodeEncodeError:
         return True
+
+
+# --- serve-time staleness (2026-07-28) -------------------------------------
+
+def test_stale_marker_never_reports_an_age_from_mtime():
+    """An age is only honest measured from a CLAIM date. Observed live: a bulk
+    reconciliation touched 831 files, so every open claim reported "0d" —
+    "just checked" about something nobody checked."""
+    from lbrain.serve import stale_marker
+
+    h = _hit("**Status**: ACTIVE\n\n| ⚠️ **PENDING** | filing |", doc_type="project",
+             rel_path="X-CORP/no-date-in-name.md")
+    h.mtime = __import__("time").time()          # touched right now
+    mark = stale_marker(h)
+    assert mark == "unverified (no claim date)", mark
+    assert "0d" not in mark
+
+
+def test_stale_marker_reports_age_from_a_filename_claim_date():
+    from lbrain.serve import stale_marker
+    import datetime
+
+    h = _hit("| ⚠️ **DELINQUENT** | franchise tax |", doc_type="project",
+             rel_path="X-CORP/state-compliance-2026-07-01.md")
+    mark = stale_marker(h, today=datetime.date(2026, 7, 28))
+    assert mark == "unverified 27d", mark
+
+
+def test_stale_marker_is_silent_on_settled_records():
+    """~1% fire rate is what makes this safe to serve on every record."""
+    from lbrain.serve import stale_marker
+
+    assert stale_marker(_hit("The patent was filed and the receipt verified.")) == ""
+
+
+def test_backup_trees_are_not_indexed(tmp_path):
+    """A backup is a COPY of a record something else has since corrected.
+    Indexing it puts superseded text next to the fix that replaced it."""
+    from lbrain.index import discover
+
+    root = tmp_path / "lairs"
+    (root / "backups-pre-apply-tranche2").mkdir(parents=True)
+    (root / "backups-pre-apply-tranche2" / "old.md").write_text("# stale", encoding="utf-8")
+    (root / "live.md").write_text("# current", encoding="utf-8")
+
+    assert [p.name for p in discover([root])] == ["live.md"]
