@@ -157,8 +157,16 @@ def detect_anti_pattern(action_description: str, feedback_hits: list[Hit]) -> li
                 }
                 overlap = rule_nouns & action_nouns
                 if len(overlap) >= 3:
+                    # Both fields are corpus-derived. Unsanitized, a note body
+                    # carrying \r / U+2028 / a homoglyph fence forges a second
+                    # ⚠️ line at column 0 inside the caller's output
+                    # (red-team 2026-07-28, finding 1).
+                    from .serve import sanitize_field
+
                     warnings.append(
-                        f"⚠️ {hit.rel_path}: '{line.strip()[:140]}' (overlap: {', '.join(sorted(overlap))})"
+                        f"⚠️ {sanitize_field(hit.rel_path, 160)}: "
+                        f"'{sanitize_field(line.strip(), 140)}' "
+                        f"(overlap: {', '.join(sorted(overlap))})"
                     )
                     break
     return warnings

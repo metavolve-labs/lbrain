@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -65,6 +67,40 @@ CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
 class Store:
     def __init__(self, db_path: Path, embedding_dim: int = 1536):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        # brain.db holds every chunk of the corpus in CLEARTEXT. Under the common
+        # umask 022, mkdir gave 0755 and sqlite3.connect() gave 0644 — world-
+        # readable, verified 2026-07-28 (red-team finding 10). The existing
+        # chmod 0700 only ever ran from _write_env_var, i.e. only when a HOSTED
+        # key was configured, so the privacy-maximal local-only install was
+        # precisely the one left open. Create private, before connecting.
+        try:
+            db_path.parent.chmod(0o700)
+        except OSError:
+            pass
+        if not db_path.exists():
+            try:
+                os.close(os.open(str(db_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600))
+            except FileExistsError:
+                pass
+            except OSError as e:
+                print(
+                    f"[lbrain] WARNING: could not create {db_path} privately ({e}); "
+                    "the corpus may be readable by other users on this filesystem.",
+                    file=sys.stderr,
+                )
+        else:
+            # An install that predates this fix already has a 0644 database. The
+            # 0700 parent above blocks traversal, but don't leave the file itself
+            # loose — a later reopen of the dir, a backup, or a copy would carry
+            # the permissive mode with it. SQLite gives -wal/-shm the main file's
+            # mode, so tighten those alongside it.
+            for p in (db_path, db_path.with_name(db_path.name + "-wal"),
+                      db_path.with_name(db_path.name + "-shm")):
+                try:
+                    if p.exists() and (p.stat().st_mode & 0o077):
+                        p.chmod(0o600)
+                except OSError:
+                    pass
         self.db_path = db_path
         self.embedding_dim = embedding_dim
         self.db = sqlite3.connect(str(db_path))

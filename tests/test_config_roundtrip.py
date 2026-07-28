@@ -33,7 +33,11 @@ def non_default(name: str, value):
         if name == "gemini_base_url":
             return "https://proxy.example.com/v1beta"
         if name == "serve_mode":
-            return "structured"
+            # "prose", NOT "structured" — structured became the DEFAULT on
+            # 2026-07-28 (the answer-presence A/B it was waiting on had already
+            # been run and shipped), which made this gate vacuous for the field.
+            # Same failure mode as embedding_provider below.
+            return "prose"
         if name == "embedding_provider":
             # "openai", NOT "gemini" — gemini became the DEFAULT on 2026-07-25
             # (code defaults realigned to the deployed GCP-native config), which

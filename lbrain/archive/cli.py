@@ -73,7 +73,15 @@ def archive(source, from_file, title, namespace, snapshot_model):
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = None
-    active_key = cfg.gemini_api_key if cfg.embedding_provider == "gemini" else cfg.openai_api_key
+    # "local" needs no key and must never be gated behind an ambient hosted one
+    # (red-team 2026-07-28 #11/#13: the same idiom routed provider=local into
+    # the OpenAI branch elsewhere). Only a named hosted provider needs a key.
+    if cfg.embedding_provider == "gemini":
+        active_key = cfg.gemini_api_key
+    elif cfg.embedding_provider == "openai":
+        active_key = cfg.openai_api_key
+    else:
+        active_key = "local"
     if active_key:
         try:
             embedder = make_embedder(cfg)
@@ -132,7 +140,15 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = None
-    active_key = cfg.gemini_api_key if cfg.embedding_provider == "gemini" else cfg.openai_api_key
+    # "local" needs no key and must never be gated behind an ambient hosted one
+    # (red-team 2026-07-28 #11/#13: the same idiom routed provider=local into
+    # the OpenAI branch elsewhere). Only a named hosted provider needs a key.
+    if cfg.embedding_provider == "gemini":
+        active_key = cfg.gemini_api_key
+    elif cfg.embedding_provider == "openai":
+        active_key = cfg.openai_api_key
+    else:
+        active_key = "local"
     if active_key:
         try:
             embedder = make_embedder(cfg)

@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -316,12 +317,29 @@ def make_snapshot(text: str, cfg, *, model: str | None = None, force_extractive:
     if force_extractive:
         return _extractive_snapshot(text)
     provider = getattr(cfg, "embedding_provider", "gemini")
-    key = cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key
+    # A provider is not a key, and a key is not consent. The old line read
+    #   key = cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key
+    # so provider == "local" — the user's explicit privacy choice — fell into the
+    # OpenAI branch and POSTed the raw session transcript to api.openai.com on an
+    # ambient OPENAI_API_KEY. Verified 2026-07-28 (red-team finding 13) with the
+    # network intercepted. Only a named hosted provider may leave the machine.
+    if provider == "gemini":
+        key = cfg.gemini_api_key
+    elif provider == "openai":
+        key = cfg.openai_api_key
+    else:
+        return _extractive_snapshot(text)
     if key:
         try:
             return _llm_snapshot(text, key, provider, model)
-        except Exception:
-            pass  # fall through to extractive
+        except Exception as e:
+            # Never silent: the caller asked for a hosted snapshot and did not get
+            # one. A bare `except: pass` here also swallowed a test's own probe.
+            print(
+                f"[lbrain] WARNING: {provider} snapshot failed ({type(e).__name__}); "
+                "fell back to the offline extractive snapshot.",
+                file=sys.stderr,
+            )
     return _extractive_snapshot(text)
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -48,11 +49,40 @@ class Chunk:
 
 
 def discover(roots: list[Path]) -> list[Path]:
+    """Find indexable *.md under each root, refusing any path that resolves
+    outside the root that offered it.
+
+    rglob does not descend into symlinked DIRECTORIES but it does yield
+    symlinked FILES, and parse() then read_text()s them — so a cloned repo
+    containing `docs/notes.md -> ../../../../.ssh/id_rsa` chose which of the
+    user's files got indexed, embedded and served, under the repo's provenance.
+    Git stores and checks out escaping symlinks verbatim. Verified end-to-end
+    2026-07-28 (red-team finding 2). This is the single choke point for both
+    `import` and `stale`.
+    """
     paths: list[Path] = []
     for root in roots:
         if not root.exists():
             continue
-        paths.extend(sorted(root.rglob("*.md")))
+        try:
+            rr = root.resolve()
+        except OSError:
+            continue
+        for p in sorted(root.rglob("*.md")):
+            try:
+                rp = p.resolve()
+            except OSError:
+                continue  # broken symlink / loop
+            if not rp.is_file():
+                continue
+            if not rp.is_relative_to(rr):
+                print(
+                    f"[lbrain] SKIPPED {p}: resolves outside its source root "
+                    f"({rp}). Symlinks may not escape the corpus.",
+                    file=sys.stderr,
+                )
+                continue
+            paths.append(p)
     return paths
 
 

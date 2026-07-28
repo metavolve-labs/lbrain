@@ -33,10 +33,22 @@ _FENCE_OPEN, _FENCE_CLOSE = "⟪note⟫", "⟪/note⟫"
 
 
 def fence(preview: str) -> str:
-    """Wrap an untrusted retrieved preview in a sentinel fence, neutralizing any
-    embedded fence markers so planted content can't forge a fence boundary."""
-    safe = preview.replace("⟪", "⟨").replace("⟫", "⟩")
-    return f"{_FENCE_OPEN} {safe} {_FENCE_CLOSE}"
+    """Wrap an untrusted retrieved preview in a sentinel fence.
+
+    Delegates to serve.fence_block — one hardened implementation, not two. The
+    old body here neutralized only ⟪ and ⟫, while serve._BODY_TRANS also covers
+    《》⧼⧽ (this codebase already judged those forgeable), strips control/bidi
+    chars, normalizes the exotic line separators that `.replace("\\n", " ")`
+    leaves behind (\\r, VT, FF, NEL, U+2028/29), and prefixes every body line
+    with "│ " so fenced content is line-wise self-declaring. The prose path was
+    therefore escapable in ways the structured path was not — red-team
+    2026-07-28, finding 4.
+
+    Imported inside the function: serve imports amp at module level.
+    """
+    from .serve import fence_block
+
+    return fence_block(preview)
 
 
 _GREETINGS = {
