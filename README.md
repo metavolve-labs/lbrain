@@ -53,6 +53,27 @@ didn't remove it either.
 **Across the models we tested, record structure dominated the failure pattern.** So the fix belongs before generation, on the
 input side, and it has to be deterministic — a gate judged without another model call.
 
+## Related work — read these too
+
+Four 2026 papers staked adjacent ground while we were building, and they deserve the citation:
+
+- **Deceptive Grounding** — Caruzzo, Yoo & Kim ([arXiv:2607.09349](https://arxiv.org/abs/2607.09349)):
+  named and measured the failure mode — RAG responses that pass standard quality checks while attributing
+  evidence to the wrong entity, in 8–87% of cases across 13 models, with domain-specialized models
+  failing *worse*.
+- **MemStrata** ([arXiv:2606.26511](https://arxiv.org/abs/2606.26511)): deterministic supersession rules
+  over a bi-temporal ledger, against stale-fact errors on evolving knowledge.
+- **Engram** ([arXiv:2606.09900](https://arxiv.org/abs/2606.09900)): a bi-temporal memory graph tracking
+  provenance and contradictions — a lean retrieved context beats the full history.
+- **Don't Ask the LLM to Track Freshness** ([arXiv:2606.01435](https://arxiv.org/abs/2606.01435)):
+  conflict resolution belongs in deterministic code, not model judgment — "the bottleneck … is assembly
+  (post-retrieval aggregation), not storage."
+
+We claim no priority over any of this. What our 8-model matrix adds is the controlled variable: it
+reproduced the same failure class independently, in a different domain, before it had a name — and showed
+the **serving format**, not the model, is the controlling variable. How a record is *presented* to the
+generator is the axis these works leave open, and it is the axis LBrain operates on.
+
 ## Where it does *not* help
 
 - **Not a hallucination fix.** This is about answering from *retrieved records*. It does nothing
