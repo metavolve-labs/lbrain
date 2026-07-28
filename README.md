@@ -4,6 +4,17 @@
 
 <h1 align="center">LBrain</h1>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/status-BETA-c9a227?style=flat-square" alt="Status: Beta">
+  <img src="https://img.shields.io/badge/license-BSD--3--Clause-555?style=flat-square" alt="BSD-3-Clause">
+  <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-555?style=flat-square" alt="Python 3.10-3.13">
+</p>
+
+> **BETA — use at your own risk.** This is early software from a small team. It has not yet been through an
+> independent security review. It runs on your machine against your files: **keep backups, and don't point it
+> at anything you can't afford to have read by a tool that is still being hardened.** LBrain never deletes
+> your source files, but that is a design commitment, not yet an audited guarantee.
+
 **Memory for AI agents that cites its sources — and says when it doesn't know.**
 
 Your agent reads a pile of your notes and answers confidently from the wrong one. LBrain serves each
