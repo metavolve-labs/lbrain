@@ -130,7 +130,7 @@ Or skip MCP entirely — `lbrain query`, `search`, `import`, `doctor` all work f
 
 `lbrain init` uses `local` unless you pass `--gemini-key`/`--api-key` **on the command line**. A key
 sitting in your environment is never treated as consent to send your corpus to a third party.
-See [`PRIVACY.md`](PRIVACY.md) for every network call LBrain can make, and when. See [`docs/KEYS.md`](docs/KEYS.md).
+See the [Privacy Policy](https://lbrain.ai/privacy.html) for every network call LBrain can make, and when — §3 lists them all. See [`docs/KEYS.md`](docs/KEYS.md).
 
 ## Something wrong?
 
