@@ -70,6 +70,13 @@ _OPEN_STATUS = ("ACTIVE", "PLANNING", "BLOCKED", "IN PROGRESS", "PENDING")
 # Stale by design — these exist to hold superseded material.
 _ARCHIVE = ("_archive", "_archive_legacy", "archived-", "/sessions/", "MEMORY-ARCHIVE")
 
+# NOTE: pre-change backup directories deliberately do NOT belong here. Adding
+# them (tried 2026-07-28) suppressed the staleness marker on backup copies that
+# were still being SERVED alongside the records that superseded them — making
+# the superseded text look cleaner than the correction. Silencing the warning
+# on something still in the results is worse than no warning at all. The right
+# layer is the index: see index.py's exclusion of backup trees.
+
 
 def is_excluded(rel_path: str) -> bool:
     """Archive paths are stale on purpose; flagging them is pure noise.

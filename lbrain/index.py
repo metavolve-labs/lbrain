@@ -48,9 +48,26 @@ class Chunk:
     context: str = ""  # doc macro-context prepended to embed/FTS text (not display)
 
 
+# Pre-change snapshots. A backup is a COPY of a record that something else has
+# since corrected — indexing it puts the superseded text in the results next to
+# the fix that replaced it, competing on equal terms. Observed live 2026-07-28:
+# a reconciliation left `backups-pre-apply-tranche2/` inside the lair tree and
+# its copies ranked alongside the corrected originals for a compliance query.
+_BACKUP_MARKERS = (
+    "backups-pre-apply", "backups-pre-", "-pre-scrub", "/backups/", ".bak",
+    "_ARCHIVED-", ".orig",
+)
+
+
+def is_backup_path(p: Path) -> bool:
+    """True if this path is a pre-change snapshot rather than a live record."""
+    s = p.as_posix()
+    return any(m in s for m in _BACKUP_MARKERS)
+
+
 def discover(roots: list[Path]) -> list[Path]:
     """Find indexable *.md under each root, refusing any path that resolves
-    outside the root that offered it.
+    outside the root that offered it, and skipping pre-change backup trees.
 
     rglob does not descend into symlinked DIRECTORIES but it does yield
     symlinked FILES, and parse() then read_text()s them — so a cloned repo
@@ -69,6 +86,8 @@ def discover(roots: list[Path]) -> list[Path]:
         except OSError:
             continue
         for p in sorted(root.rglob("*.md")):
+            if is_backup_path(p):
+                continue
             try:
                 rp = p.resolve()
             except OSError:
