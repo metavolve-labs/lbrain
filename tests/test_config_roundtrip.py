@@ -105,7 +105,7 @@ def test_init_gives_new_installs_structured_serving(tmp_path, isolate_lbrain_hom
 
     res = CliRunner().invoke(cli.main, ["init", "--provider", "local", "--source", str(src)])
     assert res.exit_code == 0, res.output
-    assert 'serve_mode = "structured"' in (home / "config.toml").read_text()
+    assert 'serve_mode = "structured"' in (home / "config.toml").read_text(encoding="utf-8")
 
 
 def test_init_does_not_switch_an_existing_install(tmp_path, isolate_lbrain_home):
@@ -113,12 +113,12 @@ def test_init_does_not_switch_an_existing_install(tmp_path, isolate_lbrain_home)
     from click.testing import CliRunner
     import lbrain.cli as cli
     home = isolate_lbrain_home
-    (home / "config.toml").write_text('serve_mode = "prose"\n')
+    (home / "config.toml").write_text('serve_mode = "prose"\n', encoding="utf-8")
     src = tmp_path / "notes"; src.mkdir()
 
     res = CliRunner().invoke(cli.main, ["init", "--provider", "local", "--source", str(src)])
     assert res.exit_code == 0, res.output
-    assert 'serve_mode = "prose"' in (home / "config.toml").read_text()
+    assert 'serve_mode = "prose"' in (home / "config.toml").read_text(encoding="utf-8")
 
 
 def test_ambient_api_key_is_not_consent_to_use_a_remote_provider(tmp_path, isolate_lbrain_home, monkeypatch):
@@ -137,7 +137,7 @@ def test_ambient_api_key_is_not_consent_to_use_a_remote_provider(tmp_path, isola
     src = tmp_path / "notes"; src.mkdir()
     res = CliRunner().invoke(cli.main, ["init", "--source", str(src)])
     assert res.exit_code == 0, res.output
-    cfg_text = (isolate_lbrain_home / "config.toml").read_text()
+    cfg_text = (isolate_lbrain_home / "config.toml").read_text(encoding="utf-8")
     assert 'embedding_provider = "local"' in cfg_text, cfg_text
     assert "NOT used" in res.output
 
@@ -151,4 +151,4 @@ def test_explicit_key_flag_still_selects_the_hosted_provider(tmp_path, isolate_l
     res = CliRunner().invoke(
         cli.main, ["init", "--gemini-key", "explicitly-passed", "--source", str(src)])
     assert res.exit_code == 0, res.output
-    assert 'embedding_provider = "gemini"' in (isolate_lbrain_home / "config.toml").read_text()
+    assert 'embedding_provider = "gemini"' in (isolate_lbrain_home / "config.toml").read_text(encoding="utf-8")

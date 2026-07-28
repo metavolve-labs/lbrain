@@ -79,7 +79,7 @@ class LocalTransport:
         txid = _content_txid(data)
         (self.archive_dir / f"{txid}.bin").write_bytes(data)
         # Tags travel beside the blob so the local store mirrors Arweave's GraphQL-tag model.
-        (self.archive_dir / f"{txid}.tags.json").write_text(json.dumps(tags, indent=2))
+        (self.archive_dir / f"{txid}.tags.json").write_text(json.dumps(tags, indent=2), encoding="utf-8")
         return txid
 
     def get(self, txid: str) -> bytes:

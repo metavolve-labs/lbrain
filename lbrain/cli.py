@@ -64,7 +64,7 @@ def doctor(as_json: bool):
         except ModuleNotFoundError:  # pragma: no cover - 3.10 backport
             import tomli as tomllib
         try:
-            raw = tomllib.loads(CONFIG_PATH.read_text())
+            raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception as e:
             click.secho(f"✗ config.toml exists but failed to parse: {e}", fg="red")
             raw = {}
@@ -563,7 +563,7 @@ def stats():
 def commit_check(text: str | None, from_file: str | None):
     """Check whether a piece of text should be committed to a lair/memory entry."""
     if from_file:
-        text = Path(from_file).read_text()
+        text = Path(from_file).read_text(encoding="utf-8")
     if not text:
         click.echo("Paste text and press Ctrl-D:")
         text = sys.stdin.read()
@@ -825,7 +825,7 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
                 excluded += 1
                 continue
             try:
-                text = f.read_text(errors="ignore")
+                text = f.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
             scanned += 1

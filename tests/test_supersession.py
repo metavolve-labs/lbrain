@@ -15,7 +15,7 @@ from lbrain.store import Store
 
 def _doc(d: Path, name: str, body: str) -> Path:
     p = d / f"{name}.md"
-    p.write_text(f"---\nname: {name}\n---\n{body}")
+    p.write_text(f"---\nname: {name}\n---\n{body}", encoding="utf-8")
     return p
 
 
@@ -28,7 +28,7 @@ def test_parse_supersedes_body_marker():
 def test_parse_supersedes_frontmatter_list():
     d = Path(tempfile.mkdtemp())
     p = d / "fm.md"
-    p.write_text("---\nname: fm\nsupersedes: [alpha, beta]\n---\nbody")
+    p.write_text("---\nname: fm\nsupersedes: [alpha, beta]\n---\nbody", encoding="utf-8")
     assert parse(p, repo_root=d).supersedes == ["alpha", "beta"]
 
 
