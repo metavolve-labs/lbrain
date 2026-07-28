@@ -773,5 +773,105 @@ except ImportError:
     pass
 
 
+@main.command()
+@click.option("--since", default=0, show_default=True,
+              help="Only show claims unverified for at least N days. Default 0 — see below.")
+@click.option("--all", "show_all", is_flag=True, help="Do not truncate the ranked list.")
+@click.option("--path", "path_prefix", default="", help="Restrict to paths starting with this.")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
+    """Find records asserting an OPEN state that nobody has re-verified.
+
+    LBrain knows when a record was written. It cannot know whether the claim
+    inside it is still true — that ground truth lives at a registry, a
+    counterparty, or in someone's head. This command does the half a local
+    engine honestly can: it finds claims that have a shelf life, prints how long
+    since anyone stood behind them, and leaves the judgement to you.
+
+    On the default of --since 0: the case that motivated this command went false
+    in EIGHTEEN DAYS. Every age threshold tested suppressed it. Age is
+    information to report, not a gate to pass.
+
+    Exits non-zero only on the DECIDABLE section, so it can gate a
+    pre-publication script without heuristics ever breaking a build.
+    """
+    import datetime
+    import json as _json
+    from .staleness import (claim_date, days_since, expired, is_excluded,
+                            open_claims, volatility)
+
+    cfg = Config.load()
+    today = datetime.date.today()
+    decidable, ranked = [], []
+    scanned = excluded = undated = 0
+
+    for src in cfg.sources:
+        root = Path(src)
+        if not root.exists():
+            continue
+        for f in sorted(root.rglob("*.md")):
+            rel = str(f.relative_to(root))
+            if is_excluded(rel) or (path_prefix and not rel.startswith(path_prefix)):
+                excluded += 1
+                continue
+            try:
+                text = f.read_text(errors="ignore")
+            except OSError:
+                continue
+            scanned += 1
+            mtime = datetime.date.fromtimestamp(f.stat().st_mtime).isoformat()
+            label, date = claim_date(text, rel, mtime)
+            if label in ("file-dated", ""):
+                undated += 1
+            exp = expired(text, today)
+            if exp:
+                decidable.append({"path": rel, "reason": f"verify_by {exp} passed",
+                                  "days": days_since(exp, today)})
+            if volatility(text) != "open":
+                continue
+            age = days_since(date, today)
+            if age is None or age < since:
+                continue
+            ranked.append({"path": rel, "days": age, "label": label, "date": date,
+                           "claims": open_claims(text)})
+
+    ranked.sort(key=lambda r: -r["days"])
+    pct = round(undated * 100 / scanned) if scanned else 0
+
+    if as_json:
+        click.echo(_json.dumps({"today": today.isoformat(), "scanned": scanned,
+                                "excluded": excluded, "decidable": decidable,
+                                "unverified_open": ranked,
+                                "no_verification_date": undated,
+                                "blind_spot_pct": pct}, indent=2))
+    else:
+        click.secho(f"Verification audit — {scanned} docs scanned · "
+                    f"{excluded} archived/skipped · today {today}", fg="cyan")
+        click.echo()
+        if decidable:
+            click.secho(f"PROVABLY STALE ({len(decidable)})", fg="red", bold=True)
+            for d in decidable:
+                click.echo(f"  EXPIRED  {d['path']}")
+                click.echo(f"           {d['reason']} — {d['days']}d ago")
+            click.echo()
+        click.secho(f"UNVERIFIED OPEN CLAIMS ({len(ranked)} docs, oldest first)",
+                    fg="yellow", bold=True)
+        for r in (ranked if show_all else ranked[:20]):
+            click.echo(f"  {r['days']:>5}d  {r['label']:<10} {r['path']}")
+            for c in r["claims"][:2]:
+                click.echo(f"          ↳ {c}")
+        if not show_all and len(ranked) > 20:
+            click.echo(f"  … {len(ranked) - 20} more (--all)")
+        click.echo()
+        # Mandatory. The single most dangerous reading of this tool is
+        # "not listed = verified". It must state its own coverage every run.
+        click.secho("BLIND SPOT", fg="yellow", bold=True)
+        click.echo(f"  {undated} of {scanned} docs ({pct}%) carry no verification date, so they are")
+        click.echo("  ranked on filename or mtime — when the file was WRITTEN, not when the claim")
+        click.echo("  was CHECKED. Absence from this list is NOT evidence a record is current.")
+
+    if decidable:
+        raise SystemExit(1)
+
 if __name__ == "__main__":
     main()
