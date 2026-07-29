@@ -107,7 +107,9 @@ def claim_date(text: str, rel_path: str, mtime_iso: str = "") -> tuple[str, str]
     asof = _AS_OF.findall(text)
     if asof:
         return ("as-of", max(asof))          # newest, not first
-    m = _FN_DATE.search(rel_path.rsplit("/", 1)[-1])
+    # BOTH separators — see serve.record_date. On Windows this searched the
+    # whole path, so a dated PARENT DIRECTORY became the file's claim date.
+    m = _FN_DATE.search(re.split(r"[\\/]", rel_path)[-1])
     if m:
         return ("dated", m.group(1))
     return ("file-dated", mtime_iso) if mtime_iso else ("", "")
