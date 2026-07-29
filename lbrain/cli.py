@@ -885,3 +885,58 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
 
 if __name__ == "__main__":
     main()
+
+
+@main.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def whoami(as_json: bool):
+    """Report who this brain is and what it is trusted for.
+
+    Answers, in one place, the question an agent should be able to ask before it
+    relies on retrieved records: what am I reading, how does it serve, and does
+    it carry any credential beyond its own say-so.
+
+    An unregistered brain is a normal, fully-functional state — not an error.
+    """
+    import json as _json
+
+    from .identity import describe
+
+    cfg = Config.load()
+    stats = {}
+    try:
+        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        stats = store.stats()
+        store.close()
+    except Exception:
+        pass
+
+    info = describe(cfg, stats)
+    if as_json:
+        click.echo(_json.dumps(info, indent=2, default=str))
+        return
+
+    ident = info["identity"]
+    if ident["registered"]:
+        click.secho(f"  {ident['gcx']}", fg="green", bold=True)
+        click.echo(f"  address:      {ident['address']}")
+        creds = ", ".join(ident["credentials"]) or "none yet"
+        click.echo(f"  credentials:  {creds}")
+        if ident["trust_score"] is not None:
+            click.echo(f"  trust score:  {ident['trust_score']}")
+    else:
+        click.secho("  no ecosystem identity", fg="yellow")
+        click.echo(f"  {ident['note']}")
+
+    b, s = info["brain"], info["serving_contract"]
+    click.echo()
+    click.secho("  brain", fg="cyan")
+    click.echo(f"    db:       {b['db']}")
+    click.echo(f"    indexed:  {b['docs']} docs · {b['chunks']} chunks · {b['embedded']} embedded")
+    click.echo(f"    sources:  {len(b['sources'])} configured")
+    click.echo()
+    click.secho("  serving contract", fg="cyan")
+    click.echo(f"    mode:       {s['mode']}  (provider: {s['provider']})")
+    click.echo(f"    attributed: {s['attribution']}")
+    click.echo(f"    staleness:  {'marked inline' if s['staleness_marked'] else 'NOT marked'}")
+    click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")

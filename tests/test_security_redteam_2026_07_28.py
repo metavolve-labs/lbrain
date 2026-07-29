@@ -355,3 +355,44 @@ def test_backup_trees_are_not_indexed(tmp_path):
     (root / "live.md").write_text("# current", encoding="utf-8")
 
     assert [p.name for p in discover([root])] == ["live.md"]
+
+
+# --- identity / whoami (2026-07-29) ----------------------------------------
+
+def test_whoami_reports_unregistered_as_a_normal_state(tmp_path, monkeypatch):
+    """An unregistered brain is fully functional. If `describe` implied breakage,
+    an agent reading it would distrust a working memory."""
+    import lbrain.identity as ident_mod
+    monkeypatch.setattr(ident_mod, "IDENTITY_PATH", tmp_path / "nope.json")
+
+    info = ident_mod.describe(Config(embedding_provider="local"), {"docs": 3})
+    assert info["identity"]["registered"] is False
+    assert info["identity"]["gcx"] == ""
+    assert "fully functional" in info["identity"]["note"]
+    assert info["brain"]["docs"] == 3
+
+
+def test_identity_roundtrips_and_is_written_privately(tmp_path, monkeypatch):
+    import os
+    import stat
+
+    import lbrain.identity as ident_mod
+    monkeypatch.setattr(ident_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(ident_mod, "IDENTITY_PATH", tmp_path / "identity.json")
+
+    ident_mod.Identity(name="alice", address="0xabc", credentials=["email"]).save()
+    got = ident_mod.Identity.load()
+    assert got.gcx == "gcx://alice" and got.credentials == ["email"]
+    # holds a key reference — must never be world-readable
+    assert stat.S_IMODE(os.stat(tmp_path / "identity.json").st_mode) == 0o600
+
+
+def test_a_damaged_identity_file_never_breaks_retrieval(tmp_path, monkeypatch):
+    """A corrupt identity record must degrade to 'unregistered', not raise —
+    identity is metadata about the brain, not a dependency of it."""
+    import lbrain.identity as ident_mod
+    bad = tmp_path / "identity.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(ident_mod, "IDENTITY_PATH", bad)
+
+    assert ident_mod.Identity.load() is None
