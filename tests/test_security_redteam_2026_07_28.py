@@ -396,3 +396,33 @@ def test_a_damaged_identity_file_never_breaks_retrieval(tmp_path, monkeypatch):
     monkeypatch.setattr(ident_mod, "IDENTITY_PATH", bad)
 
     assert ident_mod.Identity.load() is None
+
+
+# --- A-404: the sibling of the index.py Windows bug -------------------------
+
+def test_slug_derivation_works_on_both_path_separators():
+    """Wikilink boost and supersession de-rank derive a slug from rel_path. On
+    Windows, rsplit("/") returned the WHOLE path, so neither ever matched — a
+    silent ranking difference. Same bug as the 000-PRIORITY one in index.py."""
+    from lbrain.search import _basename_slug
+
+    assert _basename_slug(r"P5\000-PRIORITY-X\LAIR.md") == "LAIR"
+    assert _basename_slug("P5/000-PRIORITY-X/LAIR.md") == "LAIR"
+    assert _basename_slug("plain.md") == "plain"
+    assert _basename_slug("no-extension") == "no-extension"
+
+
+def test_no_module_still_splits_paths_on_forward_slash_only():
+    """Guard the whole class: a bare rsplit("/") on a rel_path is the bug."""
+    import pathlib
+    import re as _re
+
+    pkg = pathlib.Path(__file__).resolve().parent.parent / "lbrain"
+    offenders = []
+    for py in pkg.rglob("*.py"):
+        for i, line in enumerate(py.read_text(encoding="utf-8").splitlines(), 1):
+            if line.lstrip().startswith(("#", '"', "'")):
+                continue
+            if _re.search(r'rel_path\.r?split\("/"', line):
+                offenders.append(f"{py.name}:{i}")
+    assert not offenders, f"path split on '/' only (breaks on Windows): {offenders}"

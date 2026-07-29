@@ -3,6 +3,7 @@ then a few cheap, bounded signal boosts (priority, wikilink graph, supersession)
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .config import Config
@@ -33,13 +34,27 @@ _TEMPORAL_RE = __import__("re").compile(
 )
 
 
+def _basename_slug(rel_path: str) -> str:
+    """Filename stem from a corpus-relative path, on EITHER separator.
+
+    `rsplit("/", 1)` returns the whole path on Windows (backslash separators), so
+    the derived slug matched no wikilink target and no supersession edge — the
+    graph boost and the superseded de-rank silently no-opped for every Windows
+    user. Identical bug to the 000-PRIORITY one fixed in index.py on 2026-07-28;
+    this is its sibling, caught by the 2026-07-29 audit (anomaly A-404). A
+    ranking difference with no error message, which is worse than a crash.
+    """
+    name = re.split(r"[\\/]", rel_path)[-1]
+    return name[:-3] if name.endswith(".md") else name
+
+
 def _is_abstraction(h: Hit) -> bool:
     """type: abstraction awareness. doc_type when the importer captured it;
     filename convention as fallback (verified 2026-07-11: 10/50 live abstraction
     docs carry an empty doc_type — never trust the field alone)."""
     if h.doc_type == "abstraction":
         return True
-    name = h.rel_path.rsplit("/", 1)[-1]
+    name = _basename_slug(h.rel_path) + ".md"
     return name.startswith("abstraction-") or name.startswith("abstraction_")
 
 
@@ -202,10 +217,10 @@ def search(
     if out:
         slugs_in_hits = set()
         for h in out:
-            slug = h.rel_path.rsplit("/", 1)[-1].replace(".md", "")
+            slug = _basename_slug(h.rel_path)
             slugs_in_hits.add(slug)
         for h in out:
-            slug = h.rel_path.rsplit("/", 1)[-1].replace(".md", "")
+            slug = _basename_slug(h.rel_path)
             in_links = store.db.execute(
                 "SELECT COUNT(*) AS n FROM wikilinks WHERE tgt_slug = ?", (slug,)
             ).fetchone()["n"]
@@ -224,7 +239,7 @@ def search(
         if superseded:
             pen = getattr(cfg, "supersede_penalty", 0.25)
             for h in out:
-                slug = h.rel_path.rsplit("/", 1)[-1].replace(".md", "")
+                slug = _basename_slug(h.rel_path)
                 if slug in superseded:
                     h.score *= pen
                     h.boosts["superseded"] = pen

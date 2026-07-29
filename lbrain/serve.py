@@ -117,7 +117,12 @@ def record_date(h: Hit) -> tuple[str, str]:
     if _is_abstraction(h):
         d = _iso(h.mtime) if h.mtime else ""
         return ("generated", d) if d else ("", "")
-    name = h.rel_path.rsplit("/", 1)[-1]
+    # Split on BOTH separators. On Windows the old rsplit("/") returned the
+    # WHOLE path, so _FN_DATE matched a date anywhere in it — a parent folder
+    # like `corpus-reconciliation-2026-07-28/` would stamp its own date onto
+    # every file inside as a CLAIM date. A false freshness signal, from the
+    # very function whose job is honest dating (anomaly A-404, same class).
+    name = re.split(r"[\\/]", h.rel_path)[-1]
     m = _FN_DATE.search(name)
     if m:
         return ("dated", m.group(1))
