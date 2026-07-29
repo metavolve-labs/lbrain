@@ -494,3 +494,25 @@ def test_bench_uses_the_embedder_factory_not_a_hardcoded_provider():
     code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
     assert any("make_embedder(cfg)" in ln for ln in code)
     assert not any("EmbedClient(cfg.openai_api_key" in ln for ln in code)
+
+
+def test_unquoted_yaml_dates_do_not_refresh_forever(tmp_path):
+    """YAML turns an unquoted `created: 2026-05-03` into a datetime.date; the DB
+    stores it as a string. Comparing a fresh parse to the stored row therefore
+    reported a difference on EVERY import — observed live on 3 documents until the
+    comparison was routed through the same transform upsert_doc stores through."""
+    from lbrain.index import parse
+    from lbrain.store import Store
+
+    f = tmp_path / "n.md"
+    f.write_text("---\nname: t\ncreated: 2026-05-03\nnested:\n  when: 2026-01-02\n---\n\n# B\n\ntext\n",
+                 encoding="utf-8")
+    store = Store(tmp_path / "brain.db")
+    doc = parse(f, repo_root=tmp_path)
+    import datetime
+    assert isinstance(doc.metadata["created"], datetime.date), "fixture must exercise the date path"
+
+    store.upsert_doc(doc)
+    # second look at the identical file must be a no-op, not a refresh
+    assert not store.doc_metadata_differs(parse(f, repo_root=tmp_path))
+    store.close()
