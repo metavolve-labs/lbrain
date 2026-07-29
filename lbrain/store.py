@@ -209,6 +209,43 @@ class Store:
         ).fetchone()
         return row["doc_hash"] if row else None
 
+    def doc_metadata_differs(self, doc: Doc) -> bool:
+        """True if the stored row disagrees with this Doc's FRONTMATTER-derived
+        fields, even though the body hash matches.
+
+        `doc_hash` covers the body only (index.py: `sha1(body)`), so editing
+        `type:`, `name:`, `description:` or `verify_by:` never changed it and
+        `import` skipped the file — the DB kept the old value indefinitely
+        (anomaly A-401). Those fields are not cosmetic: `type` routes a document
+        into the doc_type filter AND into the feedback rule engine, `name` is the
+        wikilink slug, `description` is served in the record header, `verify_by`
+        drives the staleness DECIDABLE tier.
+
+        Detecting this separately from the body hash is deliberate. Folding
+        metadata into `doc_hash` would have marked all ~2,000 documents changed
+        on the next import and forced a full re-chunk and re-embed. A frontmatter
+        edit does not change a single chunk — so it needs a one-row UPDATE, not
+        re-embedding.
+        """
+        import json
+
+        row = self.db.execute(
+            "SELECT title, doc_type, is_priority, metadata FROM docs WHERE rel_path = ?",
+            (rel_path := doc.rel_path,),
+        ).fetchone()
+        if row is None:
+            return True
+        try:
+            stored_meta = json.loads(row["metadata"] or "{}")
+        except (ValueError, TypeError):
+            stored_meta = {}
+        return (
+            (row["title"] or "") != (doc.title or "")
+            or (row["doc_type"] or "") != (doc.doc_type or "")
+            or bool(row["is_priority"]) != bool(doc.is_priority)
+            or stored_meta != doc.metadata
+        )
+
     def upsert_doc(self, doc: Doc) -> None:
         import json
 
