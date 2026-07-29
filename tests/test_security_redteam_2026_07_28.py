@@ -426,3 +426,71 @@ def test_no_module_still_splits_paths_on_forward_slash_only():
             if _re.search(r'rel_path\.r?split\("/"', line):
                 offenders.append(f"{py.name}:{i}")
     assert not offenders, f"path split on '/' only (breaks on Windows): {offenders}"
+
+
+# --- A-401: frontmatter-only edits must take effect --------------------------
+
+def test_frontmatter_only_edit_updates_the_row_without_rechunking(tmp_path, monkeypatch):
+    """`doc_hash` covers the body only, so editing `type:`/`description:` never
+    changed it and import skipped the file — the DB kept the stale value forever.
+    This is the mechanism behind a reconciliation failure blamed on authors
+    forgetting to update the field. They may well have updated it."""
+    import json
+
+    from lbrain.index import parse
+    from lbrain.store import Store
+
+    f = tmp_path / "n.md"
+    body = "\n# Body\n\nunchanged body text\n"
+    f.write_text("---\nname: t\ntype: decision\ndescription: original\n---\n" + body,
+                 encoding="utf-8")
+
+    store = Store(tmp_path / "brain.db")
+    doc = parse(f, repo_root=tmp_path)
+    store.upsert_doc(doc)
+    first_hash = doc.doc_hash
+
+    # frontmatter only — body byte-identical
+    f.write_text("---\nname: t\ntype: project\ndescription: CORRECTED\n---\n" + body,
+                 encoding="utf-8")
+    doc2 = parse(f, repo_root=tmp_path)
+
+    assert doc2.doc_hash == first_hash, "body hash must be unchanged (that IS the bug)"
+    assert store.doc_metadata_differs(doc2), "metadata change must be detected"
+
+    store.upsert_doc(doc2)
+    row = store.db.execute("SELECT doc_type, metadata FROM docs").fetchone()
+    assert row["doc_type"] == "project"
+    assert json.loads(row["metadata"])["description"] == "CORRECTED"
+    store.close()
+
+
+def test_identical_frontmatter_is_not_reported_as_changed(tmp_path):
+    """The detector must not make every import look like a metadata refresh."""
+    from lbrain.index import parse
+    from lbrain.store import Store
+
+    f = tmp_path / "n.md"
+    f.write_text("---\nname: t\ntype: project\n---\n\n# B\n\ntext\n", encoding="utf-8")
+    store = Store(tmp_path / "brain.db")
+    doc = parse(f, repo_root=tmp_path)
+    store.upsert_doc(doc)
+
+    assert not store.doc_metadata_differs(parse(f, repo_root=tmp_path))
+    store.close()
+
+
+def test_bench_uses_the_embedder_factory_not_a_hardcoded_provider():
+    """bench/ab_search.py hardcoded the OpenAI client, so it could not run against
+    a local or gemini brain — and with an ambient key it embedded into a different
+    vector space than the stored vectors and printed confident garbage. The
+    measuring instrument must read the same scale as the thing measured."""
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parent.parent / "bench" / "ab_search.py").read_text(
+        encoding="utf-8")
+    # Code lines only — the comment above the fix quotes the old call on purpose,
+    # and a naive substring check flagged that comment as the defect.
+    code = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    assert any("make_embedder(cfg)" in ln for ln in code)
+    assert not any("EmbedClient(cfg.openai_api_key" in ln for ln in code)

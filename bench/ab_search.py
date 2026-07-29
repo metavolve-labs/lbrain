@@ -8,10 +8,11 @@ Usage:
 Read-only on the DB (search only; no writes). Safe to run against the live brain.
 """
 import sys
+import re
 from pathlib import Path
 
 from lbrain.config import Config
-from lbrain.embed import EmbedClient
+from lbrain.embed import make_embedder
 from lbrain.search import search
 from lbrain.store import Store
 
@@ -35,14 +36,21 @@ def sig(db_path: str, label: str) -> None:
     cfg = Config.load()
     cfg.db_path = Path(db_path)
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    # Use the SAME factory every other call site uses. This line previously
+    # hardcoded EmbedClient(cfg.openai_api_key, ...), so the benchmark could not
+    # run against a `local` or `gemini` brain at all — and with an ambient OpenAI
+    # key it embedded queries into a DIFFERENT vector space than the stored
+    # vectors and printed plausible, confident garbage (anomaly A-405).
+    # Doctrine rule 4 is *measure before you cut*; the measuring instrument was
+    # silently reading the wrong scale.
+    embedder = make_embedder(cfg)
     print(f"\n===== {label}  ({db_path}) =====")
     for q in QUERIES:
         hits = search(cfg, store, embedder, q, k=5)
         print(f"\nQ: {q}")
         for i, h in enumerate(hits, 1):
             tag = "★" if h.is_priority else " "
-            short = h.rel_path.split("/")[-1]
+            short = re.split(r"[\\/]", h.rel_path)[-1]
             print(f"  {i}.{tag} {short} #c{h.chunk_idx}  score={h.score:.4f} "
                   f"v={h.vector_score:.3f} kw={h.keyword_score:.3f} {h.boosts}")
     embedder.close()

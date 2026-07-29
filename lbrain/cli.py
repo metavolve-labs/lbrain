@@ -289,6 +289,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
     new_docs = 0
     updated_docs = 0
     unchanged_docs = 0
+    meta_refreshed = 0   # frontmatter changed, body did not (A-401)
     total_chunks = 0
 
     for src in sources:
@@ -305,7 +306,15 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
                 # to already exist, so this MUST run after the row is present: in the
                 # unchanged branch the row exists already; otherwise after upsert_doc.
                 if existing_hash == doc.doc_hash:
-                    unchanged_docs += 1
+                    # Body unchanged. Frontmatter may still have changed, and it
+                    # is invisible to doc_hash (A-401) — refresh the row only,
+                    # never the chunks: a metadata edit changes no chunk, so
+                    # re-embedding would be pure cost.
+                    if store.doc_metadata_differs(doc):
+                        store.upsert_doc(doc)
+                        meta_refreshed += 1
+                    else:
+                        unchanged_docs += 1
                     store.replace_supersessions(doc)
                     continue
                 if existing_hash is None:
@@ -340,7 +349,8 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
     dt = time.time() - t0
     click.secho(
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
-        f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}",
+        f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
+        + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else ""),
         fg="green",
     )
     if pruned:
