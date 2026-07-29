@@ -198,6 +198,75 @@ def lair_check_action(action_text: str) -> str:
         store.close()
 
 
+# ---------------------------------------------------------------------------
+# MCP RESOURCES — gcx:// as a whitelistable read channel
+#
+# Tools let an agent ASK us to search. Resources let a host FETCH a named thing
+# by URI, which is a different and more constrained capability — and it is the
+# one that matters for deployment inside an agent sandbox.
+#
+# Enterprise agent runtimes run default-deny egress: an agent that shells out to
+# scrape an unrecognised endpoint gets killed. A `resources/read` on a
+# registered URI scheme needs no code execution and no sandbox escape, so a
+# security team can block open-web https:// scraping and allow `gcx://` — and
+# then every record the model reads is hash-verified against the chain.
+# Provenance enforced at the routing layer, rather than inferred after the fact.
+#
+# Two things this does NOT do, stated so nobody oversells it:
+#   * IANA registration legitimises the scheme NAME. It does not make anything
+#     resolve — a host still needs this server or an HTTPS gateway.
+#   * Allowing gcx:// still requires egress to SOME gateway. The strong version
+#     is a self-hosted gateway (ar.io), which is the actual enterprise story.
+# ---------------------------------------------------------------------------
+
+
+@mcp.resource(
+    "gcx://{collection}/{ident}",
+    name="gcx-record",
+    title="Permanent record (gcx://)",
+    mime_type="text/plain",
+    description=(
+        "A permanent record addressed by its gcx:// name and verified against a "
+        "SHA-256 written on-chain at mint time. The hash is an Arweave tag, not a "
+        "value this server holds, so the verification does not require trusting "
+        "this server. Reading returns the record text with a verification header; "
+        "a record whose bytes do not match the chain is refused, not returned."
+    ),
+)
+def gcx_record(collection: str, ident: str) -> str:
+    """Read a gcx:// record, verified against its on-chain hash.
+
+    Refuses rather than returning unverified bytes. A resource read that could
+    silently hand back unverified content would make the whole scheme decorative.
+    """
+    from .gcx import ResolveError
+    from .gcx import resolve as _resolve
+
+    name = f"gcx://{collection}/{ident}"
+    try:
+        r = _resolve(name)
+    except ResolveError as e:
+        raise ValueError(f"{name}: {e}") from e
+
+    if not r.verified:
+        # Do not return the payload. UNVERIFIABLE and MISMATCH are both refusals:
+        # the caller asked for a verified record and we cannot supply one.
+        raise ValueError(
+            f"{name}: {r.status} — refusing to serve unverified content "
+            f"(txid {r.txid}, expected {r.expected_sha256 or 'none recorded'}, "
+            f"got {r.actual_sha256})"
+        )
+
+    return (
+        f"# {name}\n"
+        f"# txid:     {r.txid}\n"
+        f"# sha256:   {r.actual_sha256}  (matches on-chain Canonical-SHA256)\n"
+        f"# gateway:  {r.gateway}\n"
+        f"# verified: yes — hash from the chain, not from this server\n\n"
+        + r.content.decode("utf-8", errors="replace")
+    )
+
+
 @mcp.tool()
 def lair_whoami() -> str:
     """Report what this memory is and what it is trusted for.

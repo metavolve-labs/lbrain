@@ -114,3 +114,70 @@ def test_gateway_is_overridable(monkeypatch):
     gcx.resolve("gcx://rfc/793", gateway="https://my.gw", graphql="https://my.gql")
     assert seen["graphql"] == "https://my.gql"
     assert seen["gateway"] == "https://my.gw"
+
+
+# --- MCP resource surface: gcx:// as a whitelistable read channel ------------
+
+def test_gcx_resource_template_is_registered():
+    """A host must be able to discover the scheme via resources/templates.
+    Tools let an agent ask us to search; a RESOURCE lets a sandboxed host fetch a
+    named thing by URI — which is the capability an enterprise can whitelist."""
+    import asyncio
+
+    import lbrain.mcp_server as m
+
+    templates = asyncio.run(m.mcp.list_resource_templates())
+    uris = [t.uriTemplate for t in templates]
+    assert "gcx://{collection}/{ident}" in uris
+
+
+def test_gcx_resource_returns_a_verified_record(monkeypatch):
+    import lbrain.mcp_server as m
+
+    monkeypatch.setattr(gcx, "_post_json", lambda *a, **k: _edges(
+        _node("TX1", {"Canonical-SHA256": SHA})))
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: PAYLOAD)
+
+    out = m.gcx_record("rfc", "793")
+    assert "verified: yes" in out
+    assert SHA in out
+    assert "Transmission Control Protocol" in out
+
+
+def test_gcx_resource_REFUSES_a_hash_mismatch(monkeypatch):
+    """The whole point of the channel. Returning unverified bytes from a resource
+    read would make the scheme decorative — a security team whitelisting gcx://
+    is relying on this refusal."""
+    import lbrain.mcp_server as m
+
+    monkeypatch.setattr(gcx, "_post_json", lambda *a, **k: _edges(
+        _node("TX1", {"Canonical-SHA256": SHA})))
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: PAYLOAD + b"tampered")
+
+    with pytest.raises(ValueError, match="HASH MISMATCH"):
+        m.gcx_record("rfc", "793")
+
+
+def test_gcx_resource_REFUSES_when_no_hash_was_recorded(monkeypatch):
+    """Unverifiable is a refusal too — absence of a hash must never read as a pass."""
+    import lbrain.mcp_server as m
+
+    monkeypatch.setattr(gcx, "_post_json", lambda *a, **k: _edges(_node("TX1", {})))
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: PAYLOAD)
+
+    with pytest.raises(ValueError, match="UNVERIFIABLE"):
+        m.gcx_record("rfc", "2616")
+
+
+def test_gcx_resource_never_leaks_payload_bytes_on_refusal(monkeypatch):
+    """A refusal must not include the content it refused to vouch for."""
+    import lbrain.mcp_server as m
+
+    secret = b"UNVERIFIED-CANARY-CONTENT"
+    monkeypatch.setattr(gcx, "_post_json", lambda *a, **k: _edges(
+        _node("TX1", {"Canonical-SHA256": SHA})))
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: secret)
+
+    with pytest.raises(ValueError) as e:
+        m.gcx_record("rfc", "793")
+    assert "UNVERIFIED-CANARY-CONTENT" not in str(e.value)
