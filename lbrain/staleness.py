@@ -57,8 +57,16 @@ _MARKER = re.compile(
     re.IGNORECASE,
 )
 
-_STATUS_HDR = re.compile(r"^\*\*Status\*\*\s*:\s*(.+)$", re.M)
-_UPDATED_HDR = re.compile(r"^\*\*Last Updated\*\*\s*:\s*(\d{4}-\d{2}-\d{2})", re.M)
+# Tolerate the markup the house style actually puts in front of these headers.
+# Measured on the live corpus 2026-07-29: of 558 `**Status**` occurrences, 122
+# (22%) carry a leading `- `, `| ` or `> `, and the old `^\*\*Status\*\*` matched
+# NONE of them — so the tier this module documents as "contract-backed, high
+# trust" was silently missing nearly a quarter of its input. `**Last Updated**`
+# had the same fragility (caught when this file's own register, written with a
+# blockquote, failed to produce a `verified` label).
+_LEAD = r"[ \t>\-|*]*"
+_STATUS_HDR = re.compile(rf"^{_LEAD}\*\*Status\*\*\s*:\s*(.+)$", re.M)
+_UPDATED_HDR = re.compile(rf"^{_LEAD}\*\*Last Updated\*\*\s*:\s*(\d{{4}}-\d{{2}}-\d{{2}})", re.M)
 _AS_OF = re.compile(r"\bas of\s+(\d{4}-\d{2}-\d{2})", re.I)
 _VERIFY_BY = re.compile(r"^verify_by\s*:\s*(\d{4}-\d{2}-\d{2})", re.M | re.I)
 _VOLATILE_FALSE = re.compile(r"^volatile\s*:\s*(?:false|no)\s*$", re.M | re.I)

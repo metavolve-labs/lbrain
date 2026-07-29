@@ -338,10 +338,25 @@ def test_render_superseded_and_priority_flags():
 
 
 def test_render_hostile_doc_type_whitelisted():
+    """A corpus-derived doc_type must never reach the header.
+
+    Contract changed 2026-07-29 (anomaly A-403): an unrecognized type is now
+    OMITTED rather than rendered as `type=?`. The security property is the same
+    and strictly stronger — nothing corpus-derived is emitted at all — while a
+    user who sensibly wrote `type: decision` no longer sees a `?` that reads as
+    an error in the first output they ever get. This test asserts the property,
+    not the cosmetic string it used to produce.
+    """
     hits = [mk_hit(doc_type="feedback · binds")]
     out = render_response(mk_cfg(), hits, "alpha")
-    assert "type=?" in out
-    assert "type=feedback · binds" not in out
+    assert "feedback · binds" not in out      # the hostile value never renders
+    assert "type=" not in out                 # unrecognized ⇒ field omitted
+
+
+def test_render_keeps_a_whitelisted_doc_type():
+    """The omission must not swallow legitimate types."""
+    out = render_response(mk_cfg(), [mk_hit(doc_type="feedback")], "alpha")
+    assert "type=feedback" in out
 
 
 def test_resolve_mode_fallback():
