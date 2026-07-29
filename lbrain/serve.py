@@ -115,19 +115,26 @@ def record_date(h: Hit) -> tuple[str, str]:
             return ""
 
     if _is_abstraction(h):
+        # mtime IS synthesis time for a generated record, by definition.
         d = _iso(h.mtime) if h.mtime else ""
         return ("generated", d) if d else ("", "")
-    # Split on BOTH separators. On Windows the old rsplit("/") returned the
-    # WHOLE path, so _FN_DATE matched a date anywhere in it — a parent folder
-    # like `corpus-reconciliation-2026-07-28/` would stamp its own date onto
-    # every file inside as a CLAIM date. A false freshness signal, from the
-    # very function whose job is honest dating (anomaly A-404, same class).
-    name = re.split(r"[\\/]", h.rel_path)[-1]
-    m = _FN_DATE.search(name)
-    if m:
-        return ("dated", m.group(1))
-    d = _iso(h.mtime) if h.mtime else ""
-    return ("file-dated", d) if d else ("", "")
+
+    # Delegate to staleness.claim_date — ONE implementation of claim-date
+    # precedence, not two. This function previously reimplemented only the
+    # weakest two tiers (filename date, then mtime), so a canonical LAIR.md
+    # carrying a correct `**Last Updated**: <ISO>` header — a human explicitly
+    # asserting currency — served as "file-dated <today>". Worse, stale_marker()
+    # below branches on the "verified"/"as-of" labels this function could never
+    # return, so both branches were dead code and the strongest evidence tier
+    # never reached the serve path at all (anomaly A-402).
+    #
+    # Honest limitation, unchanged: h.text is a CHUNK. `**Last Updated**` lives
+    # at the top of a document, so only the leading chunk can see it; deeper
+    # chunks still fall through to the filename/mtime tiers. Splitting a header
+    # off a document is a bigger change than this fix.
+    from .staleness import claim_date
+
+    return claim_date(h.text, h.rel_path, _iso(h.mtime) if h.mtime else "")
 
 
 # --- query-aware excerpting ---------------------------------------------------
@@ -398,9 +405,15 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
     star = "★ " if h.is_priority else ""
     title = sanitize_field(h.title, 100)
     src = sanitize_field(h.rel_path, 160)
-    dt = h.doc_type if h.doc_type in DOC_TYPES else "?"
     label, date = record_date(h)
-    parts = [f"src: {src}", f"chunk {h.chunk_idx}", f"type={dt}"]
+    parts = [f"src: {src}", f"chunk {h.chunk_idx}"]
+    # Omit the field entirely when the frontmatter `type` is not one we rank on,
+    # rather than printing `type=?`. The whitelist is undocumented, so a user who
+    # sensibly writes `type: decision` saw `?` — which reads as an error in the
+    # very first output a new user sees (anomaly A-403). Absent is honest;
+    # `?` looks broken.
+    if h.doc_type in DOC_TYPES:
+        parts.append(f"type={h.doc_type}")
     if date:
         parts.append(f"{label} {date}")
     if staleness_on:
