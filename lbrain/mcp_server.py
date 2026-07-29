@@ -199,6 +199,34 @@ def lair_check_action(action_text: str) -> str:
 
 
 @mcp.tool()
+def lair_whoami() -> str:
+    """Report what this memory is and what it is trusted for.
+
+    Call this before relying on retrieved records — especially before quoting one
+    to someone else, or acting on it irreversibly. It answers three things a
+    consumer of this brain should not have to assume: whether it carries any
+    ecosystem identity and credential beyond its own say-so, what is actually
+    indexed, and what guarantees its serving format does and does not make.
+
+    An unregistered brain is normal and fully functional; it simply claims no
+    external identity.
+    """
+    import json as _json
+
+    from .identity import describe
+
+    cfg = Config.load()
+    stats = {}
+    try:
+        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        stats = store.stats()
+        store.close()
+    except Exception:
+        pass
+    return _json.dumps(describe(cfg, stats), indent=2, default=str)
+
+
+@mcp.tool()
 def lair_stats() -> str:
     """Report what is actually in the user's memory right now.
 
