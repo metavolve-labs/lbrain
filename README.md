@@ -132,6 +132,24 @@ Or skip MCP entirely — `lbrain query`, `search`, `import`, `doctor` all work f
 sitting in your environment is never treated as consent to send your corpus to a third party.
 See the [Privacy Policy](https://lbrain.ai/privacy.html) for every network call LBrain can make, and when — §3 lists them all. See [`docs/KEYS.md`](docs/KEYS.md).
 
+## Known issues — read this before filing
+
+Most reports land in one of these. Checking first is faster than waiting for us.
+
+| Symptom | Cause / fix |
+|---|---|
+| **`TOMLDecodeError` on any command right after `init`, on Windows** | **You are on 0.1.0, which is yanked.** It wrote an unparseable `config.toml` on Windows paths. `pip install -U lbrain` (≥ 0.1.1), then delete `~/.lbrain/config.toml` and re-run `init`. |
+| **`UnicodeEncodeError` during `init`, on Windows** | Same fix — 0.1.0 wrote template files in the locale encoding. Fixed in 0.1.1. |
+| Build errors installing `[local]` (`fastembed` / `onnxruntime` / `sqlite-vec`) | Native wheels. Upgrade pip first (`pip install -U pip`), which resolves nearly all of these. On Windows a wheel may be missing for a very new Python — 3.10–3.13 are supported; 3.14+ may have no wheel yet. |
+| First `embed` pauses, then works | One-time ~67 MB model download. It is the model coming *down*, not your notes going *up*. Offline after that. |
+| “It says my provider is Gemini but I never set that” | Run `lbrain doctor`. It marks every setting `[config]` or `[DEFAULT]`. In **0.1.0** an API key in your environment silently selected a hosted provider; 0.1.1 refuses to treat an ambient key as consent. |
+| Results changed after switching provider | Changing provider changes the vector space. Re-embed (`lbrain embed --all`); `doctor` exits non-zero on drift until you do. |
+| A note is missing from results but the file exists | Usually imported-but-not-embedded. `lbrain stats` shows the gap; `lbrain embed --stale` closes it. |
+| I edited only the YAML frontmatter and nothing changed | Known in 0.1.1 and earlier: change detection hashed the body only, so `type:` / `description:` edits were skipped and the old value persisted. **Fixed in the next release** — `import` will report `meta-refreshed: N`. Workaround today: touch the body (a trailing newline is enough) to force a re-index. |
+| Two brains on one machine interfering | Use `LBRAIN_HOME=/path/to/brain2` per invocation. |
+
+Not listed? Then it is worth an issue — please use the template, it asks for `lbrain doctor --json`.
+
 ## Something wrong?
 
 ```bash

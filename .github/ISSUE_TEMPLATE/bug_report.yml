@@ -1,0 +1,91 @@
+name: Bug report
+description: Something behaves differently than documented.
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before anything else: please paste `lbrain doctor --json`.**
+
+        It is one command and it answers most of what we would otherwise ask you
+        over three round trips. It reports the *effective* runtime state and — the
+        part that matters — whether each setting came from your config file or from
+        a code default. Reading a default and believing it was configured is a real
+        failure mode we have hit ourselves, so we do not want to guess about yours.
+
+        It contains no API keys. Keys live in `~/.lbrain/env`, never in config, and
+        `doctor` prints neither.
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`lbrain doctor --json` output"
+      description: Run `lbrain doctor --json` and paste the whole thing.
+      render: json
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: LBrain version
+      description: "`lbrain --version`. If you are on 0.1.0, please upgrade first — it is yanked."
+      placeholder: "lbrain, version 0.1.1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      description: Native Windows and macOS get extra attention — most install issues live there.
+      options:
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows (native)
+        - Windows (WSL)
+        - Other / container
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: "`python --version`. Supported: 3.10 – 3.13."
+      placeholder: "3.12.4"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and what happened
+      description: Include the exact command you ran and the full error or wrong output.
+      placeholder: |
+        $ lbrain query "..."
+        expected: ...
+        got: ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest reproduction
+      description: |
+        The fewest steps that show it, ideally from a fresh `LBRAIN_HOME`:
+        `LBRAIN_HOME=/tmp/probe lbrain init --provider local --source ./some-notes`
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: Before filing
+      options:
+        - label: I read the Known issues section of the README.
+          required: true
+        - label: I am on 0.1.1 or later (0.1.0 is yanked — it is broken on native Windows).
+          required: true
