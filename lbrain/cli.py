@@ -940,3 +940,56 @@ def whoami(as_json: bool):
     click.echo(f"    attributed: {s['attribution']}")
     click.echo(f"    staleness:  {'marked inline' if s['staleness_marked'] else 'NOT marked'}")
     click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")
+
+
+@main.command()
+@click.argument("name")
+@click.option("--gateway", default=None, help="Arweave gateway (default arweave.net; point at your own).")
+@click.option("--graphql", default=None, help="GraphQL endpoint for name lookup.")
+@click.option("--out", type=click.Path(), default=None, help="Write the record to a file.")
+@click.option("--quiet", is_flag=True, help="Print only the content (pipe-friendly).")
+def resolve(name: str, gateway: str, graphql: str, out: str, quiet: bool):
+    """Resolve a gcx:// name to its permanent record and verify it.
+
+    \b
+      lbrain resolve gcx://rfc/793
+
+    `gcx` and `aet` are IANA-registered URI schemes. The verification hash comes
+    from an on-chain tag written at mint time — not from this package and not
+    from our servers — so the check does not require trusting us.
+
+    Exits non-zero if the record cannot be verified, so it can gate a script.
+    """
+    from .gcx import GATEWAY, GRAPHQL, ResolveError
+    from .gcx import resolve as _resolve
+
+    try:
+        r = _resolve(name, gateway=gateway or GATEWAY, graphql=graphql or GRAPHQL)
+    except ResolveError as e:
+        click.secho(f"✗ {e}", fg="red")
+        raise SystemExit(1)
+
+    if out:
+        Path(out).write_bytes(r.content)
+
+    if quiet:
+        click.echo(r.content.decode("utf-8", errors="replace"), nl=False)
+        raise SystemExit(0 if r.verified else 1)
+
+    ok = r.verified
+    click.secho(f"  {r.name}", fg="cyan", bold=True)
+    click.echo(f"    txid:     {r.txid}")
+    if r.tags.get("Title"):
+        click.echo(f"    title:    {r.tags['Title']}")
+    click.echo(f"    bytes:    {len(r.content):,}")
+    click.echo(f"    expected: {r.expected_sha256 or '(none recorded on-chain)'}")
+    click.echo(f"    actual:   {r.actual_sha256}")
+    click.secho(f"    {r.status}", fg=("green" if ok else "red"), bold=True)
+    click.echo(f"    gateway:  {r.gateway}")
+    if not out:
+        head = r.content.decode("utf-8", errors="replace").strip().splitlines()[:4]
+        click.echo()
+        for ln in head:
+            click.echo(f"    │ {ln[:96]}")
+        click.echo(f"    │ … ({len(r.content):,} bytes — use --out FILE or --quiet)")
+    raise SystemExit(0 if ok else 1)
