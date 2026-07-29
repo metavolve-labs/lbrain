@@ -1,0 +1,56 @@
+name: Install / first-run problem
+description: pip install, native build tooling, first-run model download, or OS pathing.
+labels: ["install", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Install issues are the single largest category, and most are one of a handful
+        of known causes. **Please check the README's Known issues section first** — if
+        yours is listed there with a fix, you will be unblocked faster than we can reply.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows (native)
+        - Windows (WSL)
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+        - Other / container
+    validations:
+      required: true
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.12.4"
+    validations:
+      required: true
+
+  - type: input
+    id: install_cmd
+    attributes:
+      label: Install command
+      placeholder: 'pip install "lbrain[local]"'
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: Full error output
+      description: The whole traceback or build log, not just the last line.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`lbrain doctor --json` — if the install completed at all"
+      description: Skip if `lbrain` will not run. No keys are printed.
+      render: json
