@@ -239,11 +239,18 @@ class Store:
             stored_meta = json.loads(row["metadata"] or "{}")
         except (ValueError, TypeError):
             stored_meta = {}
+        # Compare against the SAME transform upsert_doc stores through. YAML
+        # parses an unquoted `created: 2026-05-03` into a datetime.date, which is
+        # stored as the string "2026-05-03" — so comparing a fresh parse to the
+        # stored row reported a difference on every import, forever. Observed
+        # live: 3 documents refreshed on every single run. The counter is what
+        # exposed it; a silent version of this fix would have looked like it worked.
+        parsed_meta = json.loads(json.dumps(_safe_meta(doc.metadata)))
         return (
             (row["title"] or "") != (doc.title or "")
             or (row["doc_type"] or "") != (doc.doc_type or "")
             or bool(row["is_priority"]) != bool(doc.is_priority)
-            or stored_meta != doc.metadata
+            or stored_meta != parsed_meta
         )
 
     def upsert_doc(self, doc: Doc) -> None:
