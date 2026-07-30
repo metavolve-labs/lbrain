@@ -295,7 +295,7 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
         "LIMIT ?",
         (fts_query, k),
     ).fetchall()
-    return [
+    hits = [
         Hit(
             rel_path=r["rel_path"],
             chunk_idx=r["chunk_idx"],
@@ -309,6 +309,19 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
         )
         for r in rows
     ]
+    # Annotate supersession on the keyword path too. The SUPERSEDED badge in the
+    # served header is derived from the `boosts` dict, which only the ranked
+    # search path populated — so the product's flagship differentiator ("you are
+    # reading a record something else has replaced") was invisible on one of the
+    # two retrieval paths (anomaly A-410). No RANKING change here: keyword search
+    # stays rank-by-FTS-relevance and the penalty is not applied to the score;
+    # this marks the record so the reader is told, which is the whole point.
+    superseded = store.superseded_slugs()
+    if superseded:
+        for h in hits:
+            if _basename_slug(h.rel_path) in superseded:
+                h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
+    return hits
 
 
 def _fts_query(q: str) -> str:
