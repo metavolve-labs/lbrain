@@ -28,7 +28,29 @@ lbrain query "what did we decide about the deploy flag"
 ```
 
 No API key. No account. Indexing and search run on-device — your documents and queries are never
-transmitted. LBrain downloads its ~67 MB embedding model once on first run; after that it works offline.
+transmitted.
+
+> ### The one download, and what it's for
+>
+> On first run LBrain fetches a **~67 MB embedding model** ([`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5))
+> and then runs it on your CPU. `lbrain init` tells you before it happens and asks; `--yes` skips the prompt.
+>
+> **That is the model coming *down* — not your documents going *up*.** It is the only network call the
+> on-device path ever makes. Afterwards embedding is fully offline, and the model is cached in
+> `~/.cache/huggingface` and never fetched again.
+>
+> **Why a model at all, and not just code?** Searching by meaning needs text turned into coordinates, so
+> that *"did anyone test the mailbox"* can find a note that says *"dereference"*, *"round trip"* and
+> *"MX record"* — sharing no words with the question. You cannot write rules for that; the number of ways
+> to phrase an idea is unbounded. So a model is trained until related meanings land near each other.
+> LBrain also runs a plain keyword index (SQLite FTS5) for what you literally typed, and fuses the two.
+>
+> **What the model is not.** It does not generate text, has no opinions and remembers nothing. It is one
+> deterministic forward pass — same text in, same 384 numbers out, every time. 33M parameters whose
+> entire behaviour is *text → coordinates*. Closer to a learned lookup table than to a chatbot.
+>
+> Prefer not to download it? Use a hosted embedder instead, under your own key and billing:
+> `lbrain init --gemini-key <KEY> --source ./docs`. See [Embeddings](#embeddings).
 
 ```
 ⟪note⟫
