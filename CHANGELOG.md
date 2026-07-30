@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.1.2 — 2026-07-30 — Windows ranking, the knowledge graph, and consent
+
+**Upgrade from 0.1.1 if you are on Windows.** Three ranking features were silently
+degraded there; nothing errored, results were just quietly worse.
+
+### Fixed — Windows ranking was silently degraded
+The 0.1.1 Windows fixes stopped the crashes but missed three more instances of the
+same path-separator bug. Slugs were derived by splitting on `/` only, so on Windows:
+- the **wikilink graph boost** never matched,
+- the **supersession de-rank** never matched,
+- and **claim-date extraction** searched the whole path, letting a dated *parent
+  directory* stamp its date onto every file inside it as that file's claim date —
+  a false freshness signal from the function whose only job is honest dating.
+
+### Fixed — the knowledge graph resolved 36% of its links
+Three separate causes, found in that order:
+1. Every lair is `<DIR>/LAIR.md`, so filename-derived slugs collapsed **164 of 167**
+   lairs onto the single slug `LAIR`. A lair's identity is its directory.
+2. Fixing that moved resolution 35% → 36%, which is how the real cause was found
+   rather than assumed.
+3. Wikilinks are written as relative paths (`[[../../some-dir/LAIR]]`) and were
+   compared literally against bare slugs. Both sides now normalize to one slug space.
+
+**Live corpus: 36% → 99% of wikilink targets resolve.** Applied on read, so existing
+brains are fixed with no re-import.
+
+### Fixed — supersession could be recorded backwards
+`**Supersedes**: nothing · **Superseded by**: [[X]]` captured the *second* clause and
+wrote the edge inverted — registering a document as superseding the thing that
+replaced it. An inverted edge is worse than a missing one: it buries the live record
+and promotes the dead one. Capture now stops at a `·`/`|` separator, and an explicit
+`nothing`/`none` is honoured.
+
+### Fixed — frontmatter edits were invisible to `import`
+Change detection hashed the body only, so editing `type:`, `description:` or
+`verify_by:` never took effect and the old value persisted indefinitely. Detection is
+now separate from the body hash, and repair is a one-row update — a metadata edit
+changes no chunk, so nothing is re-embedded. Reported as `meta-refreshed: N`.
+
+### Added — `lbrain resolve` and a `gcx://` MCP resource
+`lbrain resolve gcx://rfc/793` fetches a record and verifies it against a SHA-256
+written **on-chain at mint time** — the hash comes from the chain, not from this
+package or our servers. The same is exposed as an MCP *resource*, which refuses to
+return content on hash mismatch or when no hash was recorded.
+
+### Added — `lbrain whoami` / `lair_whoami`
+What this memory is and what it is trusted for: identity, what is indexed, and what
+the serving format does and does not guarantee. An unregistered brain is a normal,
+fully-functional state.
+
+### Changed — the model download now asks
+The on-device path fetches a ~67 MB model on first use and previously said nothing
+beforehand. `init` now explains what it is — the model coming *down*, not your
+documents going *up* — names the cache location, offers the hosted alternative, and
+asks. `--yes` skips it; a non-interactive session prints the notice and proceeds
+rather than hanging a pipeline.
+
+### Also
+- `SUPERSEDED` now displays on keyword search, not only on ranked search.
+- Retrieval timing uses a monotonic clock; a system clock adjustment previously
+  produced negative durations.
+- `docs/KEYS.md` rewritten — it opened by claiming LBrain needs an embedding API
+  (it does not) and never mentioned the on-device default.
+- Issue templates that ask for `lbrain doctor --json`, and a known-issues table.
+
+156 tests.
+
 ## 0.1.1 — 2026-07-28 — security + Windows. **Upgrade from 0.1.0.**
 
 **0.1.0 is yanked.** It is broken on Windows and contradicts its own privacy
