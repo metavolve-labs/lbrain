@@ -516,3 +516,61 @@ def test_unquoted_yaml_dates_do_not_refresh_forever(tmp_path):
     # second look at the identical file must be a no-op, not a refresh
     assert not store.doc_metadata_differs(parse(f, repo_root=tmp_path))
     store.close()
+
+
+# --- A-410 / A-411: supersession on both retrieval paths --------------------
+
+def test_superseded_badge_appears_on_the_keyword_path(tmp_path):
+    """The SUPERSEDED badge derives from the `boosts` dict, which only the ranked
+    path populated — so the flagship differentiator was invisible on one of the two
+    retrieval paths (A-410). Ranking is deliberately NOT changed: keyword search
+    stays rank-by-relevance; the record is only MARKED."""
+    from lbrain.index import parse
+    from lbrain.search import keyword_only
+    from lbrain.store import Store
+
+    old = tmp_path / "old-decision.md"
+    old.write_text("# Old\n\nWe will use widgets for the pipeline.\n", encoding="utf-8")
+    new = tmp_path / "new-decision.md"
+    new.write_text("---\nname: new-decision\n---\n\n# New\n\n"
+                   "**Supersedes:** [[old-decision]]\n\nWe now use gadgets for the pipeline.\n",
+                   encoding="utf-8")
+
+    from lbrain.index import chunk as chunk_doc
+
+    store = Store(tmp_path / "brain.db")
+    for f in (old, new):
+        d = parse(f, repo_root=tmp_path)
+        store.upsert_doc(d)
+        store.insert_chunks(chunk_doc(d))
+        store.replace_supersessions(d)
+    store.db.commit()
+
+    hits = keyword_only(store, "pipeline", k=10)
+    by_path = {h.rel_path: h for h in hits}
+    assert by_path, "fixture produced no keyword hits"
+    old_hit = next((h for p, h in by_path.items() if "old-decision" in p), None)
+    assert old_hit is not None, "the superseded doc should still be retrievable"
+    assert "superseded" in old_hit.boosts, "superseded record must be MARKED on the keyword path"
+    store.close()
+
+
+def test_superseded_by_phrasing_deliberately_creates_no_edge():
+    """A-411 is a WONTFIX, and this test pins WHY so nobody "fixes" it later.
+
+    "A supersedes B" means A replaces B. "A is superseded by B" means the
+    OPPOSITE, so matching it with the same rule would invert the edge and bury the
+    NEW document. Worse: measured on the live corpus 2026-07-29, "superseded by"
+    appears in 47 files — and 46 of those are MID-LINE third-party annotations in
+    index/audit tables describing OTHER documents' status ("`KITE-HACKATHON/` |
+    Superseded by `KITE-PUSH`"). ZERO are anchored self-declarations. Honouring the
+    phrasing would therefore mark the INDEX FILE as superseded and bury it.
+
+    The no-op is protecting the corpus, not failing it.
+    """
+    from lbrain.index import SUPERSEDE_RE
+
+    assert SUPERSEDE_RE.search("**Supersedes:** [[old-doc]]"), "self-declaration must match"
+    # third-party annotation, mid-line, in a table — must NOT match
+    assert not SUPERSEDE_RE.search("| `KITE-HACKATHON/` | 29 | Superseded by `KITE-PUSH/` |")
+    assert not SUPERSEDE_RE.search("content superseded by Studio launch + pause")
