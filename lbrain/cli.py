@@ -150,6 +150,39 @@ def doctor(as_json: bool):
         raise SystemExit(1)
 
 
+
+def _confirm_local_model(assume_yes: bool) -> bool:
+    """Explain the one-time model download and ask. Returns True to proceed.
+
+    Never blocks a non-interactive run: with no TTY (CI, a script, a Dockerfile)
+    it prints the same notice and proceeds, because a prompt that hangs a
+    pipeline is a worse bug than the surprise it was added to prevent.
+    """
+    from .embed import LocalEmbedClient
+
+    click.secho("\n  On-device embeddings (the default — no API key, no account)", bold=True)
+    click.echo(
+        "    LBrain needs to turn your text into vectors so it can search by meaning.\n"
+        f"    On first use it downloads {LocalEmbedClient.DEFAULT_MODEL} (~67 MB, once)\n"
+        "    and then runs it on your CPU.\n"
+    )
+    click.secho("    That download is the model coming DOWN, not your notes going UP.", fg="green")
+    click.echo(
+        "    It is the only network call this path makes. After it, embedding is\n"
+        "    fully offline and your documents never leave this machine.\n"
+        "    Cached at ~/.cache/huggingface — fetched once, never again.\n"
+    )
+    click.echo("    Prefer not to? Use a hosted provider instead (your key, your billing):")
+    click.echo("      lbrain init --gemini-key <KEY> --source ./docs\n")
+
+    if assume_yes:
+        click.secho("    --yes given; proceeding.", fg="cyan")
+        return True
+    if not sys.stdin.isatty():
+        click.secho("    non-interactive session; proceeding with on-device embeddings.", fg="cyan")
+        return True
+    return click.confirm("    Download the model and keep everything on-device?", default=True)
+
 @main.command()
 @click.option("--provider", type=click.Choice(["local", "gemini", "openai"]), default=None,
               help="Embedding provider. Default 'local' (on-device). A hosted provider is "
@@ -158,6 +191,7 @@ def doctor(as_json: bool):
 @click.option("--gemini-key", envvar="GEMINI_API_KEY", default=None, help="Gemini API key (provider=gemini)")
 @click.option("--api-key", envvar="OPENAI_API_KEY", default=None, help="OpenAI API key (provider=openai)")
 @click.option("--api-base", default=None, help="Override the Gemini base URL (point at a proxy / self-hosted gateway)")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, help="Skip the on-device model download prompt.")
 @click.option(
     "--source",
     "sources",
@@ -165,7 +199,8 @@ def doctor(as_json: bool):
     type=click.Path(),
     help="Directory to index (repeatable)",
 )
-def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: tuple[str, ...]):
+def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes: bool,
+         sources: tuple[str, ...]):
     """Initialize LBrain config + DB — on-device by default.
 
     Out-of-the-box: `lbrain init --source ./docs --source ./notes` — no key, no
@@ -212,6 +247,18 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, sources: t
         from .embed import LocalEmbedClient
         cfg.embedding_model = LocalEmbedClient.DEFAULT_MODEL
         cfg.embedding_dim = LocalEmbedClient.DEFAULT_DIM
+        # Consent, not surprise. The on-device path fetches a ~67 MB model on
+        # first embed. That is the ONE network call the local install makes, and
+        # a silent download on a tool marketed as local-first reads as the exact
+        # opposite of what it is. The founder himself did not expect it
+        # (2026-07-30) — if the author is surprised, a stranger certainly is.
+        if not _confirm_local_model(assume_yes):
+            click.secho(
+                "  aborted. To use a hosted provider instead, pass a key explicitly:\n"
+                "    lbrain init --gemini-key <KEY> --source ./docs",
+                fg="yellow",
+            )
+            raise SystemExit(1)
     elif provider == "gemini":
         cfg.embedding_model = "gemini-embedding-001"
         if gemini_key:
@@ -285,7 +332,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
         sys.exit(1)
 
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    t0 = time.time()
+    t0 = time.monotonic()
     new_docs = 0
     updated_docs = 0
     unchanged_docs = 0
@@ -346,7 +393,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
 
     stats = store.stats()
     store.close()
-    dt = time.time() - t0
+    dt = time.monotonic() - t0
     click.secho(
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
         f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
@@ -428,7 +475,7 @@ def embed(stale: bool, batch: int):
         return
 
     click.echo(f"  embedding {len(pending)} chunks (batch {batch}, model {cfg.embedding_model})…")
-    t0 = time.time()
+    t0 = time.monotonic()
     with store.transaction():
         for i in range(0, len(pending), batch):
             chunk_batch = pending[i : i + batch]
@@ -442,7 +489,7 @@ def embed(stale: bool, batch: int):
     store.stamp_embedding_config(cfg.embedding_dim, model, provider)
     embedder.close()
     store.close()
-    dt = time.time() - t0
+    dt = time.monotonic() - t0
     click.secho(f"✓ Embedded {len(pending)} chunks in {dt:.1f}s", fg="green")
 
 
@@ -472,10 +519,10 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = make_embedder(cfg)
     try:
-        t0 = time.time()
+        t0 = time.monotonic()
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
                       rerank=rerank, recency=recency)
-        dt_ms = (time.time() - t0) * 1000
+        dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, serve_mode)
         if warn:
             click.secho(warn, fg="yellow", nl=False)
@@ -525,9 +572,9 @@ def search_cmd(query: str, k: int):
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     try:
-        t0 = time.time()
+        t0 = time.monotonic()
         hits = keyword_only(store, query, k=k)
-        dt_ms = (time.time() - t0) * 1000
+        dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, None)
         if warn:
             click.secho(warn, fg="yellow", nl=False)
