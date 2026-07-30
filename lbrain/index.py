@@ -14,7 +14,22 @@ import tiktoken
 WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]")
 HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 # A line that declares this doc replaces another, e.g. "**Supersedes:** [[slug]]".
-SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*(.*)$")
+#
+# The capture stops at a `·` or `|` separator (2026-07-30, anomaly A-422). It used
+# to run to end-of-line, so the real corpus line
+#     **Supersedes**: nothing · **Superseded by**: [[000-PRIORITY-ANOMALY-REGISTER]]
+# captured the SECOND clause and recorded the edge BACKWARDS — the doc declaring
+# itself replaced was registered as replacing the thing that replaced it. Verified
+# in the live DB: the active Anomaly Register was sitting in superseded_slugs(),
+# de-ranked by the redirect stub that points AT it. A supersession pointing the
+# wrong way is worse than a missing one: it buries the live record and promotes
+# the dead one.
+SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
+
+# "nothing" / "none" / "n/a" is an author saying explicitly that this document
+# replaces no other. Treating it as a value produced no edge by luck (no wikilink
+# to find); being explicit costs one check and documents the intent.
+_SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—"}
 ENCODER = tiktoken.get_encoding("cl100k_base")
 
 
@@ -34,8 +49,20 @@ class Doc:
 
     @property
     def name_slug(self) -> str:
-        """The `name:` field if present, else filename stem."""
-        return self.metadata.get("name") or self.path.stem
+        """This document's identity for wikilink / supersession matching.
+
+        `name:` frontmatter wins. Otherwise the filename stem — EXCEPT for a
+        lair, where the payload is always `LAIR.md` and the identity is the
+        containing directory. Deriving it from the filename made 164 of 167
+        lairs share the slug "LAIR" (anomaly A-423). Must stay in step with
+        search._basename_slug; they are two callers of one rule.
+        """
+        named = self.metadata.get("name")
+        if named:
+            return str(named)
+        if self.path.stem == "LAIR" and self.path.parent.name:
+            return self.path.parent.name
+        return self.path.stem
 
 
 @dataclass
@@ -134,7 +161,10 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     elif isinstance(fm_sup, list):
         supersedes.extend(str(x) for x in fm_sup)
     for m in SUPERSEDE_RE.finditer(body):
-        supersedes.extend(WIKILINK_RE.findall(m.group(1)))
+        clause = m.group(1).strip().strip("*").strip()
+        if clause.lower() in _SUPERSEDE_EMPTY:
+            continue
+        supersedes.extend(WIKILINK_RE.findall(clause))
     supersedes = sorted({s.strip() for s in supersedes if s and s.strip()})
     doc_type = ""
     if isinstance(meta.get("metadata"), dict):

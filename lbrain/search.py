@@ -44,8 +44,47 @@ def _basename_slug(rel_path: str) -> str:
     this is its sibling, caught by the 2026-07-29 audit (anomaly A-404). A
     ranking difference with no error message, which is worse than a crash.
     """
-    name = re.split(r"[\\/]", rel_path)[-1]
-    return name[:-3] if name.endswith(".md") else name
+    parts = [x for x in re.split(r"[\\/]", rel_path) if x]
+    name = parts[-1] if parts else rel_path
+    stem = name[:-3] if name.endswith(".md") else name
+    # A lair is a DIRECTORY whose payload is always `LAIR.md`, and every wikilink
+    # to one names the directory (`[[000-PRIORITY-ANOMALY-REGISTER]]`). Deriving
+    # the slug from the filename therefore collapsed 164 of 167 lairs onto the
+    # single slug "LAIR" — so no wikilink to a lair could ever resolve and no
+    # supersession edge naming one could ever match. Measured live 2026-07-30:
+    # only 813 of 2,311 wikilink targets (35%) resolved to any doc slug at all
+    # (anomaly A-423). For `<DIR>/LAIR.md` the identity is the directory.
+    if stem == "LAIR" and len(parts) >= 2:
+        return parts[-2]
+    return stem
+
+
+def canonical_slug(target: str) -> str:
+    """Normalize a WIKILINK TARGET to the same slug space as a document path.
+
+    Authors write links the way Obsidian does — as relative paths:
+        [[../../000-PRIORITY-AO-STRATEGY/LAIR]]
+        [[../../project-insurable-trust-standard-2026-06-07]]
+    These were compared LITERALLY against a bare document slug, so they could
+    never match. Measured live 2026-07-30: 1,475 of 2,312 targets unresolved, and
+    the path-shaped ones dominate that set (anomaly A-423, third cause). The
+    wikilink graph boost — the feature the framework README sells hardest — was
+    therefore inert for most of the corpus.
+
+    Same rule as a document path: drop directories, drop `.md`, and for a lair
+    (`.../<DIR>/LAIR`) take the directory. One slug space, both sides.
+    """
+    t = (target or "").strip().strip("/")
+    if not t:
+        return ""
+    parts = [x for x in re.split(r"[\\/]", t) if x not in ("", ".", "..")]
+    if not parts:
+        return ""
+    name = parts[-1]
+    stem = name[:-3] if name.endswith(".md") else name
+    if stem == "LAIR" and len(parts) >= 2:
+        return parts[-2]
+    return stem
 
 
 def _is_abstraction(h: Hit) -> bool:
@@ -215,15 +254,17 @@ def search(
 
     # 5. Wikilink graph boost — if a hit is wikilinked-to by another hit, lift it
     if out:
-        slugs_in_hits = set()
+        # Count inbound links in the NORMALIZED slug space. Stored targets are raw
+        # author text (often a relative path), so a literal SQL equality missed
+        # them; normalizing on read fixes existing brains with no re-import.
+        counts: dict[str, int] = {}
+        for r in store.db.execute("SELECT tgt_slug FROM wikilinks").fetchall():
+            cs = canonical_slug(r["tgt_slug"])
+            if cs:
+                counts[cs] = counts.get(cs, 0) + 1
         for h in out:
             slug = _basename_slug(h.rel_path)
-            slugs_in_hits.add(slug)
-        for h in out:
-            slug = _basename_slug(h.rel_path)
-            in_links = store.db.execute(
-                "SELECT COUNT(*) AS n FROM wikilinks WHERE tgt_slug = ?", (slug,)
-            ).fetchone()["n"]
+            in_links = counts.get(slug, 0)
             if in_links:
                 lift = 1.0 + 0.05 * min(in_links, 5)  # cap influence
                 h.score *= lift
@@ -235,7 +276,10 @@ def search(
     #     the "amendable, supersede-not-overwrite" convention into actual ranking
     #     behavior: "permanence at the substrate, selectivity at the surface."
     if getattr(cfg, "supersede_aware", True) and out:
-        superseded = store.superseded_slugs()
+        # Normalize the same way as the wikilink side: a `Supersedes:` target is
+        # author text and is just as likely to be written as a relative path.
+        superseded = {canonical_slug(x) for x in store.superseded_slugs()}
+        superseded.discard("")
         if superseded:
             pen = getattr(cfg, "supersede_penalty", 0.25)
             for h in out:
@@ -316,7 +360,8 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
     # two retrieval paths (anomaly A-410). No RANKING change here: keyword search
     # stays rank-by-FTS-relevance and the penalty is not applied to the score;
     # this marks the record so the reader is told, which is the whole point.
-    superseded = store.superseded_slugs()
+    superseded = {canonical_slug(x) for x in store.superseded_slugs()}
+    superseded.discard("")
     if superseded:
         for h in hits:
             if _basename_slug(h.rel_path) in superseded:

@@ -406,8 +406,12 @@ def test_slug_derivation_works_on_both_path_separators():
     silent ranking difference. Same bug as the 000-PRIORITY one in index.py."""
     from lbrain.search import _basename_slug
 
-    assert _basename_slug(r"P5\000-PRIORITY-X\LAIR.md") == "LAIR"
-    assert _basename_slug("P5/000-PRIORITY-X/LAIR.md") == "LAIR"
+    # Contract changed 2026-07-30 (A-423): a lair's identity is its DIRECTORY,
+    # because the payload is always LAIR.md and every wikilink names the folder.
+    # These two assertions previously encoded the bug ("LAIR" for both).
+    assert _basename_slug(r"P5\000-PRIORITY-X\LAIR.md") == "000-PRIORITY-X"
+    assert _basename_slug("P5/000-PRIORITY-X/LAIR.md") == "000-PRIORITY-X"
+    assert _basename_slug(r"P5\notes\deep-dive.md") == "deep-dive"   # separator still handled
     assert _basename_slug("plain.md") == "plain"
     assert _basename_slug("no-extension") == "no-extension"
 
@@ -574,3 +578,55 @@ def test_superseded_by_phrasing_deliberately_creates_no_edge():
     # third-party annotation, mid-line, in a table — must NOT match
     assert not SUPERSEDE_RE.search("| `KITE-HACKATHON/` | 29 | Superseded by `KITE-PUSH/` |")
     assert not SUPERSEDE_RE.search("content superseded by Studio launch + pause")
+
+
+# --- A-422 / A-423: supersession direction, and one slug space ---------------
+
+def test_supersedes_capture_stops_before_a_superseded_by_clause():
+    """A-422. `**Supersedes**: nothing · **Superseded by**: [[X]]` used to capture
+    the SECOND clause and record the edge BACKWARDS — the doc declaring itself
+    replaced was registered as replacing the thing that replaced it. Verified in
+    the live DB at the time: the ACTIVE anomaly register sat in superseded_slugs(),
+    buried by the redirect stub pointing at it. An inverted edge is worse than a
+    missing one: it de-ranks the live record and promotes the dead one."""
+    from lbrain.index import SUPERSEDE_RE, WIKILINK_RE, _SUPERSEDE_EMPTY
+
+    def targets(line):
+        out = []
+        for m in SUPERSEDE_RE.finditer(line):
+            clause = m.group(1).strip().strip("*").strip()
+            if clause.lower() in _SUPERSEDE_EMPTY:
+                continue
+            out += WIKILINK_RE.findall(clause)
+        return out
+
+    assert targets("**Supersedes**: nothing · **Superseded by**: [[REGISTER]]") == []
+    assert targets("**Supersedes**: none") == []
+    assert targets("**Supersedes:** [[old-doc]]") == ["old-doc"]
+    assert targets("**Supersedes:** [[a]] and [[b]]") == ["a", "b"]
+
+
+def test_a_lair_is_identified_by_its_directory_not_by_LAIR_md():
+    """A-423. Every lair's payload is `<DIR>/LAIR.md` and every wikilink names the
+    DIRECTORY, so filename-derived slugs collapsed 164 of 167 lairs onto "LAIR"."""
+    from lbrain.search import _basename_slug
+
+    assert _basename_slug("P3/000-PRIORITY-REGISTER/LAIR.md") == "000-PRIORITY-REGISTER"
+    assert _basename_slug(r"P3\000-PRIORITY-REGISTER\LAIR.md") == "000-PRIORITY-REGISTER"
+    assert _basename_slug("memory/project-foo.md") == "project-foo"
+
+
+def test_relative_path_wikilinks_normalize_into_the_same_slug_space():
+    """A-423, third cause and the dominant one. Authors write Obsidian-style
+    relative paths; these were compared literally against bare slugs and could
+    never match. Live corpus went from 36% to 99% of targets resolving."""
+    from lbrain.search import canonical_slug
+
+    assert canonical_slug("../../000-PRIORITY-AO-STRATEGY/LAIR") == "000-PRIORITY-AO-STRATEGY"
+    assert canonical_slug("../../project-insurable-trust-standard-2026-06-07") == \
+        "project-insurable-trust-standard-2026-06-07"
+    assert canonical_slug("../000-PRIORITY-MARKETPLACE/AETERNUM-ASSET-CANON") == \
+        "AETERNUM-ASSET-CANON"
+    assert canonical_slug("plain-slug") == "plain-slug"
+    assert canonical_slug("") == ""
+    assert canonical_slug("../..") == ""          # must not crash or return junk
