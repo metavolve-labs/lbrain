@@ -43,7 +43,32 @@ due() {  # due <marker>  → 0 (true) if absent or older than the gate
   [ $(( now - mt )) -ge "$GATE_SEC" ]
 }
 
+# --- guard: uncommitted code must not touch the live brain (A-431) -----------
+# `lbrain` is an EDITABLE install, so /usr/local/bin/lbrain imports the working
+# tree, not a released wheel. This cron therefore runs whatever is on disk at the
+# moment it fires. That has already reached the live brain twice in two days:
+#   A-004  — a clobbered live config during a mid-edit run
+#   2026-07-31 — a schema migration from an uncommitted branch applied to
+#                ~/.lbrain/brain.db at 12:24, unreviewed and unchosen
+# Neither was malicious or even careless; both were simply the 15-minute timer
+# arriving mid-edit. The fix is to make that timing impossible rather than to
+# remember not to edit near it.
+#
+# Refuses ONLY the automated paths. An operator running `lbrain import` by hand
+# is making a choice; a cron tick is not. Opt out with LBRAIN_ALLOW_DIRTY=1.
+repo_is_dirty() {
+  local repo
+  repo=$(timeout 5 python3 -c 'import lbrain,os;print(os.path.dirname(os.path.dirname(os.path.abspath(lbrain.__file__))))' 2>/dev/null) || return 1
+  [ -n "$repo" ] && [ -d "$repo/.git" ] || return 1
+  [ -n "$(timeout 10 git -C "$repo" status --porcelain 2>/dev/null)" ]
+}
+
 refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
+  if [ "${LBRAIN_ALLOW_DIRTY:-0}" != "1" ] && repo_is_dirty; then
+    printf '[%s] REFUSING to refresh: the lbrain working tree is DIRTY.\n  Uncommitted code must not import the live brain (A-431). Commit, or set LBRAIN_ALLOW_DIRTY=1.\n' \
+      "$(date -Is)" >>"$LOG" 2>&1
+    return 0
+  fi
   timeout 60 "$LB" import >>"$LOG" 2>&1
   local stale
   stale=$("$LB" stats 2>/dev/null | awk -F'[: ]+' '/^chunks:/{c=$2}/^embedded:/{e=$2}END{print (c+0)-(e+0)}')
