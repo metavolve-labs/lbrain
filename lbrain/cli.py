@@ -396,7 +396,7 @@ def _project_belief(store, doc) -> int:
         # an author deliberately removing `type: belief`. Deleting the projection
         # on that basis silently strips a RETRACTED belief of its burial and its
         # marking, turning a known-wrong record back into an ordinary document
-        # that ranks on equal terms. Observed 2026-07-31 (anomaly A-430) when a
+        # that ranks on equal terms. Observed 2026-07-31 (anomaly A-431) when a
         # one-character YAML indent error did exactly that.
         if not getattr(doc, "metadata_ok", True) and store.belief_row_for_path(doc.rel_path):
             print(
@@ -1441,6 +1441,6 @@ def belief_retract(slug, reason):
 # was silently absent — `whoami`, `resolve`, the archive group and (as written)
 # `belief`. `lbrain <cmd>` worked, `python -m lbrain.cli <cmd>` answered "No such
 # command", which reads as a missing feature rather than a loading order. Anomaly
-# A-429; guarded by tests/test_beliefs.py::test_every_command_is_reachable_via_python_m.
+# A-430; guarded by tests/test_beliefs.py::test_every_command_is_reachable_via_python_m.
 if __name__ == "__main__":
     main()

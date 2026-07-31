@@ -590,7 +590,7 @@ def test_a_doc_that_stops_being_a_belief_loses_its_projection_on_reimport():
 
 
 def test_broken_yaml_does_not_silently_unretract_a_belief(isolate_lbrain_home):
-    """A-430, found by running the thing rather than reasoning about it.
+    """A-431, found by running the thing rather than reasoning about it.
 
     Malformed frontmatter makes `parse` return doc_type="" — which is exactly
     what an author removing `type: belief` looks like. Deleting the projection on
@@ -695,7 +695,7 @@ def test_an_unprovisioned_home_warns_instead_of_answering_as_an_amnesiac(isolate
 
 
 def test_every_command_is_reachable_via_python_m():
-    """A-429. The `if __name__ == "__main__"` dispatch sat mid-module at d58b45f,
+    """A-430. The `if __name__ == "__main__"` dispatch sat mid-module at d58b45f,
     so main() ran before the rest of the file was executed and every command
     defined below it was absent under `python -m lbrain.cli` — `whoami`,
     `resolve`, the archive group. `lbrain <cmd>` worked, so the gap was invisible

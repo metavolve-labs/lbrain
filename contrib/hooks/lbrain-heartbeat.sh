@@ -43,7 +43,7 @@ due() {  # due <marker>  → 0 (true) if absent or older than the gate
   [ $(( now - mt )) -ge "$GATE_SEC" ]
 }
 
-# --- guard: uncommitted code must not touch the live brain (A-431) -----------
+# --- guard: uncommitted code must not touch the live brain (A-432) -----------
 # `lbrain` is an EDITABLE install, so /usr/local/bin/lbrain imports the working
 # tree, not a released wheel. This cron therefore runs whatever is on disk at the
 # moment it fires. That has already reached the live brain twice in two days:
@@ -65,7 +65,7 @@ repo_is_dirty() {
 
 refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
   if [ "${LBRAIN_ALLOW_DIRTY:-0}" != "1" ] && repo_is_dirty; then
-    printf '[%s] REFUSING to refresh: the lbrain working tree is DIRTY.\n  Uncommitted code must not import the live brain (A-431). Commit, or set LBRAIN_ALLOW_DIRTY=1.\n' \
+    printf '[%s] REFUSING to refresh: the lbrain working tree is DIRTY.\n  Uncommitted code must not import the live brain (A-432). Commit, or set LBRAIN_ALLOW_DIRTY=1.\n' \
       "$(date -Is)" >>"$LOG" 2>&1
     return 0
   fi
