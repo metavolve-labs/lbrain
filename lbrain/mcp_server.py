@@ -12,6 +12,7 @@ Tools surfaced:
 from __future__ import annotations
 
 import json
+import os
 
 from mcp.server.fastmcp import FastMCP
 
@@ -23,15 +24,47 @@ from .lair_protocol import (
     should_commit_to_lair,
 )
 from .search import keyword_only, search
-from .serve import fence_block, render_response, resolve_mode
+from .serve import blinding_notice, fence_block, render_response, resolve_mode
 from .store import Store
 
 mcp = FastMCP("lbrain")
 
+# Which agent this server IS. The exoskeleton already selects a persona by which
+# LBRAIN_HOME the launcher points at; this names it, so the server can show that
+# persona its OWN draft beliefs and no one else's (lbrain/beliefs.py).
+#
+# Read from the environment rather than accepted as a tool argument on purpose: a
+# model that could pass `persona="cfo"` could read the CFO's private working
+# memory by asking nicely, and draft isolation that a prompt can talk its way
+# past is not isolation. Empty (the default) means no drafts are visible at all.
+PERSONA = os.environ.get("LBRAIN_PERSONA", "").strip()
+
+
+def _envelope(cfg, requested_mode=None, requested_seal=None):
+    """Disclosure envelope for one MCP call (lbrain/disclosure.py).
+
+    The CEILING comes from the environment; a tool argument may only NARROW it.
+    That is what lets a mode be a property of the REQUEST — the same agent
+    reviewing independently on Monday and collaboratively on Tuesday — without
+    becoming a control a model can lift by asking for it.
+    """
+    from . import disclosure as _d
+
+    asked = (
+        requested_mode is not None or requested_seal is not None
+        or "LBRAIN_DISCLOSURE" in os.environ or "LBRAIN_SEALED" in os.environ
+        or getattr(cfg, "allowed_doc_types", []) or getattr(cfg, "allowed_path_prefixes", [])
+        or getattr(cfg, "force_priority_only", False)
+    )
+    if not asked:
+        return None
+    return _d.resolve(cfg, requested_mode=requested_mode, requested_seal=requested_seal)
+
 
 @mcp.tool()
 def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_only: bool = False,
-               rerank: bool = False, recency: bool = False, serve_mode: str | None = None) -> str:
+               rerank: bool = False, recency: bool = False, serve_mode: str | None = None,
+               disclosure: str | None = None, sealed: str | None = None) -> str:
     """Search the user's own saved notes, documents, and past work — their persistent memory.
 
     Call this whenever the answer depends on something the user recorded earlier and that
@@ -57,6 +90,13 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
             coverage for precision. No-ops if the optional extra is not installed.
         recency: Set True when the question is time-sensitive ("what's the latest
             on X") so newer records rank higher.
+        disclosure: Blind YOURSELF for this request — "independent" (durable artifacts
+            only, no work-in-progress framing), "collaborative" (artifacts plus the
+            proposal), or "adversarial" (only the slugs named in `sealed`). This can
+            only make the view NARROWER than the session already allows; asking for a
+            wider one has no effect. Use it when you want a second opinion that is
+            genuinely uncontaminated by someone's framing.
+        sealed: With disclosure="adversarial", the slugs to disclose, comma-separated.
         serve_mode: Leave unset. "structured" (default) returns the attribution-bound
             record blocks described above; "prose" returns legacy one-line previews.
 
@@ -72,12 +112,17 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
     embedder = make_embedder(cfg)
     try:
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type,
-                      priority_only=priority_only, rerank=rerank, recency=recency)
+                      priority_only=priority_only, rerank=rerank, recency=recency,
+                      persona=PERSONA or None,
+                      envelope=_envelope(cfg, disclosure, sealed))
         mode, warn = resolve_mode(cfg, serve_mode)
         if mode == "structured":
             return warn + render_response(cfg, hits, query)
         kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
         out = []
+        blind = blinding_notice(hits)   # prose must disclose the blinding too
+        if blind:
+            out.append(blind + "\n")
         if kept:
             out.append(amp.UNTRUSTED_NOTICE)
         core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
@@ -112,7 +157,8 @@ def lair_search(query: str, k: int = 10) -> str:
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     try:
-        hits = keyword_only(store, query, k=k)
+        hits = keyword_only(store, query, k=k, persona=PERSONA or None,
+                            envelope=_envelope(cfg))
         mode, warn = resolve_mode(cfg, None)
         if mode == "structured":
             # Same record grammar as lair_query; no admissibility (keyword

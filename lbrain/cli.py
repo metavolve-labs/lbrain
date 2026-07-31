@@ -17,7 +17,7 @@ from .index import discover, parse
 from .lair_protocol import detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
-from .serve import fence_block, render_response, resolve_mode, sanitize_field
+from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
 from .store import Store
 
 
@@ -319,6 +319,107 @@ def add_source(path: str):
         click.echo(f"  Already a source: {p}")
 
 
+def warn_if_unprovisioned() -> str:
+    """Warn — loudly — when a READ runs against a home that was never provisioned.
+
+    Closes the router lane's A-425. `LBRAIN_HOME=<typo> lbrain stats` used to
+    mint a fresh empty brain and answer `docs: 0`, exit 0, in silence. Under the
+    persona architecture a brain is selected BY THAT ENV VAR, so one typo turns a
+    specialist into a **confident amnesiac**: an agent that fluently reports "I
+    have no records" instead of erroring. That is doctrine rule 9's shape
+    (*defaults must be empty and fail-loud, never plausible*) displaced from an
+    identifier onto a home path — the var is an opaque string that nothing ever
+    dereferences against a real brain.
+
+    Warns rather than refuses: a genuinely fresh install is the same state, and
+    breaking first-run onboarding to catch a typo is the worse trade. Returns the
+    message (empty when provisioned) so callers can test it without capturing
+    stderr.
+    """
+    import os
+
+    if CONFIG_PATH.exists():
+        return ""
+    chosen = os.environ.get("LBRAIN_HOME")
+    msg = (
+        f"⚠️  {CONFIG_DIR} has no config.toml — this brain is UNPROVISIONED and will "
+        f"answer as if it simply knows nothing.\n"
+        + (f"   LBRAIN_HOME is set to {chosen!r}. If that is a typo you are talking to an "
+           "empty brain, not the one you meant.\n" if chosen else "")
+        + "   Provision it: lbrain init --source <dir>"
+    )
+    click.secho(msg, fg="yellow", err=True)
+    return msg
+
+
+def _resolve_envelope(cfg, disclosure: str | None, sealed: str | None):
+    """The effective disclosure envelope for one CLI invocation.
+
+    Returns None when NOTHING about disclosure was asked for — no env ceiling, no
+    flag, and no standing permissions in config. That keeps an ordinary install
+    on exactly its pre-existing code path rather than routing it through a filter
+    that happens to admit everything; "inert by construction" is easier to prove
+    than "inert by arithmetic".
+    """
+    import os
+
+    from . import disclosure as _d
+
+    asked = (
+        disclosure is not None
+        or sealed is not None
+        or "LBRAIN_DISCLOSURE" in os.environ
+        or "LBRAIN_SEALED" in os.environ
+        or getattr(cfg, "allowed_doc_types", [])
+        or getattr(cfg, "allowed_path_prefixes", [])
+        or getattr(cfg, "force_priority_only", False)
+    )
+    if not asked:
+        return None
+    return _d.resolve(cfg, requested_mode=disclosure, requested_seal=sealed)
+
+
+def _project_belief(store, doc) -> int:
+    """Keep the beliefs table in step with a doc's frontmatter. Returns 1 if the
+    doc is a belief, else 0 (and clears any stale projection).
+
+    Called on BOTH import branches. A belief's whole lifecycle lives in
+    frontmatter, so the "body unchanged" path is the common case for a
+    promotion — missing it there is how the feature would look broken.
+    """
+    from . import beliefs as _b
+
+    b = _b.from_doc(doc)
+    if b is None:
+        # Fail CLOSED on unreadable metadata. A malformed YAML block makes
+        # `parse` return doc_type="" — indistinguishable, to this function, from
+        # an author deliberately removing `type: belief`. Deleting the projection
+        # on that basis silently strips a RETRACTED belief of its burial and its
+        # marking, turning a known-wrong record back into an ordinary document
+        # that ranks on equal terms. Observed 2026-07-31 (anomaly A-430) when a
+        # one-character YAML indent error did exactly that.
+        if not getattr(doc, "metadata_ok", True) and store.belief_row_for_path(doc.rel_path):
+            print(
+                f"[lbrain] WARNING: {doc.rel_path} is a known belief whose frontmatter no "
+                "longer parses — KEEPING its last known state. Fix the YAML.",
+                file=sys.stderr,
+            )
+            return 1
+        store.delete_belief_for_path(doc.rel_path)
+        return 0
+    store.replace_belief(
+        {
+            "belief_id": b.belief_id, "rel_path": b.rel_path, "persona": b.persona,
+            "state": b.state, "subject": b.subject, "claim": b.claim,
+            "confidence": b.confidence, "impact": b.impact, "created": b.created,
+            "promoted_at": b.promoted_at, "verify_by": b.verify_by,
+            "countersigned_by": b.countersigned_by,
+        },
+        [(e.ref, e.kind, e.verified) for e in b.evidence],
+    )
+    return 1
+
+
 @main.command(name="import")
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--prune/--no-prune", default=True, help="Drop docs no longer on disk")
@@ -337,6 +438,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
     updated_docs = 0
     unchanged_docs = 0
     meta_refreshed = 0   # frontmatter changed, body did not (A-401)
+    beliefs_seen = 0
     total_chunks = 0
 
     for src in sources:
@@ -363,6 +465,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
                     else:
                         unchanged_docs += 1
                     store.replace_supersessions(doc)
+                    # Belief state lives ENTIRELY in frontmatter, so a promotion
+                    # changes no chunk and would land in exactly this branch. If
+                    # the projection were only refreshed on a body edit, a
+                    # promoted belief would stay invisible until someone happened
+                    # to edit its prose — i.e. the gate would appear to do nothing.
+                    beliefs_seen += _project_belief(store, doc)
                     continue
                 if existing_hash is None:
                     new_docs += 1
@@ -372,6 +480,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
                 store.upsert_doc(doc)
                 store.replace_supersessions(doc)
                 store.replace_wikilinks(doc)
+                beliefs_seen += _project_belief(store, doc)
                 chunks = chunk_doc(
                     doc,
                     max_tokens=cfg.chunk_tokens,
@@ -397,7 +506,8 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
     click.secho(
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
         f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
-        + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else ""),
+        + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else "")
+        + (f", beliefs: {beliefs_seen}" if beliefs_seen else ""),
         fg="green",
     )
     if pruned:
@@ -507,9 +617,17 @@ def embed(stale: bool, batch: int):
 @click.option("--recency", is_flag=True, help="Bounded mtime-freshness lift (for 'latest on X' queries)")
 @click.option("--mode", "serve_mode", default=None, type=click.Choice(["structured", "prose"]),
               help="Serving mode: structured (attribution-bound records) or prose (legacy). Default: config serve_mode.")
+@click.option("--persona", default=None,
+              help="Ask as this agent: its own DRAFT beliefs become visible. Omit and no drafts are.")
+@click.option("--disclosure", default=None,
+              type=click.Choice(["adversarial", "independent", "collaborative", "full"]),
+              help="Blinding mode for THIS request. May only NARROW the LBRAIN_DISCLOSURE ceiling.")
+@click.option("--sealed", default=None,
+              help="Adversarial mode: comma/space-separated slugs to disclose. Narrows only.")
 def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool, recency: bool,
-          serve_mode: str | None):
+          serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None):
     """Semantic + keyword hybrid search across the brain."""
+    warn_if_unprovisioned()
     cfg = Config.load()
     if getattr(cfg, "amp_gating", True):
         ok, reason = amp.gate(query, getattr(cfg, "amp_min_chars", 12))
@@ -520,8 +638,9 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
     embedder = make_embedder(cfg)
     try:
         t0 = time.monotonic()
+        envelope = _resolve_envelope(cfg, disclosure, sealed)
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
-                      rerank=rerank, recency=recency)
+                      rerank=rerank, recency=recency, persona=persona, envelope=envelope)
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, serve_mode)
         if warn:
@@ -537,6 +656,9 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         # least fenced. Our own CLAUDE.md tells agents to shell out to
         # `lbrain query`, so this output lands straight in an agent's context;
         # \x1b also reached a human's terminal intact. Red-team 2026-07-28, #5.
+        blind = blinding_notice(hits)   # prose must disclose the blinding too
+        if blind:
+            click.secho(blind + "\n", fg="yellow")
         if kept:
             click.secho(amp.UNTRUSTED_NOTICE, fg="red")
 
@@ -567,13 +689,21 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
 @main.command()
 @click.argument("query")
 @click.option("-k", default=10, type=int)
-def search_cmd(query: str, k: int):
+@click.option("--persona", default=None,
+              help="Ask as this agent: its own DRAFT beliefs become visible. Omit and no drafts are.")
+@click.option("--disclosure", default=None,
+              type=click.Choice(["adversarial", "independent", "collaborative", "full"]),
+              help="Blinding mode for THIS request. May only NARROW the LBRAIN_DISCLOSURE ceiling.")
+@click.option("--sealed", default=None, help="Adversarial mode: slugs to disclose. Narrows only.")
+def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None):
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
+    warn_if_unprovisioned()
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     try:
         t0 = time.monotonic()
-        hits = keyword_only(store, query, k=k)
+        hits = keyword_only(store, query, k=k, persona=persona,
+                            envelope=_resolve_envelope(cfg, disclosure, sealed))
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, None)
         if warn:
@@ -584,6 +714,9 @@ def search_cmd(query: str, k: int):
                                        include_core=False, include_provenance=False,
                                        hits_label="keyword hits"))
             return
+        blind = blinding_notice(hits)
+        if blind:
+            click.secho(blind + "\n", fg="yellow")
         if hits:
             click.secho(amp.UNTRUSTED_NOTICE, fg="red")
         click.secho(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", fg="cyan")
@@ -601,6 +734,7 @@ main.add_command(search_cmd, name="search")
 @main.command()
 def stats():
     """Show brain statistics."""
+    warn_if_unprovisioned()  # `lbrain stats` is where A-425 was observed
     cfg = Config.load()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     s = store.stats()
@@ -677,6 +811,7 @@ def mcp(transport: str, host: str, port: int):
     streamable-http    — for remote autonomous agents (containerized deployments).
     sse                — legacy SSE transport.
     """
+    warn_if_unprovisioned()  # A-425: an MCP server on an empty home is a confident amnesiac
     from .mcp_server import serve
 
     serve(transport=transport, host=host, port=port)
@@ -940,10 +1075,6 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
     if decidable:
         raise SystemExit(1)
 
-if __name__ == "__main__":
-    main()
-
-
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def whoami(as_json: bool):
@@ -1050,3 +1181,266 @@ def resolve(name: str, gateway: str, graphql: str, out: str, quiet: bool):
             click.echo(f"    │ {ln[:96]}")
         click.echo(f"    │ … ({len(r.content):,} bytes — use --out FILE or --quiet)")
     raise SystemExit(0 if ok else 1)
+
+
+# ==========================================================================
+# beliefs — per-agent memory that accumulates without contaminating shared truth
+# ==========================================================================
+
+
+def _beliefs_dir(cfg) -> Path:
+    d = getattr(cfg, "beliefs_dir", "") or ""
+    return Path(d).expanduser() if d else (CONFIG_DIR / "beliefs")
+
+
+def _belief_path(cfg, store, slug: str) -> Path | None:
+    """Absolute path of a belief's source FILE.
+
+    Resolved through the docs table (abs_path) rather than reconstructed from
+    the beliefs dir: a belief may legitimately live anywhere in the corpus, and
+    guessing its location would edit the wrong file — or none — while reporting
+    success.
+    """
+    row = store.belief_row(slug)
+    if row is None:
+        return None
+    d = store.db.execute(
+        "SELECT abs_path FROM docs WHERE rel_path = ?", (row["rel_path"],)
+    ).fetchone()
+    return Path(d["abs_path"]) if d else None
+
+
+def _rewrite_frontmatter(path: Path, updates: dict) -> None:
+    """Apply frontmatter changes in place, preserving the body byte-for-byte.
+
+    The FILE is the source of truth (corpus hierarchy: sources authoritative,
+    index derivative), so every state transition must land here. Writing only
+    the DB projection would produce a promotion that vanishes on the next
+    `lbrain import` — a change that looks applied and is not.
+    """
+    import frontmatter
+
+    post = frontmatter.load(str(path))
+    for k, v in updates.items():
+        if v is None:
+            post.metadata.pop(k, None)
+        else:
+            post.metadata[k] = v
+    path.write_text(frontmatter.dumps(post) + "\n", encoding="utf-8")
+
+
+def _open_store(cfg):
+    return Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+
+
+@main.group()
+def belief():
+    """Per-agent beliefs: draft in private, promote through a gate, retract without deleting."""
+    warn_if_unprovisioned()
+
+
+@belief.command(name="new")
+@click.argument("slug")
+@click.option("--persona", required=True, help="Which agent is claiming this.")
+@click.option("--subject", required=True, help="Topic key — drives contradiction detection (G5).")
+@click.option("--claim", required=True, help="The claim, in one sentence.")
+@click.option("--evidence", multiple=True,
+              help="A citation. Repeatable. [[slug]] for corpus, https://… for external.")
+@click.option("--confidence", type=click.Choice(["low", "medium", "high"]), default="medium")
+@click.option("--impact", type=click.Choice(["observation", "analysis", "action"]), default="analysis")
+@click.option("--verify-by", default="", help="ISO date this claim should be re-checked.")
+def belief_new(slug, persona, subject, claim, evidence, confidence, impact, verify_by):
+    """Write a new DRAFT belief. Private to its persona until it passes the gate."""
+    cfg = Config.load()
+    d = _beliefs_dir(cfg) / persona
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{slug}.md"
+    if path.exists():
+        click.secho(f"✗ {path} already exists — edit it, or supersede it with a new slug.", fg="red")
+        sys.exit(1)
+
+    import datetime
+
+    lines = [
+        "---", f"name: {slug}", "type: belief", f"persona: {persona}",
+        "state: draft", f"subject: {subject}", f"claim: {claim!r}",
+        f"confidence: {confidence}", f"impact: {impact}",
+        f"created: {datetime.date.today().isoformat()}",
+    ]
+    if verify_by:
+        lines.append(f"verify_by: {verify_by}")
+    lines.append("evidence:")
+    for e in evidence:
+        lines.append(f"  - {e!r}")
+    lines += ["---", "", f"# {slug}", "", claim, ""]
+    path.write_text("\n".join(lines), encoding="utf-8")
+    click.secho(f"✓ draft belief written: {path}", fg="green")
+    if not evidence:
+        click.secho("  ⚠️  no evidence cited — this cannot pass G1/G6 until it has some.", fg="yellow")
+
+    # Do NOT auto-append to cfg.sources. Rewriting a live brain's source list
+    # without being asked is the 2026-07-27 incident; warn instead.
+    covered = any(str(path.resolve()).startswith(str(Path(s).resolve())) for s in cfg.sources)
+    if not covered:
+        click.secho(
+            f"  ⚠️  {d} is not an indexed source — this belief is invisible to retrieval.\n"
+            f"     Run: lbrain add-source {_beliefs_dir(cfg)} && lbrain import && lbrain embed --stale",
+            fg="yellow",
+        )
+    else:
+        click.echo("  next: lbrain import && lbrain embed --stale")
+
+
+@belief.command(name="list")
+@click.option("--persona", default=None, help="Only this agent's beliefs.")
+@click.option("--state", default=None,
+              type=click.Choice(["draft", "promoted", "retracted", "needs_review"]))
+def belief_list(persona, state):
+    """List beliefs and their lifecycle state."""
+    cfg = Config.load()
+    store = _open_store(cfg)
+    try:
+        rows = [
+            r for r in store.belief_rows()
+            if (persona is None or r["persona"] == persona)
+            and (state is None or r["state"] == state)
+        ]
+        if not rows:
+            click.echo("  (no beliefs)")
+            return
+        for r in rows:
+            colour = {"draft": "yellow", "promoted": "green",
+                      "retracted": "red", "needs_review": "magenta"}.get(r["state"], "white")
+            click.secho(f"  {r['state']:<13}", fg=colour, nl=False)
+            click.echo(
+                f"{r['belief_id']}  [{r['persona'] or '?'}]  subject={r['subject'] or '-'}"
+            )
+    finally:
+        store.close()
+
+
+@belief.command(name="gate")
+@click.argument("slug")
+def belief_gate(slug):
+    """Run the promotion gate WITHOUT promoting. Prints every check and its reason."""
+    from . import beliefs as _b
+
+    cfg = Config.load()
+    store = _open_store(cfg)
+    try:
+        view = _b.StoreCorpusView(store)
+        b = view.beliefs.get(slug)
+        if b is None:
+            click.secho(f"✗ no belief '{slug}' in the brain (did you `lbrain import`?)", fg="red")
+            sys.exit(1)
+        res = _b.gate(b, view)
+        for c in res.checks:
+            click.secho(f"  {'PASS' if c.passed else 'FAIL'}  {c.code:<4}", 
+                        fg=("green" if c.passed else "red"), nl=False)
+            click.echo(c.detail)
+        click.echo(f"  roots={len(res.roots)}  depth={'-' if res.depth is None else res.depth}")
+        click.secho(
+            "  → PROMOTABLE" if res.passed else "  → BLOCKED",
+            fg=("green" if res.passed else "red"), bold=True,
+        )
+        sys.exit(0 if res.passed else 1)
+    finally:
+        store.close()
+
+
+@belief.command(name="promote")
+@click.argument("slug")
+def belief_promote(slug):
+    """Promote a draft into shared truth — only if all gate checks pass."""
+    import datetime
+
+    from . import beliefs as _b
+
+    cfg = Config.load()
+    store = _open_store(cfg)
+    try:
+        view = _b.StoreCorpusView(store)
+        b = view.beliefs.get(slug)
+        if b is None:
+            click.secho(f"✗ no belief '{slug}' in the brain.", fg="red")
+            sys.exit(1)
+        if b.state == _b.STATE_PROMOTED:
+            click.echo(f"  already promoted ({b.promoted_at or 'date not recorded'})")
+            return
+        res = _b.gate(b, view)
+        if not res.passed:
+            click.secho(f"✗ {slug} is not promotable:", fg="red")
+            for c in res.failures:
+                click.echo(f"    {c.code}  {c.detail}")
+            sys.exit(1)
+        path = _belief_path(cfg, store, slug)
+        if path is None or not path.exists():
+            click.secho(f"✗ source file for '{slug}' is missing — cannot record the promotion.", fg="red")
+            sys.exit(1)
+        today = datetime.date.today().isoformat()
+        _rewrite_frontmatter(path, {"state": _b.STATE_PROMOTED, "promoted_at": today})
+        with store.transaction():
+            store.set_belief_state(slug, _b.STATE_PROMOTED, today)
+        click.secho(f"✓ promoted {slug} — {len(res.roots)} distinct root(s), depth {res.depth}", fg="green")
+        click.echo(f"  file updated: {path}")
+    finally:
+        store.close()
+
+
+@belief.command(name="retract")
+@click.argument("slug")
+@click.option("--reason", required=True, help="Why it was wrong. This is the negative example — say it plainly.")
+def belief_retract(slug, reason):
+    """Withdraw a belief. It stays retrievable and buried; dependants are flagged for review."""
+    import datetime
+
+    from . import beliefs as _b
+
+    cfg = Config.load()
+    store = _open_store(cfg)
+    try:
+        view = _b.StoreCorpusView(store)
+        b = view.beliefs.get(slug)
+        if b is None:
+            click.secho(f"✗ no belief '{slug}' in the brain.", fg="red")
+            sys.exit(1)
+        today = datetime.date.today().isoformat()
+        path = _belief_path(cfg, store, slug)
+        if path is None or not path.exists():
+            click.secho(f"✗ source file for '{slug}' is missing — cannot record the retraction.", fg="red")
+            sys.exit(1)
+        _rewrite_frontmatter(
+            path, {"state": _b.STATE_RETRACTED, "retracted_at": today, "retracted_because": reason}
+        )
+        targets = _b.cascade_targets(slug, view.beliefs.values())
+        with store.transaction():
+            store.set_belief_state(slug, _b.STATE_RETRACTED, b.promoted_at)
+            for t in targets:
+                tp = _belief_path(cfg, store, t)
+                if tp and tp.exists():
+                    _rewrite_frontmatter(
+                        tp, {"state": _b.STATE_NEEDS_REVIEW, "review_because": f"rests on retracted {slug}"}
+                    )
+                store.set_belief_state(t, _b.STATE_NEEDS_REVIEW, "")
+        click.secho(f"✓ retracted {slug} — kept and buried, not deleted.", fg="yellow")
+        # Cascade REPAIR, not cascade delete: flagging is reversible, auto-retracting
+        # a graph is not (doctrine rule 7). The list is the finding; a human decides.
+        if targets:
+            click.secho(f"  {len(targets)} dependant belief(s) flagged needs_review:", fg="magenta")
+            for t in targets:
+                click.echo(f"    {t}")
+        else:
+            click.echo("  nothing else rested on it.")
+    finally:
+        store.close()
+
+
+# The `python -m lbrain.cli` entry point. MUST stay the last statement in this
+# file: it used to sit mid-module (line 943 at d58b45f), so main() was dispatched
+# before the rest of the file had been executed and EVERY command defined below it
+# was silently absent — `whoami`, `resolve`, the archive group and (as written)
+# `belief`. `lbrain <cmd>` worked, `python -m lbrain.cli <cmd>` answered "No such
+# command", which reads as a missing feature rather than a loading order. Anomaly
+# A-429; guarded by tests/test_beliefs.py::test_every_command_is_reachable_via_python_m.
+if __name__ == "__main__":
+    main()

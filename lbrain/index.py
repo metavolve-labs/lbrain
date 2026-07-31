@@ -45,7 +45,17 @@ class Doc:
     doc_hash: str = ""
     mtime: float = 0.0
     is_priority: bool = False
-    doc_type: str = ""  # user/feedback/project/reference, from frontmatter
+    doc_type: str = ""  # user/feedback/project/reference/belief, from frontmatter
+    # False when the YAML block failed to parse. Callers that DERIVE state from
+    # frontmatter must distinguish "this document says nothing" from "this
+    # document's metadata is unreadable" — they are opposite facts, and treating
+    # the second as the first silently discards state (see cli._project_belief).
+    metadata_ok: bool = True
+    # Disclosure class (lbrain/disclosure.py): artifact | proposal | private.
+    # '' = unclassified, which every blinding mode WITHHOLDS. An unrecognised
+    # value is normalised to '' rather than trusted: a class nobody defined
+    # cannot be proven safe to disclose.
+    disclosure: str = ""
 
     @property
     def name_slug(self) -> str:
@@ -134,16 +144,20 @@ def discover(roots: list[Path]) -> list[Path]:
 
 def parse(path: Path, repo_root: Path | None = None) -> Doc:
     text = path.read_text(encoding="utf-8", errors="replace")
+    metadata_ok = True
     try:
         post = frontmatter.loads(text)
         body = post.content
         meta = dict(post.metadata)
     except Exception as e:
+        metadata_ok = False
         # Malformed YAML silently strips ALL of a doc's metadata (type, supersedes,
         # name) — warn so the doc doesn't vanish from type filters / supersession
         # logic without anyone noticing.
-        import sys
-
+        # NOTE: no local `import sys` here. It bound `sys` as a function-local for
+        # the WHOLE of parse(), so the module-level import became invisible and any
+        # later sys.stderr use raised UnboundLocalError — on the error path only,
+        # which is the path least likely to be exercised.
         print(f"[lbrain] WARNING: frontmatter parse failed for {path}: {e}", file=sys.stderr)
         body = text
         meta = {}
@@ -172,6 +186,28 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     elif "type" in meta:
         doc_type = str(meta["type"])
 
+    # Disclosure class. Accepted at the top level or nested under `metadata:`,
+    # matching how `type:` is already written in this corpus. Unknown values fall
+    # to '' (withheld under blinding) rather than being passed through — an
+    # author's typo must not mint a class the filter has never heard of and
+    # therefore cannot reason about.
+    from .disclosure import CLASSES as _DISCLOSURE_CLASSES
+
+    raw_disclosure = ""
+    if isinstance(meta.get("metadata"), dict) and meta["metadata"].get("disclosure"):
+        raw_disclosure = str(meta["metadata"]["disclosure"])
+    elif meta.get("disclosure"):
+        raw_disclosure = str(meta["disclosure"])
+    disclosure = raw_disclosure.strip().lower()
+    if disclosure and disclosure not in _DISCLOSURE_CLASSES:
+        print(
+            f"[lbrain] WARNING: {path} declares disclosure: {raw_disclosure!r}, which is not "
+            f"one of {'/'.join(_DISCLOSURE_CLASSES)} — treating it as UNCLASSIFIED "
+            "(withheld under any blinding mode).",
+            file=sys.stderr,
+        )
+        disclosure = ""
+
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
     # Split on BOTH separators: on Windows `rel` is "P5-X\000-PRIORITY-Y\LAIR.md",
     # so rel.split("/") returned the whole string as one element and the
@@ -194,6 +230,8 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         mtime=path.stat().st_mtime,
         is_priority=is_priority,
         doc_type=doc_type,
+        metadata_ok=metadata_ok,
+        disclosure=disclosure,
     )
 
 

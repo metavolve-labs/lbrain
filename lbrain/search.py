@@ -4,6 +4,7 @@ then a few cheap, bounded signal boosts (priority, wikilink graph, supersession)
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
 
 from .config import Config
@@ -87,6 +88,132 @@ def canonical_slug(target: str) -> str:
     return stem
 
 
+class HitList(list):
+    """A list of Hit that also carries what the disclosure envelope REMOVED.
+
+    A plain `list` subclass on purpose: every existing caller — serve, amp,
+    rerank, the CLI, the MCP tools — keeps working untouched, while a caller that
+    wants to report blinding can read `.withheld`. Threading an out-parameter
+    through six call sites to move one integer would have been the larger change
+    and the easier one to forget at a site.
+
+    The integer is not cosmetic. An agent handed a silently-thinned corpus does
+    not conclude "I am missing context" — it answers confidently from what is
+    left. Withholding has to be *legible* or blinding becomes a confabulation
+    engine, which is the A-430 shape pointed the other way.
+    """
+
+    withheld = None   # disclosure.Withheld | None
+    envelope = None   # disclosure.Envelope | None
+
+    @classmethod
+    def of(cls, hits, withheld=None, envelope=None) -> "HitList":
+        out = cls(hits)
+        out.withheld = withheld
+        out.envelope = envelope
+        return out
+
+
+def apply_disclosure(store: Store, hits: list, envelope) -> tuple[list, object]:
+    """Run hits through the disclosure envelope (lbrain/disclosure.py).
+
+    Called from BOTH retrieval paths, like apply_belief_visibility, and for the
+    same reason: a disclosure control enforced on one path is not a control. That
+    lesson is already paid for — the SUPERSEDED badge was invisible on the
+    keyword path for weeks (A-410), and this leaks corpus rather than a badge.
+    """
+    from . import disclosure as _d
+
+    if envelope is None:
+        return hits, None
+    return _d.apply(hits, store.disclosure_classes(), store.belief_states(), envelope)
+
+
+def check_persona(store: Store, persona: str | None) -> str:
+    """Warn — once — when `persona` matches no belief author. Returns the message.
+
+    Wrong values fail CLOSED, which is correct, but they fail closed **silently**:
+    `LBRAIN_PERSONA=CTO` sees nothing, and the author concludes their beliefs were
+    lost rather than that they mistyped their own name. Recommended by the router
+    lane after they proved the closure adversarially (12 hostile values, all
+    hidden, each with a negative control).
+
+    Warn rather than case-fold, deliberately. Case-folding invents an equivalence
+    nobody asked for — personas could legitimately be case-distinct — whereas a
+    notice surfaces the typo and asserts nothing about identity.
+    """
+    if not persona:
+        return ""
+    known = store.belief_personas()
+    if not known or persona in known:
+        return ""
+    msg = (
+        f"⚠️  persona {persona!r} has authored no beliefs in this brain "
+        f"(known: {', '.join(sorted(known))}). You will see NO drafts. "
+        "Matching is exact and case-sensitive."
+    )
+    if not getattr(check_persona, "_warned", set()) or persona not in check_persona._warned:
+        check_persona._warned = getattr(check_persona, "_warned", set()) | {persona}
+        print(f"[lbrain] {msg}", file=sys.stderr)
+    return msg
+
+
+def apply_belief_visibility(
+    store: Store, hits: list[Hit], persona: str | None, *, rank: bool, penalty: float = 0.25
+) -> list[Hit]:
+    """Draft isolation + lifecycle marking for per-agent beliefs (lbrain/beliefs.py).
+
+    Applied on BOTH retrieval paths. Splitting disclosure across ranked and
+    keyword search is how the SUPERSEDED badge went missing from one of them for
+    weeks (A-410) — and a leak here is worse than a missing badge, because it
+    hands one persona another's unreviewed speculation as if it were corpus.
+
+    - ``draft``        → DROPPED unless ``persona`` is its author. With
+                         ``persona=None`` (every call that predates this layer)
+                         no draft is visible to anyone, so existing behaviour on
+                         a corpus with no beliefs is bit-identical.
+    - ``retracted``    → kept and buried, never deleted: the correction is only
+                         legible next to what it corrected, and deleting the
+                         negative example means the agent regenerates the error.
+    - ``needs_review`` → flagged only. It was not withdrawn; something it rests
+                         on was. Penalising it would be an unmeasured ranking
+                         change (doctrine rule 4), so we say so and let the
+                         reader judge.
+    - ``promoted``     → flagged, so a reader can tell an agent's conclusion from
+                         an observation. That distinction is the entire point.
+
+    ``rank=False`` (keyword path) marks without touching score, matching how
+    supersession is annotated there — but the draft DROP still applies, because
+    that is disclosure control, not ranking.
+    """
+    if not hits:
+        return hits
+    states = store.belief_states()
+    if not states:
+        return hits
+    out: list[Hit] = []
+    for h in hits:
+        entry = states.get(h.rel_path)
+        if entry is None:
+            out.append(h)
+            continue
+        author, state = entry
+        if state == "draft":
+            if not persona or author != persona:
+                continue  # another agent's private working memory — not corpus
+            h.boosts["draft"] = 1.0
+        elif state == "retracted":
+            if rank:
+                h.score *= penalty
+            h.boosts["retracted"] = penalty if rank else 1.0
+        elif state == "needs_review":
+            h.boosts["needs_review"] = 1.0
+        elif state == "promoted":
+            h.boosts["belief"] = 1.0
+        out.append(h)
+    return out
+
+
 def _is_abstraction(h: Hit) -> bool:
     """type: abstraction awareness. doc_type when the importer captured it;
     filename convention as fallback (verified 2026-07-11: 10/50 live abstraction
@@ -146,6 +273,8 @@ def search(
     priority_only: bool = False,
     rerank: bool = False,
     recency: bool = False,
+    persona: str | None = None,
+    envelope=None,
 ) -> list[Hit]:
     """Hybrid: vector top-N + BM25 top-N → RRF merge → always-on boosts → top-k.
 
@@ -158,7 +287,32 @@ def search(
       rerank=True  — cross-encoder precision pass over the head; use for PRECISE/
                      known-item lookups. Do NOT use for broad/exploratory queries (it
                      hurts multi-doc coverage). No-ops without the lbrain[rerank] backend.
+
+    ``persona`` names the agent asking. It controls DRAFT BELIEF visibility only
+    (see apply_belief_visibility): an agent sees its own working memory and no
+    one else's. Default None = no drafts at all, so nothing about a corpus
+    without beliefs changes.
+
+    ``envelope`` is a disclosure.Envelope (standing permissions + the per-request
+    blinding mode). Default None = no disclosure control, i.e. the behaviour that
+    predates this layer. Returns a HitList carrying `.withheld` whenever an
+    envelope was applied, so the caller can report the blinding rather than serve
+    a silently-thinned corpus.
     """
+    # 0. Standing scope, before any retrieval work. A caller asking for a
+    #    doc_type outside its allowlist gets NOTHING — not everything. A filter
+    #    that widens when it cannot be satisfied is how scope becomes decorative,
+    #    which is exactly what A-428 found.
+    if envelope is not None:
+        from . import disclosure as _d
+
+        doc_type, ok = _d.narrow_doc_type(doc_type, envelope)
+        if not ok:
+            refused = _d.Withheld()
+            refused.by_permission = 1
+            refused.total = 1
+            return HitList.of([], withheld=refused, envelope=envelope)
+
     over_k = max(k * 4, 40)
     # When abstraction serving is capped, deepen the candidate pool: in an
     # abstraction-dense corpus the SQL-level top-N cut fills with abstraction
@@ -252,6 +406,18 @@ def search(
             h.boosts["priority"] = cfg.priority_boost
         out.append(h)
 
+    # 4.5 Belief visibility — draft isolation first, so another persona's private
+    #     working memory can never reach a boost, the budget, or the reader.
+    check_persona(store, persona)
+    out = apply_belief_visibility(
+        store, out, persona, rank=True, penalty=getattr(cfg, "supersede_penalty", 0.25)
+    )
+
+    # 4.6 Disclosure envelope — standing permissions, then the per-request
+    #     blinding. Before every boost and before the budget, so a withheld
+    #     record cannot influence ranking or consume a slot it will not fill.
+    out, withheld = apply_disclosure(store, out, envelope)
+
     # 5. Wikilink graph boost — if a hit is wikilinked-to by another hit, lift it
     if out:
         # Count inbound links in the NORMALIZED slug space. Stored targets are raw
@@ -320,14 +486,27 @@ def search(
 
     # 8. Abstraction-aware final assembly: recency guardrail + top-k density cap.
     #    Applied LAST so the guarantees hold regardless of boosts or rerank.
-    return _assemble_topk(out, k, cfg, query, recency)
+    return HitList.of(
+        _assemble_topk(out, k, cfg, query, recency), withheld=withheld, envelope=envelope
+    )
 
 
-def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
-    """Pure FTS5 keyword search. No embedding required."""
+def keyword_only(
+    store: Store, query: str, k: int = 10, persona: str | None = None, envelope=None
+) -> list[Hit]:
+    """Pure FTS5 keyword search. No embedding required.
+
+    Enforces the SAME disclosure envelope as the ranked path. If it did not, the
+    control would have a documented bypass reachable by one tool call.
+    """
     fts_query = _fts_query(query)
     if not fts_query:
-        return []
+        return HitList.of([], envelope=envelope)
+    # Over-fetch ONLY when beliefs exist: dropping another persona's drafts after
+    # a LIMIT k would silently return fewer than k results, so isolation would
+    # look like poor recall. With no beliefs the query and its result are
+    # unchanged, which keeps the pre-existing behaviour exactly.
+    fetch = k * 4 if (store.belief_states() or envelope is not None) else k
     rows = store.db.execute(
         "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
         "       d.title, d.is_priority, d.doc_type, d.mtime "
@@ -337,7 +516,7 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
         "WHERE fts_chunks MATCH ? "
         "ORDER BY rank "
         "LIMIT ?",
-        (fts_query, k),
+        (fts_query, fetch),
     ).fetchall()
     hits = [
         Hit(
@@ -366,7 +545,13 @@ def keyword_only(store: Store, query: str, k: int = 10) -> list[Hit]:
         for h in hits:
             if _basename_slug(h.rel_path) in superseded:
                 h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
-    return hits
+    # Draft isolation is disclosure control, so it applies here too — the keyword
+    # path must not be a way around it. Marking only (rank=False): keyword search
+    # stays rank-by-FTS-relevance, exactly as it does for supersession above.
+    check_persona(store, persona)
+    hits = apply_belief_visibility(store, hits, persona, rank=False)
+    hits, withheld = apply_disclosure(store, hits, envelope)
+    return HitList.of(hits[:k], withheld=withheld, envelope=envelope)
 
 
 def _fts_query(q: str) -> str:

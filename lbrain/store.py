@@ -21,7 +21,13 @@ CREATE TABLE IF NOT EXISTS docs (
     mtime    REAL NOT NULL,
     is_priority INTEGER NOT NULL DEFAULT 0,
     doc_type TEXT NOT NULL DEFAULT '',
-    metadata TEXT NOT NULL DEFAULT '{}'
+    metadata TEXT NOT NULL DEFAULT '{}',
+    -- Disclosure class from frontmatter (lbrain/disclosure.py): artifact |
+    -- proposal | private. A COLUMN rather than a read through `metadata`,
+    -- because the blinding filter touches every candidate on every query and
+    -- JSON-parsing ~2,000 metadata blobs per query is not a filter, it is a
+    -- tax. '' = unclassified, which every blinding mode withholds.
+    disclosure TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -51,6 +57,35 @@ CREATE TABLE IF NOT EXISTS supersessions (
     FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
 
+-- Per-agent beliefs (lbrain/beliefs.py). A belief IS a markdown doc — this table
+-- is a PROJECTION of its frontmatter, kept queryable so retrieval can filter on
+-- author and lifecycle without re-parsing files. Source of truth stays the file,
+-- per the corpus hierarchy: delete the file, re-import, and the row cascades away.
+CREATE TABLE IF NOT EXISTS beliefs (
+    belief_id   TEXT PRIMARY KEY,
+    rel_path    TEXT NOT NULL UNIQUE,
+    persona     TEXT NOT NULL DEFAULT '',
+    state       TEXT NOT NULL DEFAULT 'draft',
+    subject     TEXT NOT NULL DEFAULT '',
+    claim       TEXT NOT NULL DEFAULT '',
+    confidence  TEXT NOT NULL DEFAULT '',
+    impact      TEXT NOT NULL DEFAULT '',
+    created     TEXT NOT NULL DEFAULT '',
+    promoted_at TEXT NOT NULL DEFAULT '',
+    verify_by   TEXT NOT NULL DEFAULT '',
+    countersigned_by TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (rel_path) REFERENCES docs(rel_path) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS belief_evidence (
+    belief_id TEXT NOT NULL,
+    ref       TEXT NOT NULL,
+    kind      TEXT NOT NULL,          -- 'link' | 'external' (syntactic, not resolved)
+    verified  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (belief_id, ref),
+    FOREIGN KEY (belief_id) REFERENCES beliefs(belief_id) ON DELETE CASCADE
+);
+
 -- Key/value metadata. Records the embedding fingerprint (dim/model/provider) the
 -- vectors were built with, so a later config change can't silently corrupt the space.
 CREATE TABLE IF NOT EXISTS meta (
@@ -61,6 +96,8 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE INDEX IF NOT EXISTS idx_wikilinks_tgt ON wikilinks(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_supersessions_tgt ON supersessions(tgt_slug);
 CREATE INDEX IF NOT EXISTS idx_chunks_embedded ON chunks(embedded);
+CREATE INDEX IF NOT EXISTS idx_beliefs_state ON beliefs(state);
+CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
 """
 
 
@@ -122,6 +159,9 @@ class Store:
         chunk_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(chunks)")}
         if "context" not in chunk_cols:
             self.db.execute("ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+        doc_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(docs)")}
+        if "disclosure" not in doc_cols:
+            self.db.execute("ALTER TABLE docs ADD COLUMN disclosure TEXT NOT NULL DEFAULT ''")
         self.db.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(embedding float[{embedding_dim}])"
         )
@@ -230,7 +270,7 @@ class Store:
         import json
 
         row = self.db.execute(
-            "SELECT title, doc_type, is_priority, metadata FROM docs WHERE rel_path = ?",
+            "SELECT title, doc_type, is_priority, metadata, disclosure FROM docs WHERE rel_path = ?",
             (rel_path := doc.rel_path,),
         ).fetchone()
         if row is None:
@@ -249,6 +289,7 @@ class Store:
         return (
             (row["title"] or "") != (doc.title or "")
             or (row["doc_type"] or "") != (doc.doc_type or "")
+            or (row["disclosure"] or "") != (getattr(doc, "disclosure", "") or "")
             or bool(row["is_priority"]) != bool(doc.is_priority)
             or stored_meta != parsed_meta
         )
@@ -257,11 +298,12 @@ class Store:
         import json
 
         self.db.execute(
-            "INSERT INTO docs (rel_path, abs_path, title, doc_hash, mtime, is_priority, doc_type, metadata) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "INSERT INTO docs (rel_path, abs_path, title, doc_hash, mtime, is_priority, doc_type, "
+            "metadata, disclosure) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(rel_path) DO UPDATE SET abs_path=excluded.abs_path, title=excluded.title, "
             "doc_hash=excluded.doc_hash, mtime=excluded.mtime, is_priority=excluded.is_priority, "
-            "doc_type=excluded.doc_type, metadata=excluded.metadata",
+            "doc_type=excluded.doc_type, metadata=excluded.metadata, disclosure=excluded.disclosure",
             (
                 doc.rel_path,
                 str(doc.path),
@@ -271,6 +313,7 @@ class Store:
                 int(doc.is_priority),
                 doc.doc_type,
                 json.dumps(_safe_meta(doc.metadata)),
+                getattr(doc, "disclosure", "") or "",
             ),
         )
 
@@ -362,6 +405,124 @@ class Store:
             r["tgt_slug"]
             for r in self.db.execute("SELECT DISTINCT tgt_slug FROM supersessions")
         }
+
+    def disclosure_classes(self) -> dict[str, str]:
+        """rel_path → raw disclosure class, for docs that declare one.
+
+        Only the classified rows are returned: on a corpus where nothing is
+        classified this is an empty dict and a single query, rather than 2,000
+        rows of empty string. Absence from the map IS the unclassified state.
+        """
+        return {
+            r["rel_path"]: r["disclosure"]
+            for r in self.db.execute(
+                "SELECT rel_path, disclosure FROM docs WHERE disclosure != ''"
+            )
+        }
+
+    # ---------- beliefs (per-agent memory; see lbrain/beliefs.py) ----------
+    #
+    # Deliberately primitive-only: this layer stores columns, it does not import
+    # lbrain.beliefs. beliefs.py depends on search.py which depends on store.py,
+    # so a reverse import would close a cycle. Keeping the store dumb about the
+    # Belief type also means a schema read is never blocked on the gate logic.
+
+    def replace_belief(self, fields: dict, evidence: list[tuple[str, str, bool]]) -> None:
+        """Upsert one belief row and its evidence edges. Idempotent per doc, the
+        same way replace_supersessions is, so a re-import with an edited
+        frontmatter converges rather than accumulating.
+
+        Two rows must never claim one file: a slug can be edited in place
+        (`name:` changed), which leaves the OLD belief_id still holding this
+        rel_path and its UNIQUE constraint. Clear that first — otherwise the
+        insert fails and the belief silently stops updating.
+        """
+        bid = fields["belief_id"]
+        self.db.execute(
+            "DELETE FROM beliefs WHERE rel_path = ? AND belief_id <> ?",
+            (fields["rel_path"], bid),
+        )
+        cols = (
+            "belief_id", "rel_path", "persona", "state", "subject", "claim",
+            "confidence", "impact", "created", "promoted_at", "verify_by",
+            "countersigned_by",
+        )
+        self.db.execute(
+            f"INSERT INTO beliefs ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
+            "ON CONFLICT(belief_id) DO UPDATE SET "
+            + ", ".join(f"{c}=excluded.{c}" for c in cols[1:]),
+            tuple(fields.get(c, "") or "" for c in cols),
+        )
+        self.db.execute("DELETE FROM belief_evidence WHERE belief_id = ?", (bid,))
+        for ref, kind, verified in evidence:
+            self.db.execute(
+                "INSERT OR IGNORE INTO belief_evidence (belief_id, ref, kind, verified) "
+                "VALUES (?, ?, ?, ?)",
+                (bid, ref, kind, int(verified)),
+            )
+
+    def delete_belief_for_path(self, rel_path: str) -> None:
+        """Drop the belief projection for a doc that is no longer one (its
+        `type: belief` was removed). Without this the row — and its draft
+        visibility rules — would outlive the frontmatter that created it."""
+        self.db.execute("DELETE FROM beliefs WHERE rel_path = ?", (rel_path,))
+
+    def belief_states(self) -> dict[str, tuple[str, str]]:
+        """rel_path → (persona, state), for the retrieval-time visibility filter.
+
+        Keyed by rel_path rather than slug on purpose: the filter must be exact.
+        A slug collision would leak one persona's draft into another's results,
+        which is the one failure this whole layer exists to prevent.
+        """
+        return {
+            r["rel_path"]: (r["persona"], r["state"])
+            for r in self.db.execute("SELECT rel_path, persona, state FROM beliefs")
+        }
+
+    def belief_personas(self) -> set[str]:
+        """Every persona that has authored a belief. Used to catch a mistyped
+        LBRAIN_PERSONA, which otherwise fails closed SILENTLY — the author loses
+        access to their own drafts and concludes the beliefs were lost."""
+        return {
+            r["persona"]
+            for r in self.db.execute("SELECT DISTINCT persona FROM beliefs WHERE persona != ''")
+        }
+
+    def belief_rows(self) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT * FROM beliefs ORDER BY belief_id"
+        ).fetchall()
+
+    def belief_row_for_path(self, rel_path: str) -> sqlite3.Row | None:
+        """The belief projection for a FILE. Used to tell "this stopped being a
+        belief" from "this belief's frontmatter stopped parsing"."""
+        return self.db.execute(
+            "SELECT * FROM beliefs WHERE rel_path = ?", (rel_path,)
+        ).fetchone()
+
+    def belief_row(self, belief_id: str) -> sqlite3.Row | None:
+        return self.db.execute(
+            "SELECT * FROM beliefs WHERE belief_id = ?", (belief_id,)
+        ).fetchone()
+
+    def belief_evidence_rows(self, belief_id: str) -> list[sqlite3.Row]:
+        return self.db.execute(
+            "SELECT ref, kind, verified FROM belief_evidence WHERE belief_id = ? ORDER BY ref",
+            (belief_id,),
+        ).fetchall()
+
+    def set_belief_state(self, belief_id: str, state: str, promoted_at: str = "") -> None:
+        """Move a belief's lifecycle state in the PROJECTION only.
+
+        The file is the source of truth, so a caller that flips state here must
+        also write the frontmatter (cli.belief_promote does both). This exists so
+        the change is visible to retrieval immediately, without waiting for the
+        next import — not as an alternative to editing the record.
+        """
+        self.db.execute(
+            "UPDATE beliefs SET state = ?, promoted_at = ? WHERE belief_id = ?",
+            (state, promoted_at, belief_id),
+        )
 
     def insert_chunks(self, chunks: list[Chunk]) -> list[int]:
         ids: list[int] = []

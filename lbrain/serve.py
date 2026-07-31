@@ -65,7 +65,7 @@ _BODY_TRANS = str.maketrans({
 })
 
 # doc_type is corpus-derived (arbitrary YAML frontmatter) — whitelist the enum.
-DOC_TYPES = {"user", "feedback", "project", "reference", "abstraction"}
+DOC_TYPES = {"user", "feedback", "project", "reference", "abstraction", "belief"}
 
 
 def sanitize_field(s: str, max_len: int = 120) -> str:
@@ -401,6 +401,23 @@ def stale_marker(h: Hit, today: datetime.date | None = None) -> str:
     return "unverified (no claim date)"
 
 
+def blinding_notice(hits) -> str:
+    """The 'you are reading a blinded view' notice, or ''.
+
+    Lives here and is called from EVERY output path — structured, CLI prose, MCP
+    prose. The filter itself already ran in search(), so a path that skipped this
+    would not leak a record; it would do something subtler and worse, which is
+    hand an agent a thinned corpus with no indication that it was thinned. The
+    agent then answers confidently from the remainder. Prose being the weaker
+    disclosure path is a known shape here (red-team 2026-07-28, #4/#5).
+    """
+    w = getattr(hits, "withheld", None)
+    if w is None or not getattr(w, "total", 0):
+        return ""
+    env = getattr(hits, "envelope", None)
+    return w.notice(getattr(env, "mode", "?"))
+
+
 def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True) -> str:
     star = "★ " if h.is_priority else ""
     title = sanitize_field(h.title, 100)
@@ -422,6 +439,20 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
             parts.append(mark)
     if "superseded" in h.boosts:
         parts.append("SUPERSEDED")
+    # Belief lifecycle (lbrain/beliefs.py). The DRAFT wording is load-bearing, not
+    # decoration: a model cannot tell its own prior speculation from an observed
+    # fact once both are tokens in context — the attention mechanism blends them.
+    # Saying so at the point of use is the read-side half of the anti-self-citation
+    # design; the write-side half is the promotion gate, which refuses to count a
+    # draft as evidence at all.
+    if "draft" in h.boosts:
+        parts.append("DRAFT — your own prior output, NOT evidence")
+    elif "retracted" in h.boosts:
+        parts.append("RETRACTED")
+    elif "needs_review" in h.boosts:
+        parts.append("NEEDS-REVIEW — evidence beneath this was withdrawn")
+    elif "belief" in h.boosts:
+        parts.append("belief (promoted)")
     if _is_abstraction(h):
         parts.append("abstraction")
     if verdict == "ADMISSIBLE":
@@ -500,6 +531,14 @@ def render_response(
     out: list[str] = []
     if kept:
         out.append(amp.UNTRUSTED_NOTICE)
+    # Blinding notice FIRST — ahead of the untrusted fence, the core block and
+    # every record. A reader who is being blinded must learn it before reading
+    # anything, not from a footnote after forming a view. Emitted even when zero
+    # records survived, because "nothing came back" and "everything was withheld"
+    # are the two readings a blinded agent must never confuse.
+    blind = blinding_notice(hits)
+    if blind:
+        out.insert(0, blind + "\n")
     if include_core:
         core = amp.core_block(
             getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900)

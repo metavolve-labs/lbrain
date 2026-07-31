@@ -54,6 +54,13 @@ def non_default(name: str, value):
     if isinstance(value, Path):
         return Path(str(value) + ".alt")
     if isinstance(value, list):
+        # `sources` is the only list of Paths; the disclosure allowlists are
+        # lists of STRINGS and must round-trip as strings. Handing them a Path
+        # sentinel made the gate fail for the right reason (write/load really did
+        # differ) but for the wrong field — so distinguish by name rather than
+        # relaxing the comparison, which would stop the gate catching a real drop.
+        if name in ("allowed_doc_types", "allowed_path_prefixes"):
+            return ["P3-NEURAINETIC-BRAIN/"]
         return [Path("/tmp/lbrain-test-source")]
     raise AssertionError(f"unhandled field type for {name}: {type(value)}")
 
