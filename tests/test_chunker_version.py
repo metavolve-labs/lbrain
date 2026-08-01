@@ -32,7 +32,10 @@ def test_first_import_stamps_the_version(tmp_path, monkeypatch):
     (home / "config.toml").write_text('embedding_provider = "local"\n', encoding="utf-8")
     _run(home, monkeypatch, "import", str(_corpus(tmp_path)))
     st = Store(home / "brain.db", embedding_dim=384)
-    assert st.get_meta("chunker_version") == str(CHUNKER_VERSION)
+    # Composite: algorithm PLUS every config input to chunk boundaries.
+    stamp = st.get_meta("chunker_version")
+    assert stamp.startswith(f"{CHUNKER_VERSION}:"), stamp
+    assert len(stamp.split(":")) == 4, stamp
     st.close()
 
 
@@ -52,7 +55,7 @@ def test_unversioned_brain_is_treated_as_stale(tmp_path, monkeypatch):
     st.db.commit(); st.close()
 
     res = _run(home, monkeypatch, "import", str(src))
-    assert "chunker changed" in res.output
+    assert "chunking changed" in res.output
     assert "unversioned" in res.output
 
 
@@ -67,7 +70,7 @@ def test_version_bump_forces_rechunk(tmp_path, monkeypatch):
     st.close()
 
     res = _run(home, monkeypatch, "import", str(src))
-    assert "chunker changed" in res.output
+    assert "chunking changed" in res.output
     assert "updated: 1" in res.output or "new: 1" in res.output
 
 
@@ -82,7 +85,7 @@ def test_same_version_does_not_rechunk(tmp_path, monkeypatch):
     src = _corpus(tmp_path)
     _run(home, monkeypatch, "import", str(src))
     res = _run(home, monkeypatch, "import", str(src))
-    assert "chunker changed" not in res.output
+    assert "chunking changed" not in res.output
     assert "unchanged: 1" in res.output
 
 
@@ -123,3 +126,71 @@ def test_rechunk_flag_forces_it_without_a_version_change(tmp_path, monkeypatch):
     _run(home, monkeypatch, "import", str(src))
     res = _run(home, monkeypatch, "import", "--rechunk", str(src))
     assert "unchanged: 1" not in res.output
+
+
+# --- the gaps an adversarial audit found in the fix above (2026-08-01) --------
+
+def test_changing_chunk_tokens_forces_a_rechunk(tmp_path, monkeypatch):
+    """Config is an INPUT to chunk boundaries, so it belongs in the fingerprint.
+
+    Shipped as a bare int, which left chunk_tokens/chunk_overlap/contextual_prefix
+    outside it: halving chunk_tokens printed `unchanged: 1` and produced 512-token
+    chunks forever, with the new value reported [config] by every reader.
+    """
+    home = tmp_path / "h"; home.mkdir()
+    cfgp = home / "config.toml"
+    cfgp.write_text('embedding_provider = "local"\nchunk_tokens = 512\n', encoding="utf-8")
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "import", str(src))
+
+    cfgp.write_text('embedding_provider = "local"\nchunk_tokens = 64\n', encoding="utf-8")
+    res = _run(home, monkeypatch, "import", str(src))
+    assert "chunking changed" in res.output
+    assert "unchanged: 1" not in res.output
+
+
+def test_enabling_contextual_prefix_forces_a_rechunk(tmp_path, monkeypatch):
+    home = tmp_path / "h"; home.mkdir()
+    cfgp = home / "config.toml"
+    cfgp.write_text('embedding_provider = "local"\ncontextual_prefix = false\n', encoding="utf-8")
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "import", str(src))
+
+    cfgp.write_text('embedding_provider = "local"\ncontextual_prefix = true\n', encoding="utf-8")
+    res = _run(home, monkeypatch, "import", str(src))
+    assert "chunking changed" in res.output
+
+
+def test_stored_20_is_not_read_as_current_against_version_2(tmp_path, monkeypatch):
+    """`startswith` made "20" look current against 2 — a prefix compare on a
+    version number is a bug waiting for the tenth release."""
+    home = tmp_path / "h"; home.mkdir()
+    (home / "config.toml").write_text('embedding_provider = "local"\n', encoding="utf-8")
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "import", str(src))
+    st = Store(home / "brain.db", embedding_dim=384)
+    st.set_meta("chunker_version", "20:512:64:0"); st.close()
+    res = _run(home, monkeypatch, "import", str(src))
+    assert "chunking changed" in res.output
+
+
+def test_partial_import_does_not_stamp_the_whole_brain(tmp_path, monkeypatch):
+    """`lbrain import <one-dir>` re-chunks one source. Stamping globally would
+    permanently strand the others on old boundaries with nothing left to detect it."""
+    home = tmp_path / "h"; home.mkdir()
+    a, b = tmp_path / "a", tmp_path / "b"
+    for d in (a, b):
+        d.mkdir()
+        (d / "x.md").write_text("# X\n\nbody\n", encoding="utf-8")
+    (home / "config.toml").write_text(
+        f'embedding_provider = "local"\nsources = ["{a.as_posix()}", "{b.as_posix()}"]\n',
+        encoding="utf-8")
+    _run(home, monkeypatch, "import")           # full pass -> stamped
+    st = Store(home / "brain.db", embedding_dim=384)
+    st.set_meta("chunker_version", "1"); st.close()
+
+    res = _run(home, monkeypatch, "import", str(a))   # partial
+    assert "partial import" in res.output
+    st = Store(home / "brain.db", embedding_dim=384)
+    assert st.get_meta("chunker_version") == "1", "partial import stamped the brain current"
+    st.close()

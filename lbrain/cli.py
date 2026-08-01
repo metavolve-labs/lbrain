@@ -462,6 +462,20 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     # the old ones — silently, and with no way for a user to notice their index was
     # built by code they no longer run. Same failure shape as reading a code default
     # and calling it live (doctrine rule 2), one layer down: `installed` != `applied`.
+    # The fingerprint must cover EVERY input to chunk boundaries, not just the
+    # algorithm. Shipped this morning as a bare int, which left chunk_tokens,
+    # chunk_overlap and contextual_prefix outside it — so turning on the
+    # Contextual-Retrieval prefix, or halving chunk_tokens, was a silent no-op on
+    # any existing corpus: `unchanged: 1`, feature reported [config] by every
+    # reader, applied to zero chunks. Fixing A-412 and leaving these out is the
+    # "fixed the instance, missed the class" shape from the discipline doc, in a
+    # fix written to prevent exactly that.
+    current_cv = ":".join(str(x) for x in (
+        CHUNKER_VERSION,
+        getattr(cfg, "chunk_tokens", ""),
+        getattr(cfg, "chunk_overlap", ""),
+        int(bool(getattr(cfg, "contextual_prefix", False))),
+    ))
     stored_cv = store.get_meta("chunker_version")
     # A brain that predates this guard carries NO version — and that is precisely
     # the population that needs re-chunking, since it was built by v1 by definition.
@@ -470,7 +484,9 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     # shape logged as A-005 and A-404.
     if stored_cv is None:
         stored_cv = "1 (unversioned)" if store.stats().get("docs", 0) else None
-    cv_stale = stored_cv is not None and not stored_cv.startswith(str(CHUNKER_VERSION))
+    # Exact inequality, never startswith: stored "20" starts with "2" and would
+    # have been read as current against version 2.
+    cv_stale = stored_cv is not None and stored_cv != current_cv
     if cv_stale and not rechunk:
         # Say what it COSTS, not merely what it does. On-device re-embedding is
         # time; a hosted provider is money the user did not ask to spend, and an
@@ -485,8 +501,8 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
             "    Your provider is 'local', so re-embedding costs time, not money.\n"
         )
         click.secho(
-            f"  ⚠ chunker changed (index built by v{stored_cv}, this build is "
-            f"v{CHUNKER_VERSION}) — re-chunking every document.\n"
+            f"  ⚠ chunking changed (index built with {stored_cv}, this run is "
+            f"{current_cv}) — re-chunking every document.\n"
             f"{cost}"
             f"    To skip: pin the previous lbrain version.", fg="yellow")
     force_rechunk = rechunk or cv_stale
@@ -558,10 +574,18 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
             click.secho(f"✗ {e}", fg="red")
             sys.exit(1)
 
-    # Stamp AFTER a successful pass only. A crash mid-import must leave the old
-    # version recorded, so the next run re-chunks rather than believing it already
-    # did — the failure mode this whole guard exists to prevent.
-    store.set_meta("chunker_version", CHUNKER_VERSION)
+    # Stamp AFTER a successful pass only, and ONLY when that pass covered every
+    # configured source. `lbrain import <one-dir>` re-chunks one source and would
+    # otherwise mark the whole brain current, permanently stranding the others on
+    # old boundaries with nothing left to detect it.
+    covered = set(sources) >= {Path(p).expanduser().resolve() for p in cfg.sources}
+    if covered:
+        store.set_meta("chunker_version", current_cv)
+    elif cv_stale:
+        click.secho(
+            f"  ⚠ partial import — {len(cfg.sources) - len(sources)} configured "
+            f"source(s) NOT re-chunked, so the version stamp is left stale on "
+            f"purpose. Run `lbrain import` with no arguments to finish.", fg="yellow")
     stats = store.stats()
     store.close()
     dt = time.monotonic() - t0
@@ -840,9 +864,17 @@ def commit_check(text: str | None, from_file: str | None):
 def check_action(action_text: str, k: int):
     """Cross-check a proposed action against saved feedback rules (anti-pattern detector)."""
     cfg = Config.load()
+    warn_if_unprovisioned()  # "no conflicts" from an EMPTY brain is a green light
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = make_embedder(cfg)
-    hits = search(cfg, store, embedder, action_text, k=k, doc_type="feedback")
+    # Same omission as the MCP twin: this was the one retrieval path with no
+    # envelope, so a standing permission scope did not apply to the tool called
+    # immediately before an irreversible action.
+    hits = search(cfg, store, embedder, action_text, k=k, doc_type="feedback",
+                  envelope=_resolve_envelope(cfg, None, None))
+    _n = blinding_notice(hits)
+    if _n:
+        click.echo(_n)
     warnings = detect_anti_pattern(action_text, hits)
     if not warnings:
         click.secho("✓ No conflicts with saved feedback rules.", fg="green")
