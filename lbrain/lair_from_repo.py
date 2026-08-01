@@ -78,7 +78,7 @@ DEFAULT_TEMPLATE = """# {Lair Name}
 
 | Lair | Relationship |
 |------|--------------|
-| `{other-lair}/` | {Dependency / consumer / sibling} |
+| [[{other-lair}]] | {Dependency / consumer / sibling} |
 
 ---
 
@@ -241,6 +241,9 @@ def build_prompt(facts: dict, fixed: dict, template: str) -> tuple[str, str]:
         "- Decisions Log: one line each, '- **YYYY-MM-DD**: DECISION: X over Y because Z'.\n"
         "- MUST end with a non-empty '## Related Lairs' table (| Lair | Relationship |). "
         "If none found, add a row for the repo's own remote/parent.\n"
+        "- Related-Lairs targets MUST be wikilinks — [[lair-slug]], never `backticks`. "
+        "The graph boost only sees [[...]]; a backticked name is invisible to it and "
+        "makes the lair an unreachable leaf (A-413).\n"
         "- Do NOT invent facts. Use only the supplied RepoFacts. Leave optional sections "
         "out rather than padding.\n\n"
         f"FIXED FIELDS (copy verbatim, do not re-derive):\n"
