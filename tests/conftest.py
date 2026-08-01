@@ -91,6 +91,35 @@ def isolate_lbrain_home(tmp_path, monkeypatch):
     return home
 
 
+def pytest_configure(config):
+    """Refuse to run at all if the suite can see a REAL install.
+
+    The guard below is a tripwire — it tells you AFTER the damage. This is the gate:
+    on 2026-08-01 a test wrote `explicitly-passed` over a live GEMINI_API_KEY because
+    one of four import-time paths was unpatched. Isolation is now generic, but
+    isolation is a mechanism that can regress; "there is nothing here to destroy" is
+    a property that cannot.
+
+    Set LBRAIN_TEST_HOME (or LBRAIN_HOME) to a scratch dir before running. Opt out
+    with LBRAIN_ALLOW_REAL_HOME=1 only if you genuinely mean to test against a live
+    install and have backed up `env` — which nothing did until it was too late.
+    """
+    if os.environ.get("LBRAIN_ALLOW_REAL_HOME") == "1":
+        return
+    home = Path(os.environ.get("LBRAIN_HOME") or (Path.home() / ".lbrain"))
+    secrets = home / "env"
+    db = home / "brain.db"
+    if not (secrets.exists() or db.exists()):
+        return
+    raise pytest.UsageError(
+        f"\nREFUSING TO RUN: {home} looks like a REAL LBrain install "
+        f"({'env ' if secrets.exists() else ''}{'brain.db' if db.exists() else ''}).\n"
+        f"A test suite must never be able to reach live credentials.\n\n"
+        f"  LBRAIN_HOME=$(mktemp -d) python3 -m pytest tests/\n\n"
+        f"Override only if you mean it: LBRAIN_ALLOW_REAL_HOME=1\n"
+    )
+
+
 def _fingerprint(home: Path) -> dict[str, str]:
     """Content hash of every file in the real install.
 
