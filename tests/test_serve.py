@@ -439,3 +439,42 @@ def test_rank_and_text_invariance_across_modes():
     render_response(mk_cfg(), hits, "record body value")
     sig_after = [(h.rel_path, h.chunk_idx, h.score, h.text) for h in hits]
     assert sig_before == sig_after
+
+
+# --- A-427: the threshold direction is a CLAIM, so it needs a test ------------
+
+def test_lower_gate_thresholds_are_stricter_not_looser():
+    """`doctor` now tells operators LOWER = STRICTER. Pin that to behaviour.
+
+    The knobs read backwards: serve.py gates on `near >= gate_min_near and
+    near/len(kept) >= gate_density`, so a high number is the LOOSER setting.
+    Someone tuning a "strict" persona reaches for a high number and produces the
+    loosest configuration in the fleet, while the config file, the persona name
+    and the docs all still say strict — undetectable by reading, only by diffing
+    behaviour. A documented direction that nothing tests is exactly how the two
+    drift apart again.
+    """
+    hits = [mk_hit(text=NEAR_TEXT, title=f"Near {i}", chunk_idx=i) for i in range(3)]
+    q = "How many requests did the Vantage-780 deployment process at cutover?"
+
+    strict = render_response(mk_cfg(gate_min_near=1, gate_density=0.1), hits, q)
+    loose = render_response(mk_cfg(gate_min_near=99, gate_density=0.99), hits, q)
+
+    # Assert on the GATE's own notice, not the per-record "near-miss" label —
+    # that label renders regardless of the gate, so asserting on it produced a
+    # test that survived flipping the comparison operator. Caught by mutation,
+    # which is the only reason this assertion is the right one.
+    marker = "ambiguity-dense retrieval"
+    assert marker in strict, "LOW thresholds must fire the ambiguity notice"
+    assert marker not in loose, "HIGH thresholds must NOT fire it — that is the point"
+
+
+def test_admissibility_false_disables_the_gate_entirely():
+    """It is an ENABLE, not a dial — the second half of A-427."""
+    hits = [mk_hit(text=NEAR_TEXT, title=f"Near {i}", chunk_idx=i) for i in range(3)]
+    q = "How many requests did the Vantage-780 deployment process at cutover?"
+    on = render_response(mk_cfg(gate_min_near=1, gate_density=0.1,
+                                serve_admissibility=True), hits, q)
+    off = render_response(mk_cfg(gate_min_near=1, gate_density=0.1,
+                                 serve_admissibility=False), hits, q)
+    assert on != off

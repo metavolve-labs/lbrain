@@ -37,6 +37,20 @@ _DOCTOR_FIELDS = [
     "arweave_enabled", "arweave_transport", "db_path",
 ]
 
+# A-427 — the two evidence-threshold knobs run BACKWARDS relative to their natural
+# reading. serve.py gates on `near >= gate_min_near and near/len(kept) >= gate_density`,
+# so LOWER values make the ambiguity warning fire MORE often, which is the STRICTER
+# standard of proof. Anyone tuning for "strict" reaches for a high number and gets
+# the loosest configuration in the fleet, while the config file, the persona name and
+# the docs all still say strict. It is undetectable by reading — only by diffing
+# behaviour. Surfaced here because `doctor` is where an operator goes to learn what
+# their configuration MEANS, and a bare `3` teaches nothing.
+_DIRECTION = {
+    "gate_min_near": "↓ LOWER = STRICTER (fires the ambiguity notice sooner)",
+    "gate_density": "↓ LOWER = STRICTER (fires the ambiguity notice sooner)",
+    "serve_admissibility": "master ENABLE, not a dial — false turns the gate OFF entirely",
+}
+
 
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
@@ -124,7 +138,14 @@ def doctor(as_json: bool):
             tag = ("[config]" if r["source"] == "config" else "[DEFAULT]")
             colour = "green" if r["source"] == "config" else "yellow"
             click.echo(f"  {r['setting']:<22} {str(r['value'])[:44]:<46} ", nl=False)
-            click.secho(tag, fg=colour)
+            click.secho(tag, fg=colour, nl=not _DIRECTION.get(r["setting"]))
+            # A-427: these two read backwards. `doctor` is where an operator goes to
+            # learn what their config MEANS, and a bare `3` teaches nothing — someone
+            # tuning for "strict" writes a high number and gets the loosest setting,
+            # with the config file, the persona name and the docs all still saying
+            # strict. Annotate at the point of reading, not only in the source.
+            if _DIRECTION.get(r["setting"]):
+                click.secho(f"   {_DIRECTION[r['setting']]}", fg="cyan")
         if inert:
             click.echo()
             click.secho(f"  ⚠ {len(inert)} key(s) in config.toml that NOTHING READS "
