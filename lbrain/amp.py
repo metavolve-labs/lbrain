@@ -95,6 +95,9 @@ def budget(hits, max_chars: int, per_chunk_chars: int):
     return kept, used
 
 
+_CORE_TRUNCATION_WARNED: set = set()
+
+
 def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) -> str:
     """Letta-style always-on 'core memory': a curated durable-context block injected
     ahead of retrieved hits, so the essentials are always present regardless of whether
@@ -144,6 +147,26 @@ def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) ->
             return ""
 
     if len(text) > max_chars:
+        # Truncation here is SILENT no longer. A-421: the budget ate the newest,
+        # most-hedged lines because corrections are appended last, and nobody
+        # noticed for weeks — the block still looked complete. This session
+        # reproduced the same setup by accident: adding two classification
+        # headings pushed the live file from 1,519 to 1,699 chars against a 1,600
+        # budget, which would have silently dropped its final line.
+        #
+        # Warn once per (path, budget) so a long-lived MCP server does not spam,
+        # but a config change or an edit re-arms it.
+        import sys
+
+        key = (path, max_chars)
+        if key not in _CORE_TRUNCATION_WARNED:
+            _CORE_TRUNCATION_WARNED.add(key)
+            print(
+                f"[lbrain] WARNING: core memory is {len(text)} chars against a "
+                f"{max_chars}-char budget — the LAST {len(text) - max_chars}+ chars are being "
+                f"DROPPED from every query. Raise core_memory_chars or shorten {path}.",
+                file=sys.stderr,
+            )
         text = text[:max_chars].rsplit("\n", 1)[0].rstrip() + "\n  …"
     return label + "\n" + text + "\n"
 

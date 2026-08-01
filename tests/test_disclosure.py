@@ -761,3 +761,34 @@ def test_a_hostile_persona_string_never_reveals_a_draft(bad):
     # merely a query that matched nothing.
     assert titles == ["fact"], "negative control failed — the test proves nothing"
     st.close()
+
+
+def test_core_memory_truncation_is_announced(tmp_path, capsys):
+    """A-421 was a SILENT truncation: the char budget ate the newest, most-hedged
+    lines because corrections are appended last, and the block still looked
+    complete. This session reproduced the setup by accident — two classification
+    headings pushed the live file from 1,519 to 1,699 chars against a 1,600
+    budget. Silent dropping from EVERY query is not an acceptable failure mode.
+    """
+    from lbrain import amp
+
+    p = tmp_path / "CORE.md"
+    p.write_text("- line one is quite long indeed\n" * 40, encoding="utf-8")
+    amp._CORE_TRUNCATION_WARNED.clear()
+
+    out = amp.core_block(str(p), 200)
+    err = capsys.readouterr().err
+    assert out.rstrip().endswith("…")             # it did truncate
+    assert "DROPPED from every query" in err       # and it said so
+    assert "core_memory_chars" in err              # and named the fix
+
+    # Warn ONCE per (path, budget) — a long-lived MCP server must not spam.
+    amp.core_block(str(p), 200)
+    assert "DROPPED" not in capsys.readouterr().err
+
+    # NEGATIVE CONTROL — a file inside its budget truncates nothing and is silent.
+    amp._CORE_TRUNCATION_WARNED.clear()
+    small = tmp_path / "S.md"
+    small.write_text("- short\n", encoding="utf-8")
+    assert not amp.core_block(str(small), 200).rstrip().endswith("…")
+    assert "DROPPED" not in capsys.readouterr().err
