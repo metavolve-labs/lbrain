@@ -141,7 +141,7 @@ def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) ->
         else:
             if withheld is not None and context:
                 withheld.core_context_chars += len(context)
-            text = ""
+            text = doctrine
             label = "🧠 Core memory — DOCTRINE ONLY (context withheld by disclosure mode):"
         if not text:
             return ""
