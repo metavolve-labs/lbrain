@@ -215,13 +215,15 @@ def apply_belief_visibility(
 
 
 def _is_abstraction(h: Hit) -> bool:
-    """type: abstraction awareness. doc_type when the importer captured it;
-    filename convention as fallback (verified 2026-07-11: 10/50 live abstraction
-    docs carry an empty doc_type — never trust the field alone)."""
-    if h.doc_type == "abstraction":
-        return True
-    name = _basename_slug(h.rel_path) + ".md"
-    return name.startswith("abstraction-") or name.startswith("abstraction_")
+    """type: abstraction awareness — delegates to disclosure.is_abstraction.
+
+    One implementation, two callers. The ranking guard and the disclosure filter
+    must agree about what an abstraction IS; keeping a second copy here is the
+    A-423 shape (two callers of one rule that drifted apart, producing a silent
+    no-match with no error message)."""
+    from .disclosure import is_abstraction
+
+    return is_abstraction(h.doc_type, h.rel_path)
 
 
 def _assemble_topk(out: list[Hit], k: int, cfg: Config, query: str, recency: bool) -> list[Hit]:

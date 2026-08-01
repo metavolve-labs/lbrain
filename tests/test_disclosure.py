@@ -827,11 +827,16 @@ def test_a_belief_that_is_also_typed_abstraction_keeps_its_lifecycle_class():
 def test_independent_withholds_abstractions_end_to_end():
     env = D.resolve(_Cfg(disclosure_default="artifact"),
                     env={"LBRAIN_DISCLOSURE": "independent"}, warn=False)
+    # The SECOND abstraction carries an EMPTY doc_type on purpose: 134 of 855 live
+    # abstractions do, so a test that only covers the typed case leaves the
+    # filename fallback unexercised — a mutation removing rel_path from the
+    # classify() call survived exactly that gap.
     hits = [_hit("abstraction-abc.md", doc_type="abstraction"),
+            _hit("abstraction-untyped.md", doc_type=""),
             _hit("real-finding.md", doc_type="project")]
     kept, w = _apply(hits, env)
     assert [h.rel_path for h in kept] == ["real-finding.md"]
-    assert w.by_class.get("proposal") == 1
+    assert w.by_class.get("proposal") == 2
 
     # NEGATIVE CONTROL — collaborative admits proposals, so the abstraction
     # returns. "Withheld everywhere" would mean the class was simply dropped.
@@ -839,3 +844,28 @@ def test_independent_withholds_abstractions_end_to_end():
                      env={"LBRAIN_DISCLOSURE": "collaborative"}, warn=False)
     kept2, _ = _apply([_hit("abstraction-abc.md", doc_type="abstraction")], coll)
     assert len(kept2) == 1
+
+
+def test_the_abstraction_rule_does_not_trust_doc_type_alone():
+    """Measured live 2026-08-01: 134 of 855 abstractions (15.7%) carry an EMPTY
+    doc_type, so a doc_type-only rule silently exempted them from disclosure.
+    The filename convention is the fallback, exactly as the ranking guard has
+    done since 2026-07-11."""
+    assert D.is_abstraction("abstraction", "whatever.md")
+    assert D.is_abstraction("", "abstraction-5991e7f8aad5.md"), "the field is not enough"
+    assert D.is_abstraction("", "dir/abstraction_legacy.md")
+    # NEGATIVE CONTROL — an ordinary doc is not swept in by either limb.
+    assert not D.is_abstraction("", "project-real-finding.md")
+    assert not D.is_abstraction("project", "notes.md")
+
+
+def test_search_and_disclosure_share_ONE_abstraction_rule():
+    """A-423 was two callers of one rule that drifted apart and produced a silent
+    no-match. The ranking guard and the disclosure filter must never disagree
+    about what an abstraction IS."""
+    from lbrain.search import _is_abstraction
+
+    for doc_type, rel in (("abstraction", "x.md"), ("", "abstraction-abc.md"),
+                          ("", "plain.md"), ("project", "abstraction-abc.md")):
+        h = _hit(rel, doc_type=doc_type)
+        assert _is_abstraction(h) == D.is_abstraction(doc_type, rel), (doc_type, rel)

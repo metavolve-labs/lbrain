@@ -374,8 +374,30 @@ def core_admits_context(env: "Envelope | None") -> bool:
     return admits is None or CLASS_PROPOSAL in admits
 
 
+def is_abstraction(doc_type: str, rel_path: str = "") -> bool:
+    """THE rule for 'is this an auto-generated synthesis?'. One implementation.
+
+    `doc_type` when the importer captured it, filename convention as fallback —
+    verified 2026-07-11 that 10/50 live abstraction docs carry an empty
+    `doc_type`, and re-measured 2026-08-01: **134 of 855** (15.7%) still do.
+    Trusting the field alone silently exempted those from the disclosure rule.
+
+    `search._is_abstraction` delegates here rather than keeping its own copy.
+    A-423 was two callers of one slug rule that drifted apart and produced a
+    silent no-match; this is the same shape, so it gets one implementation
+    instead of a promise to keep two in step.
+    """
+    if (doc_type or "").strip().lower() == "abstraction":
+        return True
+    from .search import _basename_slug
+
+    name = _basename_slug(rel_path or "")
+    return name.startswith("abstraction-") or name.startswith("abstraction_")
+
+
 def classify(
-    raw_class: str, belief_state: str | None, default_class: str, doc_type: str = ""
+    raw_class: str, belief_state: str | None, default_class: str, doc_type: str = "",
+    rel_path: str = "",
 ) -> str:
     """The disclosure class of one document. Precedence is explicit → derived →
     configured default → unclassified.
@@ -406,7 +428,7 @@ def classify(
         return v
     if belief_state:
         return CLASS_PRIVATE if belief_state == "draft" else CLASS_ARTIFACT
-    if (doc_type or "").strip().lower() == "abstraction":
+    if is_abstraction(doc_type, rel_path):
         return CLASS_PROPOSAL
     return default_class
 
@@ -486,7 +508,7 @@ def apply(
             continue
 
         cls = classify(classes.get(h.rel_path, ""), (belief_states.get(h.rel_path) or (None, None))[1],
-                       env.default_class, h.doc_type)
+                       env.default_class, h.doc_type, h.rel_path)
         admitted = env.admits
         if admitted is not None and cls not in admitted:
             w.note(cls if cls else "unclassified")
