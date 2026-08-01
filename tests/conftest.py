@@ -13,7 +13,9 @@ now automatic and enforced rather than per-test and remembered.
 """
 from __future__ import annotations
 
+import hashlib
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,12 @@ def isolate_lbrain_home(tmp_path, monkeypatch):
     separate name in the importing module — patching one leaves the other
     pointing at the user's real install.
     """
+    # Capture the REAL install before touching the environment. _real_home() reads
+    # LBRAIN_HOME, so computing it after the setenv below returns the temp dir, and
+    # every "is this path under the real home?" test then answers no — leaving the
+    # repoint loop a silent no-op that looks like it ran.
+    real = _real_home().resolve()
+
     home = tmp_path / "lbrain-home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("LBRAIN_HOME", str(home))
@@ -47,29 +55,85 @@ def isolate_lbrain_home(tmp_path, monkeypatch):
     except Exception:  # pragma: no cover - cli deps are optional in some envs
         pass
 
-    for mod in mods:
-        if hasattr(mod, "CONFIG_DIR"):
-            monkeypatch.setattr(mod, "CONFIG_DIR", home, raising=False)
-        if hasattr(mod, "CONFIG_PATH"):
-            monkeypatch.setattr(mod, "CONFIG_PATH", home / "config.toml", raising=False)
+    # Repoint EVERY module-level Path that lies under the real install, discovered
+    # rather than enumerated.
+    #
+    # The named-constant version patched CONFIG_DIR and CONFIG_PATH and missed
+    # ENV_PATH and DB_PATH — all four bind at import time in config.py:16-19, so
+    # re-pointing CONFIG_DIR moves none of the others. On 2026-08-01 that let
+    # `test_config_roundtrip.py` (which runs `lbrain init --gemini-key
+    # explicitly-passed`) write the literal fixture string into the operator's
+    # real ~/.lbrain/env, destroying a live Gemini credential that existed in
+    # exactly one place and had never been backed up.
+    #
+    # Enumeration is the bug: it is a list someone must remember to extend, and
+    # the file it protects gains constants over time. Discovery covers whatever
+    # exists now and whatever is added later, which is the difference between
+    # fixing the instance and fixing the class.
+    for name, mod in list(sys.modules.items()):
+        if not (name == "lbrain" or name.startswith("lbrain.")) or mod is None:
+            continue
+        for attr in dir(mod):
+            if attr.startswith("__"):
+                continue
+            try:
+                val = getattr(mod, attr)
+            except Exception:
+                continue
+            if not isinstance(val, Path):
+                continue
+            try:
+                rel = val.resolve().relative_to(real)
+            except (ValueError, OSError):
+                continue
+            monkeypatch.setattr(mod, attr, home / rel, raising=False)
 
     return home
 
 
+def _fingerprint(home: Path) -> dict[str, str]:
+    """Content hash of every file in the real install.
+
+    The previous guard diffed ONLY config.toml, so it passed cleanly while a test
+    was overwriting the operator's live API key in the sibling `env` file — a
+    tripwire across one doorway of a building with four. Its own docstring had the
+    right instinct ("a green suite is not evidence that nothing was written") and
+    then applied it to a single path.
+
+    Hash rather than mtime: a write that restores identical bytes is not damage,
+    and a write that changes bytes within the same second is.
+    """
+    out: dict[str, str] = {}
+    if not home.exists():
+        return out
+    for p in sorted(home.rglob("*")):
+        if not p.is_file():
+            continue
+        try:
+            out[str(p.relative_to(home))] = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            out[str(p.relative_to(home))] = "<unreadable>"
+    return out
+
+
 @pytest.fixture(autouse=True, scope="session")
 def guard_real_install():
-    """Fail the run if a real config was modified, rather than discovering it later.
+    """Fail the run if the real install was modified, rather than discovering it later.
 
     A tripwire, not a mechanism: if this ever fires, the isolation above has a
     hole and the fix belongs there. The assertion runs even when tests pass,
     because the damaging run in the incident above *failed* — a green suite is
     not evidence that nothing was written.
     """
-    cfg = _real_home() / "config.toml"
-    before = cfg.read_bytes() if cfg.exists() else None
+    home = _real_home()
+    before = _fingerprint(home)
     yield
-    after = cfg.read_bytes() if cfg.exists() else None
-    assert before == after, (
-        f"A test modified the real LBrain config at {cfg}. Test isolation has a "
-        "hole — fix tests/conftest.py, not the symptom."
+    after = _fingerprint(home)
+    changed = sorted(
+        {k for k in set(before) | set(after) if before.get(k) != after.get(k)}
+    )
+    assert not changed, (
+        "A test modified the real LBrain install at "
+        f"{home}: {changed}\n"
+        "Test isolation has a hole — fix tests/conftest.py, not the symptom."
     )
