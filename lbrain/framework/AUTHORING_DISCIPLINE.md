@@ -183,7 +183,26 @@ Know the one-line revert **before** you run the command, not after.
 
 ---
 
-## 12. Log the anomaly at the moment of discovery
+## 12. Closing a problem by editing data leaves the mechanism armed
+
+There are two ways to close a defect: change the **code** so it cannot recur, or
+change the **data** so the current instance is gone. The second is often correct and
+always temporary — the trigger is still there, waiting for the next input that looks
+like the old one.
+
+**Failure that produced this rule:** a rendering budget silently truncated an
+important document. It was "fixed" by shortening the document. Two months later a
+routine edit pushed the document back over the limit and the silent truncation
+returned — identical, from the same line of code, which had never been touched.
+
+**How to apply:** when you close an entry, record **which kind of fix it was.** If
+you fixed the data, say so and leave the entry open against the code, or write down
+the condition that would re-trigger it. "Fixed by editing the file" and "fixed" are
+different states and the register should never show them the same way.
+
+---
+
+## 13. Log the anomaly at the moment of discovery
 
 Problems are almost always found at an inconvenient time, in the middle of something
 else. The choice is between a five-second note and losing it.
@@ -205,6 +224,7 @@ patterns, and the patterns are the most valuable thing in it.
 | a "current" number | the date you observed it |
 | a conclusion | the observation it came from |
 | "fixed" | the consequence check |
+| "fixed" | saying whether you fixed the CODE or the DATA |
 | "done" | the one-line revert |
 
 ---

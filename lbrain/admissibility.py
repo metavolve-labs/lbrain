@@ -119,7 +119,7 @@ class Verdict:
 
 
 def judge(question: str, record: str,
-          near_threshold: float = 0.28,
+          near_threshold: float = 0.99,
           specific_threshold: float = 0.5) -> Verdict:
     kind = qtype(question)
     q_terms = _terms(question)
