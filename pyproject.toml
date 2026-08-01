@@ -47,7 +47,15 @@ rerank = ["fastembed>=0.3,<1"]
 lbrain = "lbrain.cli:main"
 
 [tool.setuptools]
-packages = ["lbrain", "lbrain.archive"]
+packages = ["lbrain", "lbrain.archive", "lbrain.framework"]
+
+# The lair framework docs are the AUTHORING CONTRACT for the corpus this engine
+# ranks over — garbage in, confidently-ranked garbage out. They previously lived
+# in docs/ and shipped to nobody: the wheel carried zero markdown and the README
+# link 404s against a private repo (A-408). They are package data now, so they
+# install with the tool and are reachable at runtime via `lbrain framework`.
+[tool.setuptools.package-data]
+"lbrain.framework" = ["*.md"]
 
 [project.urls]
 Homepage = "https://lbrain.ai"

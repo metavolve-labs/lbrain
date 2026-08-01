@@ -12,16 +12,6 @@ from pathlib import Path
 
 import click
 
-STARTER_RULES = """# LAIR_RULES (LBrain default)
-
-- **300-line cap** per LAIR.md. Extract session logs to `sessions/` subfolder.
-- **Format**: tables over prose, front-load status in first 30 lines.
-- **Naming**: `000-PRIORITY-NAME/` for high-priority, `kebab-case/` for standard.
-- **Staleness**: 0-30 days = active, 30-60 = flag for audit, 60+ = archive candidate.
-- **Audit cadence**: biweekly (every other Tuesday).
-- **Wikilinks**: cross-reference related lairs with `[[lair-slug]]`.
-"""
-
 STARTER_TEMPLATE = """# LAIR: {name}
 
 **Status**: PLANNING
@@ -90,7 +80,15 @@ def run_onboarding(target_dir: Path) -> Path:
     target_dir.mkdir(parents=True, exist_ok=True)
     lairs_dir = target_dir / "lairs"
     lairs_dir.mkdir(exist_ok=True)
-    (lairs_dir / "LAIR_RULES.md").write_text(STARTER_RULES, encoding="utf-8")
+    # Scaffold the REAL framework, not a summary of it. STARTER_RULES was a
+    # 7-line paraphrase of a 4 KB contract, and the discipline half — how to avoid
+    # writing down something false — was not represented at all. Ranking quality is
+    # bounded by corpus quality, so the authoring contract is part of the product,
+    # not documentation about it.
+    from .framework import DOCS, read
+
+    for _doc in DOCS:
+        (lairs_dir / f"{_doc}.md").write_text(read(_doc), encoding="utf-8")
 
     today = datetime.date.today().isoformat()
 

@@ -850,6 +850,48 @@ def onboard(target_dir: str):
 
 
 @main.command()
+@click.argument("name", required=False)
+@click.option("--export", "export_dir", type=click.Path(file_okay=False),
+              help="Write every framework doc into DIR.")
+def framework(name: str | None, export_dir: str | None):
+    """Read the lair authoring framework — how to write a corpus worth ranking.
+
+    \b
+    lbrain framework                       list the docs
+    lbrain framework AUTHORING_DISCIPLINE  print one
+    lbrain framework --export ./lairs      write them all out
+
+    Ranking quality is bounded by corpus quality. These ship with the tool because
+    an engine without its authoring contract is half a product (A-408).
+    """
+    from .framework import DOCS, path, read
+
+    if export_dir:
+        dest = Path(export_dir).expanduser().resolve()
+        dest.mkdir(parents=True, exist_ok=True)
+        for doc in DOCS:
+            (dest / f"{doc}.md").write_text(read(doc), encoding="utf-8")
+        click.secho(f"✓ wrote {len(DOCS)} framework docs to {dest}", fg="green")
+        return
+    if name:
+        key = name.removesuffix(".md").upper()
+        try:
+            click.echo(read(key))
+        except FileNotFoundError as e:
+            click.secho(f"✗ {e}", fg="red")
+            sys.exit(1)
+        return
+    click.secho("Lair authoring framework", bold=True)
+    click.echo()
+    for doc, blurb in DOCS.items():
+        click.secho(f"  {doc:<24}", fg="cyan", nl=False)
+        click.echo(blurb)
+    click.echo()
+    click.echo("  lbrain framework <NAME>          print one")
+    click.echo("  lbrain framework --export <DIR>  write them all out")
+
+
+@main.command()
 @click.option(
     "--transport",
     default="stdio",

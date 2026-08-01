@@ -293,14 +293,50 @@ def test_no_source_file_relies_on_the_locale_default_encoding():
 
 
 def test_onboarding_templates_are_not_cp1252_encodable():
-    """Pins WHY the encoding fix matters — if these ever become pure ASCII the
-    test above still stands, but this documents the original failure."""
-    from lbrain.onboard import STARTER_RULES
+    """Pins WHY the encoding fix matters.
 
-    non_ascii = [c for c in STARTER_RULES if ord(c) > 127]
-    if non_ascii:
-        fails = [c for c in non_ascii if _cp1252_fails(c)]
-        assert fails, "templates are cp1252-safe now; the encoding guard still applies"
+    RETARGETED 2026-08-01: this read `onboard.STARTER_RULES`, a 7-line paraphrase
+    that no longer exists — onboarding now writes the five real framework docs
+    (A-408). The risk did not go away, it GREW: those docs carry ≠ → ⇒ ✅ ┌ │ and
+    box-drawing characters, none of which encode in cp1252, and Windows uses the
+    locale codec whenever `encoding=` is omitted. Deleting the test with the
+    constant would have retired the guard exactly as its blast radius increased.
+    """
+    from lbrain.framework import DOCS, read
+
+    hostile = {d: sorted({c for c in read(d) if ord(c) > 127 and _cp1252_fails(c)})
+               for d in DOCS}
+    assert any(hostile.values()), (
+        "framework docs are cp1252-safe now; the encoding guard still applies"
+    )
+
+
+def test_every_onboarding_write_specifies_an_encoding():
+    """The other half — hostile characters only bite on a write that omits encoding.
+
+    Onboarding writes into a directory the user chose, on their platform. One
+    `write_text()` without `encoding=` is a UnicodeEncodeError on a Windows box
+    and nowhere else, i.e. invisible to this CI.
+    """
+    import inspect
+    import re
+
+    from lbrain import onboard
+
+    src = inspect.getsource(onboard)
+    # Every write_text( ... ) call, spanning lines, must name an encoding.
+    for m in re.finditer(r"write_text\(", src):
+        depth, i = 0, m.end() - 1
+        while i < len(src):
+            if src[i] == "(":
+                depth += 1
+            elif src[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        call = src[m.start():i + 1]
+        assert "encoding=" in call, f"write without encoding: {call[:90]!r}"
 
 
 def _cp1252_fails(ch: str) -> bool:
