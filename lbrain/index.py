@@ -277,18 +277,115 @@ def chunk(
                 buf = [sec]
                 buf_tokens = sec_tokens
             else:
-                # section bigger than max_tokens — sliding window
-                tokens = ENCODER.encode(sec)
-                step = max_tokens - overlap
-                for start in range(0, len(tokens), step):
-                    piece = ENCODER.decode(tokens[start : start + max_tokens])
-                    chunks.append(_make_chunk(doc, idx, piece, min(max_tokens, len(tokens) - start), ctx))
-                    idx += 1
+                # section bigger than max_tokens — line-aware, table-aware window
+                pieces, idx = _window_section(doc, sec, max_tokens, overlap, ctx, idx)
+                chunks.extend(pieces)
                 buf = []
                 buf_tokens = 0
     if buf:
         chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
     return chunks
+
+
+_TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
+_TABLE_SEP = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
+
+
+def _table_header_at(lines: list[str], i: int) -> list[str] | None:
+    """The two header lines of a markdown table starting at line ``i``, else None."""
+    if i + 1 < len(lines) and _TABLE_ROW.match(lines[i]) and _TABLE_SEP.match(lines[i + 1]):
+        return [lines[i], lines[i + 1]]
+    return None
+
+
+def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
+                    ctx: str, idx: int) -> tuple[list["Chunk"], int]:
+    """Split an oversized section without cutting a line, or orphaning table rows.
+
+    Closes A-412. The previous path token-sliced the section, so a boundary could
+    land mid-row and — far worse for a corpus whose house style mandates *tables
+    over prose* — a continuation chunk could carry rows with **no header**. Rows
+    without their header are not degraded, they are uninterpretable: `| 0.25 | ✅ |`
+    means nothing without the columns naming it. Structured serving displays chunk
+    text verbatim, so that lands in front of the model exactly as stored.
+
+    Two guarantees:
+      1. a line is never split (only a single line that alone exceeds the budget
+         falls back to token slicing, which is unavoidable);
+      2. when a break falls INSIDE a table, the next chunk is re-seeded with that
+         table's header + separator, so every chunk of a table is self-describing.
+
+    Non-table content keeps a trailing-line overlap, preserving the continuity the
+    old token window provided. Sections that fit within ``max_tokens`` never reach
+    this function, so the blast radius is oversized sections only.
+    """
+    lines = sec.split("\n")
+    out: list[Chunk] = []
+    buf: list[str] = []
+    buf_tokens = 0
+    header: list[str] = []
+    header_idx = -1
+
+    def _tok(text: str) -> int:
+        return len(ENCODER.encode(text))
+
+    def _flush() -> list[str]:
+        """Emit the buffer; return its trailing lines within the overlap budget."""
+        nonlocal buf, buf_tokens, idx, out
+        if not buf:
+            return []
+        out.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
+        idx += 1
+        tail: list[str] = []
+        total = 0
+        for line in reversed(buf):
+            t = _tok(line + "\n")
+            if total + t > overlap:
+                break
+            tail.insert(0, line)
+            total += t
+        buf, buf_tokens = [], 0
+        return tail
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        found = _table_header_at(lines, i)
+        if found:
+            header, header_idx = found, i
+        elif not _TABLE_ROW.match(line):
+            header, header_idx = [], -1
+
+        lt = _tok(line + "\n")
+        if lt > max_tokens:
+            # One line larger than the whole budget. Nothing to preserve — slice it.
+            _flush()
+            toks = ENCODER.encode(line)
+            step = max(1, max_tokens - overlap)
+            for start in range(0, len(toks), step):
+                out.append(_make_chunk(
+                    doc, idx, ENCODER.decode(toks[start : start + max_tokens]),
+                    min(max_tokens, len(toks) - start), ctx))
+                idx += 1
+            i += 1
+            continue
+
+        if buf and buf_tokens + lt > max_tokens:
+            tail = _flush()
+            # Inside a table (and past its own header lines) → re-seed with the
+            # header instead of the tail, so the rows that follow stay readable.
+            if header and i > header_idx + 1:
+                buf = list(header)
+            else:
+                buf = tail
+            buf_tokens = _tok("\n".join(buf)) if buf else 0
+
+        buf.append(line)
+        buf_tokens += lt
+        i += 1
+
+    _flush()
+    return out, idx
 
 
 def _split_on_headers(body: str) -> list[str]:
