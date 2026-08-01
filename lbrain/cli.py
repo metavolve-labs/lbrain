@@ -472,11 +472,23 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
         stored_cv = "1 (unversioned)" if store.stats().get("docs", 0) else None
     cv_stale = stored_cv is not None and not stored_cv.startswith(str(CHUNKER_VERSION))
     if cv_stale and not rechunk:
+        # Say what it COSTS, not merely what it does. On-device re-embedding is
+        # time; a hosted provider is money the user did not ask to spend, and an
+        # upgrade that quietly bills is the "plausible default" failure in its
+        # most expensive form.
+        hosted = getattr(cfg, "embedding_provider", "local") != "local"
+        cost = (
+            f"    Your provider is {cfg.embedding_provider!r} — re-embedding is a "
+            f"BILLED API call. Run `lbrain embed --stale` when you are ready to "
+            f"spend it; retrieval keeps working on the old vectors until you do.\n"
+            if hosted else
+            "    Your provider is 'local', so re-embedding costs time, not money.\n"
+        )
         click.secho(
             f"  ⚠ chunker changed (index built by v{stored_cv}, this build is "
             f"v{CHUNKER_VERSION}) — re-chunking every document.\n"
-            f"    Chunk hashes will change, so `lbrain embed --stale` will re-embed "
-            f"the affected docs.", fg="yellow")
+            f"{cost}"
+            f"    To skip: pin the previous lbrain version.", fg="yellow")
     force_rechunk = rechunk or cv_stale
 
     t0 = time.monotonic()

@@ -792,3 +792,50 @@ def test_core_memory_truncation_is_announced(tmp_path, capsys):
     small.write_text("- short\n", encoding="utf-8")
     assert not amp.core_block(str(small), 200).rstrip().endswith("…")
     assert "DROPPED" not in capsys.readouterr().err
+
+
+# ==========================================================================
+# abstractions are derived synthesis, never artifact-by-default
+# ==========================================================================
+
+
+def test_an_abstraction_is_never_artifact_by_default():
+    """Measured 2026-08-01: 855 of 2,013 live docs (42.5%) are `type: abstraction`
+    — LLM syntheses of our OWN corpus, `generated_by: lbrain consolidate`. Under
+    `disclosure_default = "artifact"` every one was disclosed to `independent`,
+    handing a blinded reviewer condensed restatements of the conclusions it was
+    convened to check. A category error, not a heuristic miss.
+    """
+    assert D.classify("", None, "artifact", "abstraction") == D.CLASS_PROPOSAL
+    # NEGATIVE CONTROL — an ordinary doc under the same default is still artifact,
+    # so this is not just "the default stopped working".
+    assert D.classify("", None, "artifact", "project") == D.CLASS_ARTIFACT
+    assert D.classify("", None, "artifact", "") == D.CLASS_ARTIFACT
+
+
+def test_an_explicit_class_still_overrides_the_abstraction_rule():
+    """The author overriding a default is what the precedence order is for."""
+    assert D.classify("artifact", None, "", "abstraction") == D.CLASS_ARTIFACT
+
+
+def test_a_belief_that_is_also_typed_abstraction_keeps_its_lifecycle_class():
+    """Belief lifecycle is more specific than doc_type and must win."""
+    assert D.classify("", "draft", "artifact", "abstraction") == D.CLASS_PRIVATE
+    assert D.classify("", "promoted", "artifact", "abstraction") == D.CLASS_ARTIFACT
+
+
+def test_independent_withholds_abstractions_end_to_end():
+    env = D.resolve(_Cfg(disclosure_default="artifact"),
+                    env={"LBRAIN_DISCLOSURE": "independent"}, warn=False)
+    hits = [_hit("abstraction-abc.md", doc_type="abstraction"),
+            _hit("real-finding.md", doc_type="project")]
+    kept, w = _apply(hits, env)
+    assert [h.rel_path for h in kept] == ["real-finding.md"]
+    assert w.by_class.get("proposal") == 1
+
+    # NEGATIVE CONTROL — collaborative admits proposals, so the abstraction
+    # returns. "Withheld everywhere" would mean the class was simply dropped.
+    coll = D.resolve(_Cfg(disclosure_default="artifact"),
+                     env={"LBRAIN_DISCLOSURE": "collaborative"}, warn=False)
+    kept2, _ = _apply([_hit("abstraction-abc.md", doc_type="abstraction")], coll)
+    assert len(kept2) == 1

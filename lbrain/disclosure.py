@@ -374,19 +374,40 @@ def core_admits_context(env: "Envelope | None") -> bool:
     return admits is None or CLASS_PROPOSAL in admits
 
 
-def classify(raw_class: str, belief_state: str | None, default_class: str) -> str:
+def classify(
+    raw_class: str, belief_state: str | None, default_class: str, doc_type: str = ""
+) -> str:
     """The disclosure class of one document. Precedence is explicit → derived →
     configured default → unclassified.
 
     A belief's lifecycle already answers this question, so it is not asked twice:
     a draft is one agent's working memory (`private`); anything promoted or
     withdrawn is a durable record of what this agent concluded (`artifact`).
+
+    An ABSTRACTION is never artifact-by-default, and this is a category
+    correction rather than a heuristic tweak. `type: abstraction` documents are
+    LLM syntheses of our OWN corpus (`generated_by: lbrain consolidate`), so
+    `disclosure_default = "artifact"` was handing a blinded reviewer 855
+    condensed restatements of the conclusions it was convened to check — 42.5% of
+    the live corpus, measured 2026-08-01. A synthesis is framing, which is what
+    `proposal` already means, so it rides that rule: withheld under `independent`,
+    delivered under `collaborative`.
+
+    Consistent with how the rest of the codebase already treats them: the recency
+    guard demotes abstractions below source documents because "mtime is
+    generation time, not content age". Second-class for freshness, second-class
+    for disclosure.
+
+    An explicit `disclosure:` in frontmatter still wins — the author overriding a
+    default is exactly what the precedence order is for.
     """
     v = (raw_class or "").strip().lower()
     if v in CLASSES:
         return v
     if belief_state:
         return CLASS_PRIVATE if belief_state == "draft" else CLASS_ARTIFACT
+    if (doc_type or "").strip().lower() == "abstraction":
+        return CLASS_PROPOSAL
     return default_class
 
 
@@ -465,7 +486,7 @@ def apply(
             continue
 
         cls = classify(classes.get(h.rel_path, ""), (belief_states.get(h.rel_path) or (None, None))[1],
-                       env.default_class)
+                       env.default_class, h.doc_type)
         admitted = env.admits
         if admitted is not None and cls not in admitted:
             w.note(cls if cls else "unclassified")

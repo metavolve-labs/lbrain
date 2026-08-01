@@ -86,6 +86,36 @@ def test_same_version_does_not_rechunk(tmp_path, monkeypatch):
     assert "unchanged: 1" in res.output
 
 
+def test_hosted_provider_upgrade_warns_that_it_COSTS(tmp_path, monkeypatch):
+    """An upgrade that quietly bills is the plausible-default failure at its worst.
+
+    On-device re-embedding is time. A hosted provider is money the user did not
+    ask to spend, and the warning must name that before they run embed --stale.
+    """
+    home = tmp_path / "h"; home.mkdir()
+    (home / "config.toml").write_text(
+        'embedding_provider = "gemini"\nembedding_dim = 1536\n', encoding="utf-8")
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "import", str(src))
+    st = Store(home / "brain.db", embedding_dim=1536)
+    st.set_meta("chunker_version", "1"); st.close()
+    res = _run(home, monkeypatch, "import", str(src))
+    assert "BILLED API call" in res.output
+    assert "keeps working on the old vectors" in res.output
+
+
+def test_local_provider_upgrade_says_it_is_free(tmp_path, monkeypatch):
+    home = tmp_path / "h"; home.mkdir()
+    (home / "config.toml").write_text('embedding_provider = "local"\n', encoding="utf-8")
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "import", str(src))
+    st = Store(home / "brain.db", embedding_dim=384)
+    st.set_meta("chunker_version", "1"); st.close()
+    res = _run(home, monkeypatch, "import", str(src))
+    assert "costs time, not money" in res.output
+    assert "BILLED" not in res.output
+
+
 def test_rechunk_flag_forces_it_without_a_version_change(tmp_path, monkeypatch):
     home = tmp_path / "h"; home.mkdir()
     (home / "config.toml").write_text('embedding_provider = "local"\n', encoding="utf-8")
