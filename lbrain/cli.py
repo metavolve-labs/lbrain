@@ -13,7 +13,7 @@ from . import amp
 from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import make_embedder
 from .index import chunk as chunk_doc
-from .index import discover, parse
+from .index import CHUNKER_VERSION, discover, parse
 from .lair_protocol import detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
@@ -445,7 +445,9 @@ def _project_belief(store, doc) -> int:
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--prune/--no-prune", default=True, help="Drop docs no longer on disk")
 @click.option("--force-prune", is_flag=True, help="Override the prune safety guards (mount-gone / >50%)")
-def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
+@click.option("--rechunk", is_flag=True,
+              help="Re-chunk every document even if its body is unchanged.")
+def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: bool):
     """Walk source directories and ingest markdown into the brain."""
     cfg = Config.load()
     sources = [Path(p).expanduser().resolve() for p in paths] if paths else cfg.sources
@@ -454,6 +456,29 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
         sys.exit(1)
 
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+
+    # A chunker upgrade must reach the DATA, not just the code. Import short-circuits
+    # on the body hash, so shipping new chunk boundaries left every existing corpus on
+    # the old ones — silently, and with no way for a user to notice their index was
+    # built by code they no longer run. Same failure shape as reading a code default
+    # and calling it live (doctrine rule 2), one layer down: `installed` != `applied`.
+    stored_cv = store.get_meta("chunker_version")
+    # A brain that predates this guard carries NO version — and that is precisely
+    # the population that needs re-chunking, since it was built by v1 by definition.
+    # Treating "unknown" as "current" would have made the guard a no-op for every
+    # existing install while looking correct on a fresh one: the same incomplete-fix
+    # shape logged as A-005 and A-404.
+    if stored_cv is None:
+        stored_cv = "1 (unversioned)" if store.stats().get("docs", 0) else None
+    cv_stale = stored_cv is not None and not stored_cv.startswith(str(CHUNKER_VERSION))
+    if cv_stale and not rechunk:
+        click.secho(
+            f"  ⚠ chunker changed (index built by v{stored_cv}, this build is "
+            f"v{CHUNKER_VERSION}) — re-chunking every document.\n"
+            f"    Chunk hashes will change, so `lbrain embed --stale` will re-embed "
+            f"the affected docs.", fg="yellow")
+    force_rechunk = rechunk or cv_stale
+
     t0 = time.monotonic()
     new_docs = 0
     updated_docs = 0
@@ -475,7 +500,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
                 # the supersessions FK (src_path → docs.rel_path) requires the docs row
                 # to already exist, so this MUST run after the row is present: in the
                 # unchanged branch the row exists already; otherwise after upsert_doc.
-                if existing_hash == doc.doc_hash:
+                if existing_hash == doc.doc_hash and not force_rechunk:
                     # Body unchanged. Frontmatter may still have changed, and it
                     # is invisible to doc_hash (A-401) — refresh the row only,
                     # never the chunks: a metadata edit changes no chunk, so
@@ -521,6 +546,10 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool):
             click.secho(f"✗ {e}", fg="red")
             sys.exit(1)
 
+    # Stamp AFTER a successful pass only. A crash mid-import must leave the old
+    # version recorded, so the next run re-chunks rather than believing it already
+    # did — the failure mode this whole guard exists to prevent.
+    store.set_meta("chunker_version", CHUNKER_VERSION)
     stats = store.stats()
     store.close()
     dt = time.monotonic() - t0

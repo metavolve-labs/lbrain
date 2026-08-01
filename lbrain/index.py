@@ -287,6 +287,17 @@ def chunk(
     return chunks
 
 
+# Bump whenever chunk BOUNDARIES change. Import short-circuits on the body hash
+# (`existing_hash == doc.doc_hash`), which is correct for content but blind to the
+# algorithm: shipping A-412's table-aware windowing left every existing corpus on
+# the old boundaries, silently, with no way for a user to notice their index was
+# built by code they no longer run. `doctor` already fingerprints the EMBEDDING
+# provider/model/dim against stored values; this applies the same idea to the
+# chunker, which had no version identity at all.
+#
+# 1 -> 2 : line-aware, table-aware _window_section (A-412, 2026-08-01)
+CHUNKER_VERSION = 2
+
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
 
