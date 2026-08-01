@@ -531,6 +531,20 @@ def render_response(
     out: list[str] = []
     if kept:
         out.append(amp.UNTRUSTED_NOTICE)
+
+    # Core memory is assembled BEFORE the blinding notice is rendered, because
+    # splitting it is what discovers how much core CONTEXT was withheld. Computing
+    # the notice first — the obvious order, and what this did on the first pass —
+    # produced a notice that silently under-reported the single highest-leverage
+    # withholding in the system.
+    core = ""
+    if include_core:
+        core = amp.core_block(
+            getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900),
+            envelope=getattr(hits, "envelope", None),
+            withheld=getattr(hits, "withheld", None),
+        )
+
     # Blinding notice FIRST — ahead of the untrusted fence, the core block and
     # every record. A reader who is being blinded must learn it before reading
     # anything, not from a footnote after forming a view. Emitted even when zero
@@ -539,14 +553,10 @@ def render_response(
     blind = blinding_notice(hits)
     if blind:
         out.insert(0, blind + "\n")
-    if include_core:
-        core = amp.core_block(
-            getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900)
-        )
-        if core:
-            # per-line-prefixed fence: the notice's "every fenced line is
-            # prefixed with │" contract must hold for the core block too
-            out.append(fence_block(core.strip()))
+    if core:
+        # per-line-prefixed fence: the notice's "every fenced line is
+        # prefixed with │" contract must hold for the core block too
+        out.append(fence_block(core.strip()))
     if len(kept) < len(hits):
         out.append(f"--- {len(kept)} of {len(hits)} {hits_label} (AMP-budgeted) ---\n")
     else:

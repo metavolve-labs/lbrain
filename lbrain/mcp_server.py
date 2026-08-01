@@ -120,12 +120,15 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
             return warn + render_response(cfg, hits, query)
         kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
         out = []
+        core = amp.core_block(
+            getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900),
+            envelope=getattr(hits, "envelope", None), withheld=getattr(hits, "withheld", None),
+        )
         blind = blinding_notice(hits)   # prose must disclose the blinding too
         if blind:
             out.append(blind + "\n")
         if kept:
             out.append(amp.UNTRUSTED_NOTICE)
-        core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
         if core:
             out.append(amp.fence(core.strip()))
         label = f"{len(kept)} of {len(hits)} hits (AMP-budgeted)" if len(kept) < len(hits) else f"{len(hits)} hits"

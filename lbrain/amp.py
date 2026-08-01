@@ -95,7 +95,7 @@ def budget(hits, max_chars: int, per_chunk_chars: int):
     return kept, used
 
 
-def core_block(path: str, max_chars: int = 900) -> str:
+def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) -> str:
     """Letta-style always-on 'core memory': a curated durable-context block injected
     ahead of retrieved hits, so the essentials are always present regardless of whether
     a query happens to match them. Where AMP gates/budgets the *episodic* recall, this
@@ -103,8 +103,23 @@ def core_block(path: str, max_chars: int = 900) -> str:
 
     `path` is a markdown file the user/agent curates (empty/missing → no-op, returns "").
     Truncates on a line boundary to stay within `max_chars`.
+
+    When an `envelope` is supplied the file is SPLIT (disclosure.split_core):
+    doctrine — role, standards, standing orders — is delivered in every mode,
+    while context — project state, conclusions, framing — is withheld under a
+    blinding mode. This is the one injection path retrieval filtering never
+    sees, so leaving it whole would make `independent` decorative; withholding
+    it whole would strip the persona of the standing orders that ARE the
+    exoskeleton. Unmarked content counts as context, i.e. fail closed.
+
+    Truncation is applied AFTER the split and to the delivered text only, so a
+    long context block can no longer push doctrine out of the budget. That
+    ordering matters: A-421 was exactly this failure — the char budget silently
+    ate the newest, most-hedged lines because corrections are appended last.
     """
     import os
+
+    from .disclosure import core_admits_context, split_core
 
     if not path or not os.path.exists(path):
         return ""
@@ -114,9 +129,23 @@ def core_block(path: str, max_chars: int = 900) -> str:
         return ""
     if not text:
         return ""
+
+    label = "🧠 Core memory (always-on):"
+    if envelope is not None:
+        doctrine, context = split_core(text)
+        if core_admits_context(envelope):
+            text = "\n\n".join(p for p in (doctrine, context) if p)
+        else:
+            if withheld is not None and context:
+                withheld.core_context_chars += len(context)
+            text = doctrine
+            label = "🧠 Core memory — DOCTRINE ONLY (context withheld by disclosure mode):"
+        if not text:
+            return ""
+
     if len(text) > max_chars:
         text = text[:max_chars].rsplit("\n", 1)[0].rstrip() + "\n  …"
-    return "🧠 Core memory (always-on):\n" + text + "\n"
+    return label + "\n" + text + "\n"
 
 
 def provenance(kept, total: int, used_chars: int, budget_chars: int, strategy: str = "tool") -> str:

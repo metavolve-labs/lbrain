@@ -486,6 +486,146 @@ def test_no_notice_when_nothing_was_withheld():
 
 
 # ==========================================================================
+# core memory — the one injection path retrieval filtering never sees
+# ==========================================================================
+
+
+CORE = """# Core memory
+
+## Doctrine — always delivered
+- Proof-first; never fabricate; report faithfully.
+
+## Context — project state
+- Matrix B: cross-architecture blind spots are REAL here.
+"""
+
+
+def test_the_split_puts_standing_orders_in_doctrine_and_conclusions_in_context():
+    doctrine, context = D.split_core(CORE)
+    assert "never fabricate" in doctrine
+    assert "Matrix B" not in doctrine, "a revisable conclusion is not doctrine"
+    assert "Matrix B" in context
+    assert "never fabricate" not in context
+
+
+def test_an_unmarked_core_memory_is_ENTIRELY_context():
+    """Fail closed. The recoverable error is a persona noticing its doctrine is
+    missing; the unrecoverable one is a reviewer silently handed the conclusion it
+    was convened to check. Measured on the live file 2026-07-31: ~8 of 11 lines
+    were conclusions and framing, and NONE of it was marked."""
+    doctrine, context = D.split_core("- Leading with LBrain.\n- Moat = THREE findings.")
+    assert doctrine == ""
+    assert "Moat" in context
+
+
+def test_content_before_the_first_heading_is_context():
+    doctrine, context = D.split_core("preamble line\n\n## Doctrine\n- rule")
+    assert "preamble" in context and "preamble" not in doctrine
+    assert "rule" in doctrine
+
+
+def test_a_non_doctrine_heading_CLOSES_a_doctrine_section():
+    doctrine, context = D.split_core(
+        "## Doctrine\n- rule\n## Findings\n- conclusion\n")
+    assert "rule" in doctrine and "conclusion" not in doctrine
+    assert "conclusion" in context
+
+
+def test_heading_matching_is_by_CONTAINMENT_so_agentx_needs_no_change():
+    """`personas/_shared/DOCTRINE.md` opens `## Binding doctrine — every persona,
+    always on`. Matching on containment rather than prefix means that file
+    classifies correctly today with zero edits, and the router lane's
+    concatenation of four sources composes sections instead of fighting them."""
+    doctrine, context = D.split_core(
+        "## Binding doctrine — every persona, always on\n- Verify LIVE state.\n")
+    assert "Verify LIVE state" in doctrine and context == ""
+
+
+def test_doctrine_is_delivered_in_EVERY_mode():
+    """Doctrine reaching the agent in every mode IS the exoskeleton — a blinded
+    reviewer still has to know its standards."""
+    for mode in D.MODES:
+        env = D.resolve(_Cfg(), env={"LBRAIN_DISCLOSURE": mode}, warn=False)
+        assert D.core_admits_context(env) == (mode in (D.MODE_FULL, D.MODE_COLLABORATIVE)), mode
+
+
+def test_independent_delivers_doctrine_and_withholds_context(tmp_path):
+    from lbrain import amp
+
+    p = tmp_path / "CORE.md"
+    p.write_text(CORE, encoding="utf-8")
+    env = D.resolve(_Cfg(), env={"LBRAIN_DISCLOSURE": "independent"}, warn=False)
+    w = D.Withheld()
+
+    blinded = amp.core_block(str(p), 4000, envelope=env, withheld=w)
+    assert "never fabricate" in blinded, "the persona must keep its standing orders"
+    assert "Matrix B" not in blinded, "a blinded reviewer must not receive the conclusion"
+    assert "DOCTRINE ONLY" in blinded, "and must be told the block was cut"
+    assert w.core_context_chars > 0
+
+    # NEGATIVE CONTROL — unblinded delivers both, so "absent" is not just an
+    # empty file or a broken reader.
+    full = amp.core_block(str(p), 4000,
+                          envelope=D.resolve(_Cfg(), env={"LBRAIN_DISCLOSURE": "full"}, warn=False),
+                          withheld=D.Withheld())
+    assert "never fabricate" in full and "Matrix B" in full
+
+
+def test_no_envelope_leaves_core_memory_BYTE_IDENTICAL(tmp_path):
+    """Every call that predates this layer must be unchanged — and "unchanged"
+    means the bytes, not merely the set of facts present.
+
+    The fixture puts CONTEXT FIRST on purpose. An earlier version of this test
+    used a doctrine-first file, so splitting and rejoining happened to reproduce
+    the original order and a mutation that split unconditionally SURVIVED. Core
+    memory is injected ahead of every query; silently reordering it is a real
+    behaviour change that no assertion about content would ever catch.
+    """
+    from lbrain import amp
+
+    interleaved = (
+        "# Core memory\n\n"
+        "## Context — project state\n- Matrix B: blind spots are REAL here.\n\n"
+        "## Doctrine — always delivered\n- Proof-first; never fabricate.\n"
+    )
+    p = tmp_path / "CORE.md"
+    p.write_text(interleaved, encoding="utf-8")
+
+    out = amp.core_block(str(p), 4000)
+    assert out == "🧠 Core memory (always-on):\n" + interleaved.strip() + "\n", \
+        "an envelope-free call must return the file verbatim, in file order"
+    assert "DOCTRINE ONLY" not in out
+
+    # NEGATIVE CONTROL — with an envelope the reordering IS expected, so the
+    # equality above is pinning the no-envelope path specifically.
+    env = D.resolve(_Cfg(), env={"LBRAIN_DISCLOSURE": "full"}, warn=False)
+    assert amp.core_block(str(p), 4000, envelope=env, withheld=D.Withheld()) != out
+
+
+def test_core_withholding_is_announced_even_when_no_record_was_withheld():
+    """The core block bypasses retrieval, so silence here is the worst silence:
+    the agent would receive a doctrine-only view with nothing telling it so."""
+    w = D.Withheld()
+    w.core_context_chars = 412
+    note = w.notice("independent")
+    assert "Core memory" in note and "412" in note and "doctrine delivered" in note
+
+
+def test_truncation_can_no_longer_evict_doctrine(tmp_path):
+    """A-421 was exactly this: the char budget silently ate the newest lines
+    because corrections are appended last. Splitting BEFORE truncating means a
+    long context block can no longer push standing orders out of the budget."""
+    from lbrain import amp
+
+    p = tmp_path / "CORE.md"
+    p.write_text("## Context\n" + ("- filler line that is quite long\n" * 200)
+                 + "\n## Doctrine\n- never fabricate\n", encoding="utf-8")
+    env = D.resolve(_Cfg(), env={"LBRAIN_DISCLOSURE": "independent"}, warn=False)
+    out = amp.core_block(str(p), 200, envelope=env, withheld=D.Withheld())
+    assert "never fabricate" in out, "doctrine must survive a budget the context blew"
+
+
+# ==========================================================================
 # classification comes from the file
 # ==========================================================================
 

@@ -114,6 +114,10 @@ class Withheld:
     by_class: dict[str, int] = field(default_factory=dict)
     by_permission: int = 0
     total: int = 0
+    # Core memory is not a record, so it is counted separately rather than folded
+    # into `total`. Reporting "1 record withheld" for the always-on block would
+    # understate it: it is the one channel every single query receives.
+    core_context_chars: int = 0
 
     def note(self, reason: str) -> None:
         self.by_class[reason] = self.by_class.get(reason, 0) + 1
@@ -126,13 +130,27 @@ class Withheld:
         return ", ".join(parts) or "0"
 
     def notice(self, mode: str) -> str:
-        if not self.total:
+        if not self.total and not self.core_context_chars:
             return ""
+        core = ""
+        if self.core_context_chars:
+            core = (
+                f"\n  Core memory: {self.core_context_chars} chars of CONTEXT withheld; "
+                "doctrine delivered."
+            )
+        if not self.total:
+            # Core-only withholding still has to be announced — this is the path
+            # that bypasses retrieval, so silence here is the worst silence.
+            return (
+                f"⚠ Core-memory context WITHHELD by disclosure mode '{mode}'.\n"
+                "  You are reading a deliberately blinded view. Do not treat what remains as\n"
+                f"  the whole record.{core}"
+            )
         unclassified = self.by_class.get("unclassified", 0)
         return WITHHELD_NOTICE.format(
             n=self.total, mode=mode, detail=self.detail(),
             hint=_CLASSIFY_HINT if unclassified and unclassified == self.total else "",
-        )
+        ) + core
 
 
 @dataclass(frozen=True)
@@ -283,6 +301,77 @@ def resolve(
         default_class=default_class,
         warnings=tuple(warnings),
     )
+
+
+# --- core memory: the one injection path that bypasses retrieval entirely ----
+#
+# `core_memory_path` is injected ahead of EVERY query, so it is the highest-leverage
+# channel in the system and the only one the record filter never sees. Left
+# unclassified it makes `independent` a lie: measured on the live file
+# 2026-07-31, ~8 of 11 lines were project conclusions and framing — including
+# "cross-architecture blind spots are REAL here" and an explicit instruction on
+# how to argue them — delivered to a reviewer who is supposed to be blind.
+#
+# Classifying the file WHOLE is wrong in both directions. Withhold it entirely
+# and the persona loses its standing orders, which IS the exoskeleton. Deliver it
+# entirely and the blinding is decorative. So it splits:
+#
+#   doctrine — role, standards, standing orders  → delivered in EVERY mode
+#   context  — project state, conclusions, framing → rides the `proposal` rule
+#
+# The boundary test, applicable line by line: COULD THIS BE FALSE TOMORROW
+# WITHOUT CHANGING THE AGENT'S ROLE? Yes → context. No → doctrine. "Never
+# fabricate" cannot be revised by evidence; "Matrix B shows 3.8% → 95.8%" can.
+# An imperative is doctrine; the evidence FOR that imperative is context, which
+# is why a bullet welding the two together gets split rather than classified.
+_DOCTRINE_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*doctrine.*)$", re.IGNORECASE)
+_ANY_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+
+
+def split_core(text: str) -> tuple[str, str]:
+    """Split core-memory markdown into (doctrine, context).
+
+    A heading CONTAINING the word "doctrine" opens a doctrine section; the next
+    heading of any kind closes it. Everything else — including everything before
+    the first heading — is context.
+
+    Fail closed: an unmarked file is entirely CONTEXT, so a core memory nobody
+    has classified is withheld under a blinding mode rather than delivered. The
+    recoverable error is a persona that notices its doctrine is missing; the
+    unrecoverable one is a reviewer silently handed the conclusion it was
+    convened to check.
+
+    "Contains doctrine" rather than "starts with" is deliberate: Agent-X's
+    `personas/_shared/DOCTRINE.md` already opens `## Binding doctrine — every
+    persona, always on`, so it classifies correctly with no change to that file,
+    and the router lane's concatenation of four sources composes sections instead
+    of fighting them.
+    """
+    doctrine: list[str] = []
+    context: list[str] = []
+    in_doctrine = False
+    for line in (text or "").splitlines():
+        if _ANY_HEADING_RE.match(line):
+            in_doctrine = bool(_DOCTRINE_HEADING_RE.match(line))
+            # The heading itself follows its section, so a delivered doctrine
+            # block keeps the header that explains what it is.
+            (doctrine if in_doctrine else context).append(line)
+            continue
+        (doctrine if in_doctrine else context).append(line)
+    return "\n".join(doctrine).strip(), "\n".join(context).strip()
+
+
+def core_admits_context(env: "Envelope | None") -> bool:
+    """Whether this envelope may receive core-memory CONTEXT.
+
+    Rides the `proposal` admission rule rather than defining a parallel one —
+    core context IS framing and state, which is precisely what `proposal` means.
+    One rule, so the two cannot drift apart.
+    """
+    if env is None:
+        return True
+    admits = env.admits
+    return admits is None or CLASS_PROPOSAL in admits
 
 
 def classify(raw_class: str, belief_state: str | None, default_class: str) -> str:

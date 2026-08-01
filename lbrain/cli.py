@@ -656,13 +656,18 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         # least fenced. Our own CLAUDE.md tells agents to shell out to
         # `lbrain query`, so this output lands straight in an agent's context;
         # \x1b also reached a human's terminal intact. Red-team 2026-07-28, #5.
+        # Core first: splitting it is what discovers the core-context withholding
+        # the notice must report (same ordering rule as render_response).
+        core = amp.core_block(
+            getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900),
+            envelope=getattr(hits, "envelope", None), withheld=getattr(hits, "withheld", None),
+        )
         blind = blinding_notice(hits)   # prose must disclose the blinding too
         if blind:
             click.secho(blind + "\n", fg="yellow")
         if kept:
             click.secho(amp.UNTRUSTED_NOTICE, fg="red")
 
-        core = amp.core_block(getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900))
         if core:
             click.secho(fence_block(core.strip()), fg="green")
 
