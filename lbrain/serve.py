@@ -352,9 +352,16 @@ def _header(idx: int, h: Hit, verdict: str | None) -> str:
     star = "★ " if h.is_priority else ""
     title = sanitize_field(h.title, 100)
     src = sanitize_field(h.rel_path, 160)
-    dt = h.doc_type if h.doc_type in DOC_TYPES else "?"
+    # doc_type comes from frontmatter only, so a corpus of plain markdown — which
+    # is exactly what `lbrain init --source ~/notes` points at — has none. Emitting
+    # "type=?" on every record made the documented first query look broken, and did
+    # not match the sample output in the README. Omit the field when it says nothing;
+    # cli.py has always guarded it this way.
+    dt = h.doc_type if h.doc_type in DOC_TYPES else ""
     label, date = record_date(h)
-    parts = [f"src: {src}", f"chunk {h.chunk_idx}", f"type={dt}"]
+    parts = [f"src: {src}", f"chunk {h.chunk_idx}"]
+    if dt:
+        parts.append(f"type={dt}")
     if date:
         parts.append(f"{label} {date}")
     if "superseded" in h.boosts:

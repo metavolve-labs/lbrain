@@ -88,7 +88,8 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
         for i, h in enumerate(kept, 1):
             prefix = "★ " if h.is_priority else "  "
             out.append(f"{prefix}[{i}] {h.title}  (score={h.score:.3f})")
-            out.append(f"    {h.rel_path} :: chunk {h.chunk_idx}  type={h.doc_type or '?'}")
+            dt = f"  type={h.doc_type}" if h.doc_type else ""
+            out.append(f"    {h.rel_path} :: chunk {h.chunk_idx}{dt}")
             preview = h.text.strip().replace("\n", " ")[:getattr(cfg, "amp_per_chunk_chars", 360)]
             out.append(f"    {amp.fence(preview)}\n")
         if getattr(cfg, "amp_provenance", True):
