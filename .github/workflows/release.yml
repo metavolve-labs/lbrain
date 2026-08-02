@@ -13,10 +13,23 @@
 # A version can never be reused on PyPI — only yanked. Tag deliberately.
 name: Release
 
+# DISPATCH-ONLY, deliberately. There is no `push: tags` trigger.
+#
+# The intended gate was the `pypi` environment's Required Reviewers. That rule is
+# unavailable here: GitHub returns 422 "please ensure the billing plan supports the
+# required reviewers protection rule" — it needs Enterprise on a private repo, and
+# this org is on Team. Verified against the API, not assumed.
+#
+# So the gate is the trigger itself. With no tag trigger, publishing cannot happen
+# as a side effect of pushing a tag; a human must open Actions and press Run
+# workflow. That is approval-by-initiation instead of approval-by-review — weaker
+# in that it is one person, stronger in that it cannot fire by accident, which is
+# the failure that actually worries us. A version is burned forever on upload.
+#
+# If this org moves to Enterprise, add Required Reviewers to the `pypi` environment
+# and a `push: tags` trigger can be restored safely.
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:        # manual re-run without cutting a new tag
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -30,18 +43,37 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Refuse to publish a tag that disagrees with the code
-        # The exact `installed ≠ applied` confusion that produced a "release: 0.1.2"
-        # commit which never shipped, with 20 commits on top. If the tag and
-        # pyproject.toml disagree, one of them is lying to a future reader.
+      - name: Refuse to republish a version, and refuse an untagged one
+        # Rewritten 2026-08-03. The first version of this step keyed on
+        # GITHUB_REF_TYPE == tag — and once the tag trigger was removed to create a
+        # human gate, it could never fire again. A guard that cannot run is worse
+        # than no guard: it reads as protection in the diff and enforces nothing.
+        # Same false-comfort shape as a green test run that collects no tests.
+        #
+        # Two checks that DO fire on a dispatch, both aimed at the irreversible part:
+        #   1. the version is not already on PyPI  — an upload can never be undone,
+        #      and a version number can never be reused, only yanked. This is the
+        #      "you forgot to bump" catch.
+        #   2. a matching git tag exists           — so the published artifact maps
+        #      to a real commit. The absence of any tag is what made 0.1.1
+        #      untraceable to a commit in the first place.
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           PKG="$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
-          echo "tag=$TAG  pyproject=$PKG"
-          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "$TAG" != "$PKG" ]; then
-            echo "::error::tag v$TAG does not match pyproject version $PKG"
+          echo "pyproject version: $PKG"
+
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://pypi.org/pypi/lbrain/$PKG/json")
+          if [ "$CODE" = "200" ]; then
+            echo "::error::lbrain $PKG is ALREADY on PyPI. A version can never be reused — bump it."
             exit 1
           fi
+          echo "  not yet on PyPI (HTTP $CODE) — ok to publish"
+
+          git fetch --tags --quiet
+          if ! git rev-parse "v$PKG" >/dev/null 2>&1; then
+            echo "::error::no git tag v$PKG. Tag the commit you are publishing so the artifact maps to it."
+            exit 1
+          fi
+          echo "  tag v$PKG exists and points at $(git rev-parse --short "v$PKG")"
 
       - run: pip install build twine
       - run: python -m build
