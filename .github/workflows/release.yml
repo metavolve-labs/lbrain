@@ -1,0 +1,80 @@
+# Publish to PyPI via Trusted Publishing (OIDC). No API token is stored anywhere.
+#
+# Why OIDC and not a token: a long-lived upload token is a credential that has to
+# live somewhere, and "somewhere" is how credentials leak. This exchanges a
+# short-lived GitHub identity for a scoped upload right at publish time. Nothing
+# to store, nothing to rotate, nothing to find in git history later.
+#
+# The human gate is the `environment:` below, NOT a convention. Add required
+# reviewers to the `pypi` environment in Settings → Environments and this job
+# BLOCKS until a human approves it. That turns "never publish without approval"
+# from a sentence in a doc into something the runner enforces.
+#
+# A version can never be reused on PyPI — only yanked. Tag deliberately.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:        # manual re-run without cutting a new tag
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Refuse to publish a tag that disagrees with the code
+        # The exact `installed ≠ applied` confusion that produced a "release: 0.1.2"
+        # commit which never shipped, with 20 commits on top. If the tag and
+        # pyproject.toml disagree, one of them is lying to a future reader.
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "tag=$TAG  pyproject=$PKG"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG does not match pyproject version $PKG"
+            exit 1
+          fi
+
+      - run: pip install build twine
+      - run: python -m build
+      - run: python -m twine check dist/*
+
+      - name: The framework docs must actually be in the wheel
+        # A wheel built before the packaging fix had ZERO lbrain.framework entries
+        # and still passed twine check. `twine check` validates metadata, not
+        # contents — so this asserts the contents.
+        run: |
+          COUNT=$(python -c "
+          import zipfile,glob
+          w=sorted(glob.glob('dist/*.whl'))[-1]
+          print(len([n for n in zipfile.ZipFile(w).namelist() if n.startswith('lbrain/framework/')]))")
+          echo "lbrain/framework entries: $COUNT"
+          [ "$COUNT" -ge 6 ] || { echo "::error::wheel is missing lbrain.framework — rebuild"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi          # ← add required reviewers here to gate on a human
+    permissions:
+      id-token: write          # ← the OIDC token. Trusted Publishing needs exactly this.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # No `password:` — that is the point. PyPI verifies the OIDC claim against
+        # the publisher you registered (owner / repo / workflow / environment).
