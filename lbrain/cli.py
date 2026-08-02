@@ -18,10 +18,25 @@ from .lair_protocol import detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
 from .serve import render_response, resolve_mode
-from .store import Store
+from .store import SqliteExtensionError, Store
 
 
-@click.group()
+class _LBrainGroup(click.Group):
+    """Turn the unsupported-interpreter case into an error message, not a traceback.
+
+    A Python without loadable-extension support fails on the very first command a
+    new user runs. A stack trace ending in AttributeError tells them nothing; the
+    exception carries instructions, so print those and exit 1.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except SqliteExtensionError as exc:
+            raise click.ClickException(str(exc)) from None
+
+
+@click.group(cls=_LBrainGroup)
 @click.version_option(__version__, prog_name="lbrain")
 def main():
     """LBrain by Metavolve Labs — AI-native engineering memory with the Lair Protocol."""
