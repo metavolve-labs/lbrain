@@ -41,6 +41,35 @@ mcp = FastMCP("lbrain")
 PERSONA = os.environ.get("LBRAIN_PERSONA", "").strip()
 
 
+def _embedder_or_banner(cfg, banner: str):
+    """Build the embedder, or — on an unprovisioned home — return the banner instead.
+
+    Ordering bug, caught by CI where local runs could not see it. On a home with no
+    `config.toml`, `make_embedder` ran BEFORE the banner reached the caller; without
+    the optional `[local]` extra that call raises, so the answer was *"local
+    embeddings need the extra"* when the real condition is *"there is no brain
+    here."* A misdiagnosis pointing at the wrong fix — exactly the harm
+    unprovisioned_banner exists to prevent.
+
+    Deliberately narrow. An earlier attempt short-circuited whenever the banner was
+    non-empty, on the assumption that unprovisioned means no documents. **It does
+    not:** the banner keys on a missing `config.toml`, and a brain can carry an
+    indexed database without one — the disclosure-seam fixtures do exactly that, and
+    returning "0 hits" for them would have been a real regression. So this only
+    intercepts the case where the embedder genuinely cannot be built AND the home is
+    unprovisioned; a provisioned home still raises, because there the missing extra
+    IS the problem.
+
+    Returns (embedder, None) or (None, message).
+    """
+    try:
+        return make_embedder(cfg), None
+    except (RuntimeError, ModuleNotFoundError, ImportError):
+        if banner:
+            return None, banner
+        raise
+
+
 def unprovisioned_banner() -> str:
     """In-band notice when this server is bound to a home that was never provisioned.
 
@@ -145,7 +174,10 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
         if not ok:
             return unprovisioned + f"[AMP gate] no memory injected — {reason}."
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = make_embedder(cfg)
+    embedder, only_banner = _embedder_or_banner(cfg, unprovisioned)
+    if only_banner:
+        store.close()
+        return only_banner
     try:
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type,
                       priority_only=priority_only, rerank=rerank, recency=recency,
@@ -269,7 +301,10 @@ def lair_check_action(action_text: str) -> str:
     # notice, because there was no `withheld` to render one from.
     unprovisioned = unprovisioned_banner()
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
-    embedder = make_embedder(cfg)
+    embedder, only_banner = _embedder_or_banner(cfg, unprovisioned)
+    if only_banner:
+        store.close()
+        return only_banner + "✓ No conflicts with saved feedback rules."
     try:
         hits = search(cfg, store, embedder, action_text, k=8, doc_type="feedback",
                       persona=PERSONA or None, envelope=_envelope(cfg))
