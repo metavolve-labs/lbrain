@@ -12,6 +12,14 @@ import sqlite_vec
 
 from .index import Chunk, Doc
 
+
+class SqliteExtensionError(RuntimeError):
+    """This interpreter cannot load SQLite extensions, so sqlite-vec is unavailable.
+
+    Raised instead of the bare AttributeError that sqlite3 produces, so the CLI
+    can surface an actionable message rather than a traceback.
+    """
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS docs (
     rel_path TEXT PRIMARY KEY,
@@ -150,6 +158,34 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=5000")
         self.db.execute("PRAGMA foreign_keys=ON")
+        # sqlite-vec is a loadable extension, and a Python built without
+        # --enable-loadable-sqlite-extensions does not have the method at all.
+        # Apple's /usr/bin/python3 and the python.org macOS installers both ship
+        # it disabled, so `lbrain init` — the first command in the README — died
+        # on a raw AttributeError traceback for a large share of first-time Mac
+        # users. Fail with something a stranger can act on.
+        if not hasattr(self.db, "enable_load_extension"):
+            raise SqliteExtensionError(
+                f"This Python ({sys.executable}) was built without SQLite "
+                "loadable-extension support, which LBrain needs to load "
+                "sqlite-vec for vector search.\n"
+                "\n"
+                "Apple's /usr/bin/python3 and the python.org macOS installers "
+                "ship with it disabled. Use a Python that enables it:\n"
+                "\n"
+                "  macOS   brew install python@3.12\n"
+                "          /usr/local/opt/python@3.12/bin/python3.12 -m venv .venv\n"
+                "          (Apple Silicon: /opt/homebrew/opt/python@3.12/...)\n"
+                "\n"
+                "  pyenv   PYTHON_CONFIGURE_OPTS=\"--enable-loadable-sqlite-extensions\" \\\n"
+                "              pyenv install 3.12\n"
+                "\n"
+                "  Linux   distro python3 packages normally have it enabled\n"
+                "\n"
+                "Check any interpreter with:\n"
+                "  python3 -c \"import sqlite3; print(hasattr("
+                "sqlite3.connect(':memory:'), 'enable_load_extension'))\""
+            )
         self.db.enable_load_extension(True)
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)

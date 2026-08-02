@@ -346,10 +346,17 @@ def test_render_hostile_doc_type_whitelisted():
     user who sensibly wrote `type: decision` no longer sees a `?` that reads as
     an error in the first output they ever get. This test asserts the property,
     not the cosmetic string it used to produce.
+
+    The `binds` assertion comes from the CSO session's independent version of
+    this test: a doc_type carrying the field separator would FORGE an
+    admissibility annotation into the header, which is the actual attack. Ours
+    checked the whole hostile string; theirs checked the forged token. Keep both
+    — the second fails on a partial leak the first would pass.
     """
     hits = [mk_hit(doc_type="feedback · binds")]
     out = render_response(mk_cfg(), hits, "alpha")
     assert "feedback · binds" not in out      # the hostile value never renders
+    assert "binds" not in out                 # nothing forged an annotation
     assert "type=" not in out                 # unrecognized ⇒ field omitted
 
 

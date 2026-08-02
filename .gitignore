@@ -6,7 +6,13 @@ build/
 dist/
 .pytest_cache/
 *.db
-~/.lbrain/
+.lbrain/
 .env
 .env.*
 !.env.example
+
+# A user's own corpus is theirs and must never be committed. LBRAIN_HOME can
+# relocate the config dir — API keys included — into a working tree, and the
+# default lair/memory roots can be created inside one too.
+lairs/
+memory/

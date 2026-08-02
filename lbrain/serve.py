@@ -428,7 +428,9 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
     # rather than printing `type=?`. The whitelist is undocumented, so a user who
     # sensibly writes `type: decision` saw `?` — which reads as an error in the
     # very first output a new user sees (anomaly A-403). Absent is honest;
-    # `?` looks broken.
+    # `?` looks broken. Independently re-derived by the CSO session 2026-08-02
+    # from the opposite direction — a plain-markdown corpus has NO frontmatter at
+    # all, so every record printed `?`. Two roots, same fix: keep it.
     if h.doc_type in DOC_TYPES:
         parts.append(f"type={h.doc_type}")
     if date:

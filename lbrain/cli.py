@@ -18,10 +18,25 @@ from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lai
 from .onboard import run_onboarding
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
-from .store import Store
+from .store import SqliteExtensionError, Store
 
 
-@click.group()
+class _LBrainGroup(click.Group):
+    """Turn the unsupported-interpreter case into an error message, not a traceback.
+
+    A Python without loadable-extension support fails on the very first command a
+    new user runs. A stack trace ending in AttributeError tells them nothing; the
+    exception carries instructions, so print those and exit 1.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except SqliteExtensionError as exc:
+            raise click.ClickException(str(exc)) from None
+
+
+@click.group(cls=_LBrainGroup)
 @click.version_option(__version__, prog_name="lbrain")
 def main():
     """LBrain by Metavolve Labs — AI-native engineering memory with the Lair Protocol."""
@@ -238,6 +253,16 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
         from .config import _validate_base_url
 
         cfg.gemini_base_url = _validate_base_url(api_base.rstrip("/"))
+    ctx = click.get_current_context()
+
+    def _on_command_line(param: str) -> bool:
+        src = ctx.get_parameter_source(param)
+        return src is not None and getattr(src, "name", "") == "COMMANDLINE"
+
+    # Whether a key was typed on THIS invocation, as opposed to merely sitting in
+    # the environment. The two cases need different advice, and conflating them
+    # produced a note that told the user to run the command they had just run.
+    key_on_cli = _on_command_line("gemini_key") or _on_command_line("api_key")
     # Auto-select: never make a first-time user find an API key before their first
     # query. If no credential is present, fall back to on-device embeddings.
     if provider is None:
@@ -249,12 +274,6 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
         # variable exported — while the README promised nothing leaves your
         # machine. Remote is now opt-IN, and only via an explicit flag on this
         # invocation. An existing install is never switched out from under it.
-        ctx = click.get_current_context()
-
-        def _on_command_line(param: str) -> bool:
-            src = ctx.get_parameter_source(param)
-            return src is not None and getattr(src, "name", "") == "COMMANDLINE"
-
         if existing_config and cfg.embedding_provider:
             provider = cfg.embedding_provider
         elif _on_command_line("gemini_key"):
@@ -306,12 +325,28 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
     active_key = ("(none needed — on-device)" if provider == "local"
                   else cfg.gemini_api_key if provider == "gemini" else cfg.openai_api_key)
     if provider == "local" and (gemini_key or api_key or cfg.gemini_api_key or cfg.openai_api_key):
-        click.secho(
-            "  note: an API key was found in your environment. It was NOT used — indexing stays\n"
-            "        on-device. To embed with a hosted provider instead, pass it explicitly:\n"
-            "        lbrain init --gemini-key \"$GEMINI_API_KEY\"",
-            fg="yellow",
-        )
+        if key_on_cli:
+            # The key WAS passed explicitly and still did not take effect, because
+            # an existing brain keeps its provider on purpose. Telling this user to
+            # "pass it explicitly" is advice to repeat the command that just failed.
+            wanted = "openai" if _on_command_line("api_key") else "gemini"
+            flag = "--api-key" if wanted == "openai" else "--gemini-key"
+            click.secho(
+                "  note: this brain already uses the on-device provider, so the key you passed was\n"
+                "        NOT applied — an existing install is never switched out from under it.\n"
+                "        To switch deliberately, name the provider:\n"
+                f"        lbrain init --provider {wanted} {flag} <KEY>\n"
+                "        Then re-embed: lbrain embed --stale  (old vectors are a different space).",
+                fg="yellow",
+            )
+        else:
+            click.secho(
+                "  note: an API key is present in your environment. It was NOT used — a key in the\n"
+                "        environment is not consent to send your corpus away, so indexing stays\n"
+                "        on-device. To embed with a hosted provider instead, ask for it explicitly:\n"
+                "        lbrain init --provider gemini --gemini-key \"$GEMINI_API_KEY\"",
+                fg="yellow",
+            )
     click.secho(f"✓ LBrain initialized at {CONFIG_DIR}", fg="green")
     click.echo(f"  provider: {provider} ({cfg.embedding_model}, {cfg.embedding_dim}d)")
     click.echo(f"  config:   {CONFIG_PATH}")

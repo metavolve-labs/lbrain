@@ -197,6 +197,15 @@ disagree, trust the file and re-run `lbrain import && lbrain embed --stale`.
 
 Requires Python 3.10+. SQLite + sqlite-vec + FTS5 — no daemon, no server, no WASM.
 
+> **Your Python must be able to load SQLite extensions.** Apple's `/usr/bin/python3` and the
+> python.org macOS installers are built without it, and `sqlite-vec` cannot load. Check yours:
+> ```bash
+> python3 -c "import sqlite3; print(hasattr(sqlite3.connect(':memory:'), 'enable_load_extension'))"
+> ```
+> If that prints `False`, use Homebrew's (`brew install python@3.12`), or build with
+> `PYTHON_CONFIGURE_OPTS="--enable-loadable-sqlite-extensions"` under pyenv. Linux distro
+> packages normally have it enabled.
+
 ## License
 
 BSD-3-Clause — see [LICENSE](LICENSE). Copyright (c) 2026 Metavolve Labs, Inc.
