@@ -11,7 +11,7 @@ import click
 from . import __version__
 from . import amp
 from .config import CONFIG_DIR, CONFIG_PATH, Config
-from .embed import make_embedder
+from .embed import make_embedder, UnknownProviderError
 from .index import chunk as chunk_doc
 from .index import CHUNKER_VERSION, discover, parse
 from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lair
@@ -22,17 +22,22 @@ from .store import SqliteExtensionError, Store
 
 
 class _LBrainGroup(click.Group):
-    """Turn the unsupported-interpreter case into an error message, not a traceback.
+    """Turn misconfiguration into an error message, not a traceback.
 
     A Python without loadable-extension support fails on the very first command a
     new user runs. A stack trace ending in AttributeError tells them nothing; the
     exception carries instructions, so print those and exit 1.
+
+    `UnknownProviderError` gets the same treatment for the same reason: it is a
+    typo in config.toml, i.e. a user-fixable mistake, and its message already
+    names the fix. Both are *config* faults, not bugs — neither should ever
+    reach the user as a stack trace.
     """
 
     def invoke(self, ctx):
         try:
             return super().invoke(ctx)
-        except SqliteExtensionError as exc:
+        except (SqliteExtensionError, UnknownProviderError) as exc:
             raise click.ClickException(str(exc)) from None
 
 
