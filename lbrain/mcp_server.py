@@ -20,6 +20,7 @@ from . import amp
 from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import make_embedder
 from .lair_protocol import (
+    core_rules,
     detect_anti_pattern,
     should_commit_to_lair,
 )
@@ -272,7 +273,10 @@ def lair_check_action(action_text: str) -> str:
         hits = search(cfg, store, embedder, action_text, k=8, doc_type="feedback",
                       persona=PERSONA or None, envelope=_envelope(cfg))
         notice = blinding_notice(hits) or ""
-        warnings = detect_anti_pattern(action_text, hits)
+        # Core memory is a rule source too — the never-say list and the standing
+        # doctrine live there, not in `type: feedback` documents (A-438).
+        rules = list(hits) + core_rules(getattr(cfg, "core_memory_path", ""))
+        warnings = detect_anti_pattern(action_text, rules)
         if not warnings:
             # "No conflicts" from an EMPTY brain is a confident green light on an
             # irreversible action — the A-425 shape at its most dangerous, and the

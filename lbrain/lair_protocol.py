@@ -12,6 +12,7 @@ agent toward opinions the user never stored. Memory should surface what's saved,
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from dataclasses import dataclass
 
 from .search import Hit
@@ -133,40 +134,182 @@ _STOPWORDS = frozenset(
 )
 
 
-def detect_anti_pattern(action_description: str, feedback_hits: list[Hit]) -> list[str]:
-    """Cross-check a proposed action against feedback_*.md rules in the brain.
+# Words that MARK a line as directive. Both polarities: the old detector recognised
+# prohibitions only, so positively phrased guidance — "verify before asserting",
+# "always check the live source" — was structurally invisible, and most real guidance
+# is phrased that way. Measured 2026-08-01: 1/8 on realistic actions (A-438).
+_PROHIBITIVE = ("don't", "dont", "do not", "never", "avoid", "stop ", "no longer",
+                "must not", "cannot", "rather than", "instead of")
+_PRESCRIPTIVE = ("always", "before ", "must ", "first ", "ensure", "verify", "prefer",
+                 "say instead", "retired", "use ", "only ", "then ")
 
-    Returns a list of human-readable warnings if the action looks like it conflicts with
-    saved feedback. Empty list = no conflicts detected.
+# Suffixes stripped for morphology. `recoverable` != `unrecoverable` and `test` !=
+# `tests` were both misses under exact-set matching.
+_SUFFIXES = ("ations", "ation", "ities", "ility", "ingly", "ables", "able", "ible",
+             "ings", "ing", "ers", "er", "ed", "es", "s", "ly")
+
+
+def _stem(w: str) -> str:
+    for suf in _SUFFIXES:
+        if len(w) - len(suf) >= 4 and w.endswith(suf):
+            return w[: -len(suf)]
+    return w
+
+
+# Function words that survived the original list and actively hurt: they matched
+# across unrelated sentences and padded the denominator, pushing real matches under
+# threshold. `the` matching `the` is not evidence of anything.
+_NOISE = frozenset("""
+the and but for are was has had can may will did you our its out not from into one
+any all use way get let put via per own new old off yet its it's than then them
+""".split())
+
+
+def _tokens(text: str) -> set[str]:
+    """Content tokens, stemmed, hyphen-split. Minimum 3 chars, not 4 — the old floor
+    made `key`, `api` and `27x` invisible, and those carry the meaning in a short
+    action description. Hyphenated forms yield BOTH the compound and its parts, so
+    `fan-out` in a rule meets `fan out` in an action."""
+    out: set[str] = set()
+    for w in re.findall(r"[a-z0-9][a-z0-9\-.]{2,}", text.lower()):
+        w = w.strip("-.")
+        for piece in [w, *w.replace(".", "-").split("-")]:
+            if len(piece) >= 3 and piece not in _STOPWORDS and piece not in _NOISE:
+                out.add(_stem(piece))
+    return out - _STOPWORDS - _NOISE
+
+
+def _related(a: str, b: str) -> bool:
+    """One token is evidence for another if either contains the other (>=5 chars).
+
+    Cheap, and it is what makes `unrecoverable` match `recoverable` — a negation
+    prefix is the single most common way our rules and our actions diverge in
+    spelling while meaning the same thing.
     """
-    warnings: list[str] = []
-    action_low = action_description.lower()
-    action_nouns = {
-        w for w in re.findall(r"[a-z][a-z\-]{3,}", action_low) if w not in _STOPWORDS
-    }
+    if a == b:
+        return True
+    return len(a) >= 5 and len(b) >= 5 and (a in b or b in a)
+
+
+def _overlap(action_toks: set[str], rule_toks: set[str]) -> set[str]:
+    return {a for a in action_toks if any(_related(a, r) for r in rule_toks)}
+
+
+def _idf(feedback_hits: list) -> dict:
+    """Inverse document frequency over the supplied rules.
+
+    Without it every token counts the same, and that was the remaining half of
+    A-438: a single match on `recoverable` — which is nearly conclusive — was
+    discarded by a >=2 floor, while `the` and `out` padded other actions to exactly
+    2 and then diluted the denominator below threshold. Specificity IS the signal.
+    """
+    import math
+
+    n = max(len(feedback_hits), 1)
+    df: dict[str, int] = {}
+    for h in feedback_hits:
+        for t in _tokens(getattr(h, "text", "")):
+            df[t] = df.get(t, 0) + 1
+    return {t: math.log((n + 1) / (c + 1)) + 1.0 for t, c in df.items()}
+
+
+def _weight(toks: set[str], idf: dict) -> float:
+    # Unseen tokens are maximally specific: absent from every rule means nothing
+    # common about them.
+    default = max(idf.values(), default=1.0)
+    return sum(idf.get(t, default) for t in toks)
+
+
+class _CoreRule:
+    """Core memory as a rule source. Operator-curated and already injected into every
+    query, so it adds no trust surface — but it was invisible to check-action, which
+    filters to doc_type == "feedback".
+
+    That was the deepest layer of A-438. Measured 2026-08-01: "describe our research
+    as peer-reviewed" returned ZERO feedback hits, because the never-say list lives
+    in CORE.md and in a lair, not in a `type: feedback` document. The matcher was
+    being blamed for a corpus the tool could not see. Our standing guidance is spread
+    across four document classes and this searched one.
+    """
+
+    doc_type = "feedback"
+
+    def __init__(self, text: str):
+        self.text = text
+        self.rel_path = "CORE.md (always-on doctrine)"
+        self.title = "core memory"
+
+
+def core_rules(core_memory_path: str) -> list:
+    """Zero or one pseudo-hit carrying the operator's always-on doctrine."""
+    if not core_memory_path:
+        return []
+    p = Path(core_memory_path).expanduser()
+    try:
+        body = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    return [_CoreRule(body)] if body.strip() else []
+
+
+def detect_anti_pattern(action_description: str, feedback_hits: list[Hit]) -> list[str]:
+    """Surface saved guidance RELEVANT to a proposed action.
+
+    Deliberately not "detect a violation". Telling compliance from violation needs
+    polarity reasoning a bag of words cannot do honestly, and a tool that claims
+    adjudication it cannot perform is worse than one that surfaces evidence and says
+    so. The caller is told to weigh these, never to obey them.
+
+    Scoring is a NORMALISED overlap, not a raw count of >=3: a raw floor punished
+    short action descriptions, which is most of them, and was half of why this fired
+    on 1 of 8 realistic actions (A-438).
+    """
+    from .serve import sanitize_field
+
+    action_toks = _tokens(action_description)
+    if not action_toks:
+        return []
+    idf = _idf(feedback_hits)
+
+    scored: list[tuple[float, str]] = []
+    seen: set[str] = set()
     for hit in feedback_hits:
-        if hit.doc_type != "feedback":
+        if getattr(hit, "doc_type", "") != "feedback":
             continue
         for line in hit.text.split("\n"):
-            ll = line.lower()
-            if any(neg in ll for neg in ["don't", "never", "do not", "stop ", "avoid "]):
-                rule_nouns = {
-                    w
-                    for w in re.findall(r"[a-z][a-z\-]{3,}", ll)
-                    if w not in _STOPWORDS
-                }
-                overlap = rule_nouns & action_nouns
-                if len(overlap) >= 3:
-                    # Both fields are corpus-derived. Unsanitized, a note body
-                    # carrying \r / U+2028 / a homoglyph fence forges a second
-                    # ⚠️ line at column 0 inside the caller's output
-                    # (red-team 2026-07-28, finding 1).
-                    from .serve import sanitize_field
+            stripped = line.strip()
+            if len(stripped) < 12:
+                continue
+            ll = stripped.lower()
+            if not (any(m in ll for m in _PROHIBITIVE) or any(m in ll for m in _PRESCRIPTIVE)):
+                continue
+            rule_toks = _tokens(stripped)
+            if not rule_toks:
+                continue
+            matched = _overlap(action_toks, rule_toks)
+            if not matched:
+                continue
+            # Weighted by specificity, and normalised by the smaller side so a long
+            # rule cannot dilute a precise short action, nor a long action light up
+            # on one incidental word.
+            mw = _weight(matched, idf)
+            denom = min(_weight(action_toks, idf), _weight(rule_toks, idf))
+            score = mw / denom if denom else 0.0
+            if score < 0.30:
+                continue
+            key = f"{hit.rel_path}:{stripped[:60]}"
+            if key in seen:
+                continue
+            seen.add(key)
+            scored.append((
+                score,
+                # Both fields are corpus-derived. Unsanitized, a note body carrying
+                # \r / U+2028 / a homoglyph fence forges a second line at column 0
+                # inside the caller's output (red-team 2026-07-28, finding 1).
+                f"⚠️ {sanitize_field(hit.rel_path, 160)}: "
+                f"'{sanitize_field(stripped, 160)}' "
+                f"(matched: {', '.join(sorted(matched))})",
+            ))
 
-                    warnings.append(
-                        f"⚠️ {sanitize_field(hit.rel_path, 160)}: "
-                        f"'{sanitize_field(line.strip(), 140)}' "
-                        f"(overlap: {', '.join(sorted(overlap))})"
-                    )
-                    break
-    return warnings
+    scored.sort(key=lambda t: -t[0])
+    return [w for _, w in scored[:5]]

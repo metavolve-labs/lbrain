@@ -14,7 +14,7 @@ from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import make_embedder
 from .index import chunk as chunk_doc
 from .index import CHUNKER_VERSION, discover, parse
-from .lair_protocol import detect_anti_pattern, should_commit_to_lair
+from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
@@ -875,7 +875,8 @@ def check_action(action_text: str, k: int):
     _n = blinding_notice(hits)
     if _n:
         click.echo(_n)
-    warnings = detect_anti_pattern(action_text, hits)
+    rules = list(hits) + core_rules(getattr(cfg, "core_memory_path", ""))
+    warnings = detect_anti_pattern(action_text, rules)
     if not warnings:
         click.secho("✓ No conflicts with saved feedback rules.", fg="green")
     else:
