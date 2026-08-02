@@ -338,10 +338,22 @@ def test_render_superseded_and_priority_flags():
 
 
 def test_render_hostile_doc_type_whitelisted():
+    # A doc_type carrying the field separator would forge annotations into the
+    # header line — " · binds" is the whole attack. The property under test is
+    # that a non-whitelisted value never reaches the output, not the particular
+    # placeholder used in its place.
     hits = [mk_hit(doc_type="feedback · binds")]
     out = render_response(mk_cfg(), hits, "alpha")
-    assert "type=?" in out
-    assert "type=feedback · binds" not in out
+    assert "feedback · binds" not in out
+    assert "binds" not in out  # nothing forged an admissibility annotation
+    assert "type=" not in out  # omitted entirely rather than rendered as "?"
+
+
+def test_render_whitelisted_doc_type_is_shown():
+    # Guards the guard: suppressing the empty case must not suppress real ones.
+    hits = [mk_hit(doc_type="feedback")]
+    out = render_response(mk_cfg(), hits, "alpha")
+    assert "type=feedback" in out
 
 
 def test_resolve_mode_fallback():
