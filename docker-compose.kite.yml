@@ -28,7 +28,7 @@
 services:
   lbrain:
     build: .
-    image: codex-curator/lbrain:latest
+    image: metavolve-labs/lbrain:latest
     container_name: lbrain
     restart: unless-stopped
     environment:

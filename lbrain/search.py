@@ -283,7 +283,7 @@ def search(
     Always-on boosts (net-positive in every regime, measured 2026-06-08): priority,
     wikilink graph, supersession de-ranking.
 
-    Call-when-needed (default OFF — see lairs/000-OPERATING-DOCTRINE):
+    Call-when-needed (default OFF — both measured per-regime before shipping):
       recency=True — bounded, read-only mtime-freshness lift; use for recency-sensitive
                      queries ("what's the latest on X"). Priority docs exempt.
       rerank=True  — cross-encoder precision pass over the head; use for PRECISE/

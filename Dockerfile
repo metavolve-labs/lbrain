@@ -4,7 +4,7 @@ FROM python:3.11-slim-bookworm
 
 LABEL org.opencontainers.image.title="LBrain"
 LABEL org.opencontainers.image.description="AI-native engineering memory with the Lair Protocol — Metavolve Labs"
-LABEL org.opencontainers.image.source="https://github.com/codex-curator/lbrain"
+LABEL org.opencontainers.image.source="https://github.com/metavolve-labs/lbrain"
 LABEL org.opencontainers.image.licenses="BSD-3-Clause"
 
 WORKDIR /app

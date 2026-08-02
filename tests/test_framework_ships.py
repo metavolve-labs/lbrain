@@ -49,6 +49,45 @@ def test_framework_contains_nothing_org_specific():
         assert not hits, f"{name} leaks {hits}"
 
 
+def test_shipped_source_contains_no_internal_corpus_identifiers():
+    """The guard above only ever scanned the framework docs — and every real leak
+    was somewhere else.
+
+    2026-08-03: six internal identifiers were found in shipped *code and docs*
+    (`consolidate.py`, `search.py`, `index.py`, `disclosure.py`, and a design doc
+    the README links publicly), naming private lair directories and the founder
+    by name. The existing guard passed the whole time because it looked only at
+    `lbrain/framework/*.md`.
+
+    So this scans everything that actually ships. Cleaning the six sites fixes an
+    instance; this fixes the class — the same distinction A-404 turned on, where
+    the reported path-split bug had four more copies nobody looked for.
+    """
+    import re
+    root = Path(__file__).resolve().parents[1]
+    bad = re.compile(
+        r"P\d-[A-Z]{4,}"          # plate folders: P3-NEURAINETIC-BRAIN
+        r"|NEURAINETIC"
+        r"|000-(?:OPERATING|IDENTITY)-DOCTRINE"
+        r"|lairs/\d{3}-PRIORITY"  # concrete internal lair paths
+        r"|codex-curator"
+        r"|\bTad\b"
+        r"|atmtad"
+        r"|/mnt/[a-z]/Users",
+    )
+    # onboard.py legitimately GENERATES a lair layout for the user's own corpus;
+    # test files deliberately contain these strings as fixtures and as this guard.
+    skip = {"onboard.py"}
+    offenders = {}
+    for path in [*(root / "lbrain").rglob("*.py"), *(root / "docs").rglob("*.md")]:
+        if path.name in skip or "framework" in path.parts:
+            continue
+        hits = bad.findall(path.read_text(encoding="utf-8", errors="replace"))
+        if hits:
+            offenders[str(path.relative_to(root))] = sorted(set(hits))
+    assert not offenders, f"internal identifiers in shipped source: {offenders}"
+
+
 def test_docs_are_present_in_a_built_wheel():
     """The bug was never 'the files are missing' — it was 'nothing packages them'."""
     dists = sorted(Path(__file__).resolve().parents[1].glob("dist/*.whl"))

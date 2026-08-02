@@ -195,8 +195,32 @@ class LocalEmbedClient:
         return None
 
 
+KNOWN_PROVIDERS = ("local", "gemini", "openai")
+
+
+class UnknownProviderError(ValueError):
+    """`embedding_provider` is not one we recognise.
+
+    Raised instead of guessing. See make_embedder for why this is fatal.
+    """
+
+
 def make_embedder(cfg):
-    """Factory: return the embedder for the configured provider."""
+    """Factory: return the embedder for the configured provider.
+
+    FAIL-CLOSED. An unrecognised provider raises; it must never resolve to a
+    hosted one. Until 2026-08-03 this function ended with an unconditional
+    `return EmbedClient(...)` — the OpenAI client — so any value that was not
+    `local` or `gemini` fell through to it. A single transposed character in
+    `config.toml` ("gemni", "Local", "gemini ") silently shipped the user's
+    entire corpus to a third party, with no error and nothing in `doctor` to
+    show for it. That is the exact opposite of the promise on README.md:30,
+    and it is the failure mode doctrine calls out: a default that wires an
+    external side effect is itself a bug — defaults must be empty and
+    fail-loud, never plausible.
+
+    Found by the CSO session's fresh-machine audit (S8), 2026-08-03.
+    """
     provider = getattr(cfg, "embedding_provider", "gemini")
     if provider == "local":
         model = cfg.embedding_model or LocalEmbedClient.DEFAULT_MODEL
@@ -209,4 +233,12 @@ def make_embedder(cfg):
             cfg.gemini_api_key, model, cfg.embedding_dim,
             base_url=getattr(cfg, "gemini_base_url", GEMINI_BASE),
         )
-    return EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    if provider == "openai":
+        return EmbedClient(cfg.openai_api_key, cfg.embedding_model, cfg.embedding_dim)
+    raise UnknownProviderError(
+        f"embedding_provider = {provider!r} is not recognised "
+        f"(expected one of: {', '.join(KNOWN_PROVIDERS)}).\n"
+        f"Refusing to guess: an unrecognised provider previously fell through "
+        f"to OpenAI, which would send your documents off this machine.\n"
+        f"Fix the value in your config.toml, or run: lbrain init --provider local"
+    )

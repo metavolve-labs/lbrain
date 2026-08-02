@@ -6,4 +6,16 @@
 # The lbrain.config module loads ~/.lbrain/env at import time, so credentials are
 # inherited without shell sourcing.
 
-exec /usr/local/bin/lbrain mcp
+# Resolve from PATH rather than hardcoding /usr/local/bin: that path is correct
+# only for a root-level `pip install`. It is wrong for a venv, pipx, `pip install
+# --user`, and Apple-Silicon Homebrew (/opt/homebrew/bin) — on all of those the
+# launcher died with "no such file or directory" and the MCP client showed only a
+# failed server, with no clue why. (S2, CSO fresh-machine audit 2026-08-03.)
+if ! command -v lbrain >/dev/null 2>&1; then
+  echo "lbrain-mcp: 'lbrain' is not on PATH." >&2
+  echo "  If you installed into a venv, activate it or point your MCP client at" >&2
+  echo "  that venv's bin/lbrain directly. Check with: command -v lbrain" >&2
+  exit 127
+fi
+
+exec lbrain mcp

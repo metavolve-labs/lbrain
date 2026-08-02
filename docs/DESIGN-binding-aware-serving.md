@@ -2,7 +2,7 @@
 
 **Status:** v2 — corrected after a 3-lens adversarial design review (evidence/doctrine, API/consumers,
 security/injection; 2 CRITICAL + 9 MAJOR findings adopted; review record in the 2026-07-24 session).
-**Owner:** Metavolve Labs engineering.
+**Status:** implemented 2026-07-24. Measured before the flip; see Evaluation below.
 
 ## Evidence base (post-v3b honest calibration — what this is and is NOT justified by)
 
@@ -144,7 +144,7 @@ DoS bounded: excerpts hard-capped even for newline-free chunks; table rows cappe
 
 - Code default prose; live flip is one config line; per-call override both directions.
 - **Config.write is lossy today** (verified: drops `abstraction_topk_cap`/`abstraction_recency_guard`
-  it loads, plus unknown keys + comments incl. an operator authorization note). This change: (a) adds the
+  it loads, plus unknown keys + comments). This change: (a) adds the
   missing abstraction_* lines AND the new serve_* keys to `write()`; (b) adds a write→load round-trip
   equality test over every dataclass field as a hard gate; (c) **the live config.toml is edited
   manually, never via cfg.write()** (snapshot first). Full comment-preserving writer = follow-up.

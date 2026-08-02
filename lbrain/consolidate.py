@@ -3,7 +3,7 @@
 Groups related chunks via a fast, native Leader Clustering pass over the
 stored embeddings, then synthesizes each cluster into a dense "abstraction"
 memory using an LLM. Original design by Gemini (2026-07-09); hardened per
-the review in lairs/P3-NEURAINETIC-BRAIN/consolidation-v2-gemini/.
+hardened following an internal design review.
 
 Design invariants:
 - GATED OUTPUT: abstractions are written to ~/.lbrain/abstractions/, which

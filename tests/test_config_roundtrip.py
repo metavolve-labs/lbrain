@@ -60,7 +60,7 @@ def non_default(name: str, value):
         # differ) but for the wrong field — so distinguish by name rather than
         # relaxing the comparison, which would stop the gate catching a real drop.
         if name in ("allowed_doc_types", "allowed_path_prefixes"):
-            return ["P3-NEURAINETIC-BRAIN/"]
+            return ["TOPIC-AREA/"]
         return [Path("/tmp/lbrain-test-source")]
     raise AssertionError(f"unhandled field type for {name}: {type(value)}")
 

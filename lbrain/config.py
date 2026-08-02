@@ -151,11 +151,20 @@ _load_env_file()
 @dataclass
 class Config:
     sources: list[Path] = field(default_factory=list)
-    # GCP-native by default: matches the deployed configuration and the `lbrain init`
-    # default, so a missing/partial config.toml cannot silently fall back to a
-    # third-party provider and embed into a different vector space than the stored
-    # one. OpenAI remains fully supported as an explicit opt-in.
-    embedding_provider: str = "gemini"  # "gemini" (GCP-native, default) | "openai"
+    # ⚠️ This is the LAST-RESORT value for a config.toml that OMITS the key entirely.
+    # It is NOT the product default: `lbrain init` writes "local" (see :277), and
+    # on-device is what README.md:30 promises and what a new install gets.
+    #
+    # Why it stays "gemini" rather than flipping to "local": this field only binds
+    # when the key is missing, and anyone in that state embedded their corpus under
+    # this same fallback — at 1536 dimensions. Flipping the default to "local" (384)
+    # would silently re-point them at an incompatible vector space and quietly
+    # corrupt every search result, which is the A-405 dimension-mismatch failure.
+    # A safe flip needs a dimension check + a re-embed prompt, not a constant edit.
+    #
+    # The genuinely dangerous half of this — an UNRECOGNISED value resolving to a
+    # hosted provider — is fixed in embed.make_embedder, which now fails closed.
+    embedding_provider: str = "gemini"  # fallback only — init writes "local" | "openai"
     openai_api_key: str = ""
     gemini_api_key: str = ""
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"  # override → proxy/self-host

@@ -177,8 +177,8 @@ class Envelope:
 def _norm_path(p: str) -> str:
     """Corpus paths compare on forward slashes, always.
 
-    On Windows a rel_path is `P3-NEURAINETIC-BRAIN\\x\\LAIR.md`, so a prefix
-    written the obvious way (`P3-NEURAINETIC-BRAIN/`) matched nothing and the
+    On Windows a rel_path is `TOPIC\\x\\LAIR.md`, so a prefix written the
+    obvious way (`TOPIC/`) matched nothing and the
     scope silently admitted everything. That exact separator bug has now shipped
     twice in this codebase (A-404 in search, and the 000-PRIORITY boost before
     it) — both times as a behaviour difference with no error message.

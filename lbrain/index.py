@@ -209,7 +209,7 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         disclosure = ""
 
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
-    # Split on BOTH separators: on Windows `rel` is "P5-X\000-PRIORITY-Y\LAIR.md",
+    # Split on BOTH separators: on Windows `rel` is "TOPIC\000-PRIORITY-Y\LAIR.md",
     # so rel.split("/") returned the whole string as one element and the
     # 000-PRIORITY boost silently never fired — a ranking difference with no
     # error message, which is worse than a crash.
