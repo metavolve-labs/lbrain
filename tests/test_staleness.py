@@ -98,3 +98,37 @@ def test_the_delaware_case_end_to_end():
     assert (label, date) == ("verified", "2026-07-09")
     assert days_since(date, TODAY) == 18
     assert any("DELINQUENT" in c for c in open_claims(doc))
+
+
+def test_frontmatter_date_is_a_claim_date_tier():
+    """A YAML frontmatter `date:` must serve as `dated`, not fall through to mtime.
+
+    Regression pin for A-213 + the corpus-reaging problem: a `date:` field rides
+    inside the file, so it survives copy/clone/mtime-reset. Without this tier a
+    copied corpus serves `file-dated <copy-day>` for every mtime-only file.
+    """
+    from lbrain.staleness import claim_date
+    doc = "---\ndate: 2026-06-01\ntype: project\n---\n# Deploy decision\nCloud Run.\n"
+    label, d = claim_date(doc, "notes/deploy-decision.md", "2026-08-03")
+    assert (label, d) == ("dated", "2026-06-01"), (label, d)
+
+
+def test_frontmatter_date_beats_mtime_and_survives_reage():
+    from lbrain.staleness import claim_date
+    doc = "---\ntitle: x\ndate: '2025-11-17'\n---\nbody\n"
+    # mtime is the copy date; the claim date must be the frontmatter one
+    assert claim_date(doc, "x.md", "2026-08-03") == ("dated", "2025-11-17")
+
+
+def test_date_in_prose_is_not_mistaken_for_the_documents_date():
+    """A `date:` far down in the body is not the document's own date."""
+    from lbrain.staleness import claim_date
+    doc = "# Title\n\nSome prose.\n\ndate: 2020-01-01 was when the vendor signed.\n"
+    label, _ = claim_date(doc, "x.md", "2026-08-03")
+    assert label == "file-dated"  # no frontmatter, no filename date -> mtime
+
+
+def test_last_updated_still_outranks_frontmatter_date():
+    from lbrain.staleness import claim_date
+    doc = "---\ndate: 2025-01-01\n---\n**Last Updated**: 2026-07-15\nbody\n"
+    assert claim_date(doc, "x.md", "2026-08-03") == ("verified", "2026-07-15")

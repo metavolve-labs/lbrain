@@ -68,6 +68,13 @@ _LEAD = r"[ \t>\-|*]*"
 _STATUS_HDR = re.compile(rf"^{_LEAD}\*\*Status\*\*\s*:\s*(.+)$", re.M)
 _UPDATED_HDR = re.compile(rf"^{_LEAD}\*\*Last Updated\*\*\s*:\s*(\d{{4}}-\d{{2}}-\d{{2}})", re.M)
 _AS_OF = re.compile(r"\bas of\s+(\d{4}-\d{2}-\d{2})", re.I)
+# YAML frontmatter `date:` in the leading `---` block. The most PORTABLE claim
+# date there is: it lives in the file content, so it survives a copy, a git
+# clone, or any mtime reset that would otherwise reage the document to the
+# transfer date. It is also the near-universal convention (Obsidian, Jekyll,
+# Hugo). Anchored to the top-of-file frontmatter so a `date:` mentioned in prose
+# further down is not mistaken for the document's own date.
+_FM_DATE = re.compile(r"\A---\r?\n.*?^date:\s*['\"]?(\d{4}-\d{2}-\d{2})", re.S | re.M)
 _VERIFY_BY = re.compile(r"^verify_by\s*:\s*(\d{4}-\d{2}-\d{2})", re.M | re.I)
 _VOLATILE_FALSE = re.compile(r"^volatile\s*:\s*(?:false|no)\s*$", re.M | re.I)
 _FN_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -102,12 +109,19 @@ def claim_date(text: str, rel_path: str, mtime_iso: str = "") -> tuple[str, str]
     Precedence is by strength of evidence, strongest first:
       `verified`   an explicit `**Last Updated**:` — a human asserting currency
       `as-of`      the newest `as of <ISO>` in the body (abstractions use this)
-      `dated`      a date in the filename (the corpus naming convention)
+      `dated`      a YAML frontmatter `date:`, else a date in the filename
       `file-dated` mtime — a filesystem fact, NOT a claim date. Weakest.
 
     mtime is last on purpose: it moves when any byte changes, so a typo fix
     makes a two-year-old claim look current. Naming it `file-dated` keeps that
     honest rather than silently flattering.
+
+    Frontmatter `date:` sits at `dated` strength and is checked before the
+    filename because it is the most PORTABLE claim date: it rides inside the file
+    content, so it survives a copy / git clone / mtime reset that would otherwise
+    reage the whole corpus to the ingestion date. Without it, a corpus copied
+    between machines serves `file-dated <copy-day>` for every file whose date was
+    only ever an mtime.
     """
     m = _UPDATED_HDR.search(text)
     if m:
@@ -115,6 +129,9 @@ def claim_date(text: str, rel_path: str, mtime_iso: str = "") -> tuple[str, str]
     asof = _AS_OF.findall(text)
     if asof:
         return ("as-of", max(asof))          # newest, not first
+    m = _FM_DATE.search(text)                 # portable: survives copy/clone/reage
+    if m:
+        return ("dated", m.group(1))
     # BOTH separators — see serve.record_date. On Windows this searched the
     # whole path, so a dated PARENT DIRECTORY became the file's claim date.
     m = _FN_DATE.search(re.split(r"[\\/]", rel_path)[-1])
