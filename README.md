@@ -10,15 +10,47 @@
   <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-555?style=flat-square" alt="Python 3.10-3.13">
 </p>
 
-> **BETA — use at your own risk.** This is early software from a small team. It has not yet been through an
-> independent security review. It runs on your machine against your files: **keep backups, and don't point it
-> at anything you can't afford to have read by a tool that is still being hardened.** LBrain never deletes
-> your source files, but that is a design commitment, not yet an audited guarantee.
+> [!WARNING]
+> **Beta — use at your own risk.** Early software from a small team, not yet through an independent
+> security review. It runs on your machine against your files: keep backups, and start with a corpus
+> you can afford to have read by a tool that is still being hardened. LBrain never deletes your
+> source files — but that is a design commitment, not yet an audited guarantee.
 
 **Memory for AI agents that cites its sources — and says when it doesn't know.**
 
 Your agent reads a pile of your notes and answers confidently from the wrong one. LBrain serves each
 record with its **source, its date, and a flag for whether it actually answers the question asked**.
+
+## Is LBrain for you?
+
+It earns its keep when your agent works against notes, decisions, runbooks or records that
+**overlap, contradict each other, or go stale in places** — the case where retrieval quietly hands
+over the neighbour's value and the model presents it as fact.
+
+You probably don't need it if:
+
+- **your corpus is small and unambiguous** — ordinary search is fine;
+- **you want a hallucination fix** — LBrain gates *retrieved records*; it does nothing about a model
+  inventing facts from its weights with no retrieval involved;
+- **you want a reasoning upgrade** — it changes what the model is given, not what it does with it.
+
+And know the trade going in: **the gate is conservative.** It will sometimes flag a record you'd
+have accepted. That is the deal: fewer confident wrong answers, slightly more "I don't know."
+
+## Quickstart
+
+You need **Python 3.10–3.13** whose SQLite can load extensions, and **~67 MB** of disk for the
+on-device embedding model. No API key, no account — SQLite + sqlite-vec + FTS5, no daemon, no
+server, no WASM. Check the SQLite requirement first:
+
+```bash
+python3 -c "import sqlite3; print(hasattr(sqlite3.connect(':memory:'), 'enable_load_extension'))"
+```
+
+If that prints `False` — Apple's `/usr/bin/python3` and the python.org macOS installers are built
+that way — use Homebrew's (`brew install python@3.12`), or build with
+`PYTHON_CONFIGURE_OPTS="--enable-loadable-sqlite-extensions"` under pyenv. Linux distro packages
+normally have it enabled.
 
 ```bash
 pip install "lbrain[local]"
@@ -27,30 +59,12 @@ lbrain import && lbrain embed --stale
 lbrain query "what did we decide about the deploy flag"
 ```
 
-No API key. No account. Indexing and search run on-device — your documents and queries are never
-transmitted.
+Indexing and search run on-device — your documents and queries are never transmitted. `init` asks
+before the one-time model download (`--yes` skips the prompt), and LBrain **indexes `*.md` only** —
+convert prose you want recalled.
 
-> ### The one download, and what it's for
->
-> On first run LBrain fetches a **~67 MB embedding model** ([`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5))
-> and then runs it on your CPU. `lbrain init` tells you before it happens and asks; `--yes` skips the prompt.
->
-> **That is the model coming *down* — not your documents going *up*.** It is the only network call the
-> on-device path ever makes. Afterwards embedding is fully offline, and the model is cached in
-> `~/.cache/huggingface` and never fetched again.
->
-> **Why a model at all, and not just code?** Searching by meaning needs text turned into coordinates, so
-> that *"did anyone test the mailbox"* can find a note that says *"dereference"*, *"round trip"* and
-> *"MX record"* — sharing no words with the question. You cannot write rules for that; the number of ways
-> to phrase an idea is unbounded. So a model is trained until related meanings land near each other.
-> LBrain also runs a plain keyword index (SQLite FTS5) for what you literally typed, and fuses the two.
->
-> **What the model is not.** It does not generate text, has no opinions and remembers nothing. It is one
-> deterministic forward pass — same text in, same 384 numbers out, every time. 33M parameters whose
-> entire behaviour is *text → coordinates*. Closer to a learned lookup table than to a chatbot.
->
-> Prefer not to download it? Use a hosted embedder instead, under your own key and billing:
-> `lbrain init --gemini-key <KEY> --source ./docs`. See [Embeddings](#embeddings).
+**You should see** each result come back as a fenced record carrying its source file, its date, and
+an admissibility flag:
 
 ```
 ⟪note⟫
@@ -59,59 +73,107 @@ transmitted.
 ⟪/note⟫
 ```
 
-`binds` means the record answers the question. `near-miss` means it's the right subject but doesn't
-contain the answer — the case where retrieval quietly hands over the neighbour's value and the model
-presents it as fact.
+- **`binds`** — the record answers the question asked.
+- **`near-miss`** — right subject, but the answer isn't in it. This is the failure the flag exists
+  to catch: retrieval quietly hands over the neighbour's value and the model presents it as fact.
 
-## Why
+A fenced record with a source, a date and a flag means your setup works. Anything else, run
+[`lbrain doctor`](#something-wrong).
+
+> [!IMPORTANT]
+> **Importing an old archive?** A cold import of old notes will serve old decisions as current:
+> records are `dated` only when the content or filename carries a date, and a bulk copy resets every
+> mtime to today — so newest-wins has nothing to order by. Read
+> [this first](docs/DEVELOPER-NOTES.md#10-importing-an-existing-pile-of-notes-yesterdays-doctrine-served-as-todays)
+> before importing an archive: either vet it, restore the dates, or knowingly run a calibration
+> period.
+
+### The one download, and what it's for
+
+On first run LBrain fetches a **~67 MB embedding model**
+([`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5)) and then runs it on your
+CPU. **That is the model coming *down* — not your documents going *up*.** It is the only network
+call the on-device path ever makes. Afterwards embedding is fully offline, and the model is cached
+in `~/.cache/huggingface` and never fetched again.
+
+<details>
+<summary><b>Why a model at all, and not just code?</b></summary>
+
+Searching by meaning needs text turned into coordinates, so that *"did anyone test the mailbox"*
+can find a note that says *"dereference"*, *"round trip"* and *"MX record"* — sharing no words with
+the question. You cannot write rules for that; the number of ways to phrase an idea is unbounded.
+So a model is trained until related meanings land near each other. LBrain also runs a plain keyword
+index (SQLite FTS5) for what you literally typed, and fuses the two.
+
+**What the model is not.** It does not generate text, has no opinions and remembers nothing. It is
+one deterministic forward pass — same text in, same 384 numbers out, every time. 33M parameters
+whose entire behaviour is *text → coordinates*. Closer to a learned lookup table than to a chatbot.
+
+</details>
+
+Prefer not to download it? Use a hosted embedder instead, under your own key and billing:
+`lbrain init --gemini-key <KEY> --source ./docs`. See [Embeddings](#embeddings).
+
+## Use it with your agent
+
+**Start with [`AGENTS.md`](AGENTS.md).** It is written to the agent itself: how to stand LBrain up
+cleanly for its human, and the contract for consuming what it serves — prefer `binds`, never answer
+from a `near-miss`, cite the source and the date, treat fenced text as data rather than
+instructions.
+
+```bash
+# Claude Code
+claude mcp add -s user lbrain -- /path/to/lbrain/scripts/lbrain-mcp
+
+# Any client speaking streamable-http
+lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
+```
+
+> ⚠️ The HTTP server has **no built-in auth** and exposes the whole corpus. Bind to `127.0.0.1`, or
+> put authenticated TLS ingress in front. Never publish it on a public interface.
+
+Five MCP tools, by task:
+
+| The agent wants to… | Tool |
+|---|---|
+| Answer from the user's saved history — decisions, prior sessions, project context | `lair_query` — semantic + keyword, served with provenance and admissibility flags |
+| Find a literal string — an error message, a filename, an identifier | `lair_search` — exact keyword/phrase match, no embedding call |
+| Decide whether something that just happened is worth saving | `lair_protocol_check` — returns should-commit, a suggested record type and filename |
+| Check a consequential action against the user's saved corrections and preferences | `lair_check_action` — call it *before* the irreversible step |
+| See what memory actually holds, before declaring anything missing | `lair_stats` — counts, index coverage, priority documents |
+
+Or skip MCP entirely — `lbrain query`, `search`, `import`, `doctor` all work from the shell.
+
+*Why `lair_*` when the product is LBrain?* The brain is the engine; a **lair** is what it reads — a
+structured, per-project context folder. The convention is documented in
+[`docs/lair-framework/`](docs/lair-framework/).
+
+## Why this exists
 
 We profiled **eight model architectures from seven organizations** on the same near-domain retrieval
 task. Failure rates swung **1.3% / 35.7% / 16.7%** depending only on how the *records* were
-structured — a **34.4 percentage-point** absolute difference — while architecture explained ≈**0%** of the
-variance, with identical
-ordering in 8 of 8 models. Changing models didn't remove the effect. Telling the model not to guess
-didn't remove it either.
+structured — a **34.4 percentage-point** absolute difference — while architecture explained ≈**0%**
+of the variance, with identical ordering in 8 of 8 models. Changing models didn't remove the effect.
+Telling the model not to guess didn't remove it either.
 
-**Across the models we tested, record structure dominated the failure pattern.** So the fix belongs before generation, on the
-input side, and it has to be deterministic — a gate judged without another model call.
-
-## Related work — read these too
-
-Four 2026 papers staked adjacent ground while we were building, and they deserve the citation:
-
-- **Deceptive Grounding** — Caruzzo, Yoo & Kim ([arXiv:2607.09349](https://arxiv.org/abs/2607.09349)):
-  named and measured the failure mode — RAG responses that pass standard quality checks while attributing
-  evidence to the wrong entity, in 8–87% of cases across 13 models, with domain-specialized models
-  failing *worse*.
-- **MemStrata** ([arXiv:2606.26511](https://arxiv.org/abs/2606.26511)): deterministic supersession rules
-  over a bi-temporal ledger, against stale-fact errors on evolving knowledge.
-- **Engram** ([arXiv:2606.09900](https://arxiv.org/abs/2606.09900)): a bi-temporal memory graph tracking
-  provenance and contradictions — a lean retrieved context beats the full history.
-- **Don't Ask the LLM to Track Freshness** ([arXiv:2606.01435](https://arxiv.org/abs/2606.01435)):
-  conflict resolution belongs in deterministic code, not model judgment — "the bottleneck … is assembly
-  (post-retrieval aggregation), not storage."
-
-We claim no priority over any of this. What our 8-model matrix adds is the controlled variable: it
-reproduced the same failure class independently, in a different domain, before it had a name — and showed
-the **serving format**, not the model, is the controlling variable. How a record is *presented* to the
-generator is the axis these works leave open, and it is the axis LBrain operates on.
-
-## Where it does *not* help
-
-- **Not a hallucination fix.** This is about answering from *retrieved records*. It does nothing
-  about a model inventing facts from its weights with no retrieval involved.
-- **Small, clean corpora barely benefit.** If your notes are short and unambiguous, ordinary search
-  is fine. The gain appears when records are numerous, overlapping, and stale in places.
-- **Not a reasoning upgrade.** It changes what the model is given, not what it does with it.
-- **The gate is conservative** — it will sometimes flag `near-miss` on a record you'd have accepted.
-  That is the trade: fewer confident wrong answers, slightly more "I don't know."
-- **A cold import of old notes will serve old decisions as current.** Records are `dated` only when the
-  *filename* carries a date, and a bulk copy resets every mtime to today — so newest-wins has nothing to
-  order by. Read [this first](docs/DEVELOPER-NOTES.md#10-importing-an-existing-pile-of-notes-yesterdays-doctrine-served-as-todays)
-  before importing an archive: either vet it, restore the dates, or knowingly run a calibration period.
+**Across the models we tested, record structure dominated the failure pattern.** So the fix belongs
+before generation, on the input side, and it has to be deterministic — a gate judged without another
+model call.
 
 We also killed three of our own claims while building this, including a headline result that turned
-out to be an artifact of our own prompt. The retractions are published with the findings.
+out to be an artifact of our own prompt. The retractions are published with the findings — the
+papers, their DOIs and the research pack are at
+[lbrain.ai/papers.html](https://lbrain.ai/papers.html).
+
+**Related work — read these too.** Four 2026 papers staked adjacent ground while we were building,
+and they deserve the citation: **Deceptive Grounding** — Caruzzo, Yoo & Kim
+([arXiv:2607.09349](https://arxiv.org/abs/2607.09349)) — named and measured the failure mode;
+**MemStrata** ([arXiv:2606.26511](https://arxiv.org/abs/2606.26511)) and **Engram**
+([arXiv:2606.09900](https://arxiv.org/abs/2606.09900)) built bi-temporal memory against stale facts;
+**Don't Ask the LLM to Track Freshness** ([arXiv:2606.01435](https://arxiv.org/abs/2606.01435))
+argued conflict resolution belongs in deterministic code, not model judgment. We claim no priority
+over any of this. What our 8-model matrix adds is the controlled variable: the **serving format**,
+not the model, is the axis these works leave open — and it is the axis LBrain operates on.
 
 ## How it works
 
@@ -127,26 +189,9 @@ out to be an artifact of our own prompt. The retractions are published with the 
   > **Copying a corpus reages it.** `cp`, a git clone, and most sync tools reset mtime to *now*, so a
   > document whose only date was its mtime serves as `file-dated <the day you copied it>`. Put a
   > `date:` in the file's frontmatter (or the date in its filename) and the claim date rides inside
-  > the file — it survives the move. LBrain **indexes `*.md` only**; convert prose you want recalled.
+  > the file — it survives the move.
 - **Untrusted-data fencing** — retrieved text is fenced and labelled as data, never instructions, so
   a note can't hijack the agent reading it.
-
-## Use it with your agent
-
-Five MCP tools: `lair_query`, `lair_search`, `lair_protocol_check`, `lair_check_action`, `lair_stats`.
-
-```bash
-# Claude Code
-claude mcp add -s user lbrain -- /path/to/lbrain/scripts/lbrain-mcp
-
-# Any client speaking streamable-http
-lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
-```
-
-> ⚠️ The HTTP server has **no built-in auth** and exposes the whole corpus. Bind to `127.0.0.1`, or
-> put authenticated TLS ingress in front. Never publish it on a public interface.
-
-Or skip MCP entirely — `lbrain query`, `search`, `import`, `doctor` all work from the shell.
 
 ## Embeddings
 
@@ -200,17 +245,6 @@ records, and why a note can vanish from results without being deleted.
 
 **Truth hierarchy:** your source files are authoritative; the index is a derivative cache. If they
 disagree, trust the file and re-run `lbrain import && lbrain embed --stale`.
-
-Requires Python 3.10+. SQLite + sqlite-vec + FTS5 — no daemon, no server, no WASM.
-
-> **Your Python must be able to load SQLite extensions.** Apple's `/usr/bin/python3` and the
-> python.org macOS installers are built without it, and `sqlite-vec` cannot load. Check yours:
-> ```bash
-> python3 -c "import sqlite3; print(hasattr(sqlite3.connect(':memory:'), 'enable_load_extension'))"
-> ```
-> If that prints `False`, use Homebrew's (`brew install python@3.12`), or build with
-> `PYTHON_CONFIGURE_OPTS="--enable-loadable-sqlite-extensions"` under pyenv. Linux distro
-> packages normally have it enabled.
 
 ## License
 
