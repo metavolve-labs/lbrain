@@ -83,6 +83,11 @@ class Chunk:
     token_count: int
     chunk_hash: str
     context: str = ""  # doc macro-context prepended to embed/FTS text (not display)
+    # Ancestor headings ABOVE this chunk's own heading, outermost first (" > ").
+    # Structural provenance, always populated — not an embedding option like
+    # `context`. A chunk's own heading is already in `text`; what was missing is
+    # everything the split threw away above it (A-441).
+    heading_path: str = ""
 
 
 # Pre-change snapshots. A backup is a COPY of a record that something else has
@@ -263,27 +268,36 @@ def chunk(
     chunks: list[Chunk] = []
     buf: list[str] = []
     buf_tokens = 0
+    buf_path = ""  # heading path of the FIRST section in the buffer
     idx = 0
-    for sec in sections:
+    for sec, hpath in sections:
         sec_tokens = len(ENCODER.encode(sec))
         if buf_tokens + sec_tokens <= max_tokens:
+            if not buf:
+                buf_path = hpath
             buf.append(sec)
             buf_tokens += sec_tokens
         else:
             if buf:
-                chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
+                chunks.append(
+                    _make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx, buf_path)
+                )
                 idx += 1
             if sec_tokens <= max_tokens:
                 buf = [sec]
                 buf_tokens = sec_tokens
+                buf_path = hpath
             else:
                 # section bigger than max_tokens — line-aware, table-aware window
-                pieces, idx = _window_section(doc, sec, max_tokens, overlap, ctx, idx)
+                pieces, idx = _window_section(
+                    doc, sec, max_tokens, overlap, ctx, idx, hpath
+                )
                 chunks.extend(pieces)
                 buf = []
                 buf_tokens = 0
+                buf_path = ""
     if buf:
-        chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
+        chunks.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx, buf_path))
     return chunks
 
 
@@ -296,7 +310,14 @@ def chunk(
 # chunker, which had no version identity at all.
 #
 # 1 -> 2 : line-aware, table-aware _window_section (A-412, 2026-08-01)
-CHUNKER_VERSION = 2
+# 2 -> 3 : heading ancestry (A-441, 2026-08-03). Boundaries are UNCHANGED — this
+#          is the first bump that isn't about where the cuts land. It is here
+#          because the rule's PURPOSE is "the index must not silently disagree
+#          with the code that built it", and a chunk that gains ancestry embeds
+#          and matches differently. Cost, stated plainly: every corpus with H2
+#          sections under an H1 re-chunks and RE-EMBEDS on next import. Flat and
+#          single-heading corpora hash identically and do not move.
+CHUNKER_VERSION = 3
 
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
@@ -310,7 +331,7 @@ def _table_header_at(lines: list[str], i: int) -> list[str] | None:
 
 
 def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
-                    ctx: str, idx: int) -> tuple[list["Chunk"], int]:
+                    ctx: str, idx: int, hpath: str = "") -> tuple[list["Chunk"], int]:
     """Split an oversized section without cutting a line, or orphaning table rows.
 
     Closes A-412. The previous path token-sliced the section, so a boundary could
@@ -337,6 +358,14 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
     header: list[str] = []
     header_idx = -1
 
+    # Only the FIRST window carries this section's own heading in its text; every
+    # continuation starts mid-section and had no heading at all. Give those the
+    # section heading as an ancestor, so a table row split off page 3 still says
+    # what section it came from.
+    own = lines[0].strip() if lines and HEADER_RE.match(lines[0]) else ""
+    own_text = re.sub(r"^#{1,6}\s+", "", own) if own else ""
+    cont_path = " > ".join(p for p in (hpath, own_text) if p)
+
     def _tok(text: str) -> int:
         return len(ENCODER.encode(text))
 
@@ -345,7 +374,8 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
         nonlocal buf, buf_tokens, idx, out
         if not buf:
             return []
-        out.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx))
+        path = hpath if not out else cont_path
+        out.append(_make_chunk(doc, idx, "\n".join(buf), buf_tokens, ctx, path))
         idx += 1
         tail: list[str] = []
         total = 0
@@ -376,7 +406,8 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
             for start in range(0, len(toks), step):
                 out.append(_make_chunk(
                     doc, idx, ENCODER.decode(toks[start : start + max_tokens]),
-                    min(max_tokens, len(toks) - start), ctx))
+                    min(max_tokens, len(toks) - start), ctx,
+                    hpath if not out else cont_path))
                 idx += 1
             i += 1
             continue
@@ -399,29 +430,54 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
     return out, idx
 
 
-def _split_on_headers(body: str) -> list[str]:
-    """Split body on H1/H2 boundaries; each section keeps its header."""
-    matches = list(re.finditer(r"^(#{1,2})\s+.+$", body, re.MULTILINE))
+def _split_on_headers(body: str) -> list[tuple[str, str]]:
+    """Split body on H1/H2 boundaries; each section keeps its header.
+
+    Returns ``(section_text, heading_path)``. The path holds the ancestors ABOVE
+    the section's own heading — for an H2 that is the H1 it lives under, which
+    the split otherwise discards. That discard is A-441: a doc titled
+    ``# RFC full-corpus mint — EXECUTED + VERIFIED 2026-07-25`` splits into H2
+    sections, and the section holding a superseded count served as a live
+    blocker because nothing in its chunk said the work was finished, or when.
+    """
+    matches = list(re.finditer(r"^(#{1,2})\s+(.+)$", body, re.MULTILINE))
     if not matches:
-        return [body]
-    sections = []
+        return [(body, "")]
+    sections: list[tuple[str, str]] = []
     if matches[0].start() > 0:
-        sections.append(body[: matches[0].start()].rstrip())
+        sections.append((body[: matches[0].start()].rstrip(), ""))
+    h1 = ""
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
-        sections.append(body[m.start() : end].rstrip())
-    return [s for s in sections if s.strip()]
+        text = body[m.start() : end].rstrip()
+        if len(m.group(1)) == 1:
+            # An H1 IS the root — its own heading is in `text`, so no ancestors.
+            sections.append((text, ""))
+            h1 = m.group(2).strip()
+        else:
+            sections.append((text, h1))
+    return [(t, p) for t, p in sections if t.strip()]
 
 
-def _make_chunk(doc: Doc, idx: int, text: str, tokens: int, context: str = "") -> Chunk:
+def _make_chunk(doc: Doc, idx: int, text: str, tokens: int, context: str = "",
+                heading_path: str = "") -> Chunk:
     # No context → legacy hash sha1(text) byte-for-byte, so flipping the flag
     # OFF leaves change-detection identical to pre-context builds. With context,
     # fold it in so flipping ON is correctly seen as a change.
-    payload = f"{context}\x00{text}" if context else text
+    #
+    # heading_path folds in on the same principle: it reaches the embedding and
+    # the FTS row, so a chunk that gains ancestry is a CHANGED chunk and must be
+    # re-embedded. A doc with no H2-under-H1 nesting has an empty path and keeps
+    # its legacy hash byte-for-byte, so this does not churn flat corpora.
+    payload = text
+    if context:
+        payload = f"{context}\x00{payload}"
+    if heading_path:
+        payload = f"{heading_path}\x01{payload}"
     h = hashlib.sha1(payload.encode("utf-8")).hexdigest()
     return Chunk(
         doc_path=doc.rel_path, chunk_idx=idx, text=text, token_count=tokens,
-        chunk_hash=h, context=context,
+        chunk_hash=h, context=context, heading_path=heading_path,
     )
 
 

@@ -128,13 +128,17 @@ def record_date(h: Hit) -> tuple[str, str]:
     # return, so both branches were dead code and the strongest evidence tier
     # never reached the serve path at all (anomaly A-402).
     #
-    # Honest limitation, unchanged: h.text is a CHUNK. `**Last Updated**` lives
-    # at the top of a document, so only the leading chunk can see it; deeper
-    # chunks still fall through to the filename/mtime tiers. Splitting a header
-    # off a document is a bigger change than this fix.
+    # Honest limitation, NARROWED but not closed by A-441: h.text is a CHUNK.
+    # Ancestry now rides along, so a date asserted in an ancestor HEADING
+    # ("## Status as of 2026-07-25") reaches a deep chunk that could never see
+    # it before. `**Last Updated**` and frontmatter `date:` still live in the
+    # document's header block, which is not a heading and is still visible only
+    # to the leading chunk — deeper chunks keep falling through to the
+    # filename/mtime tiers. Carrying the header block per-doc is a separate fix.
     from .staleness import claim_date
 
-    return claim_date(h.text, h.rel_path, _iso(h.mtime) if h.mtime else "")
+    scan = f"{h.heading_path}\n{h.text}" if h.heading_path else h.text
+    return claim_date(scan, h.rel_path, _iso(h.mtime) if h.mtime else "")
 
 
 # --- query-aware excerpting ---------------------------------------------------
