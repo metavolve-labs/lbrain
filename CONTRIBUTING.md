@@ -69,6 +69,12 @@ learned this the hard way.
 
 Don't open a public issue. Email **curator@golden-codex.com** with details and we'll respond.
 
+> **Why that domain, and not `lbrain.ai`.** LBrain is a product of **Metavolve Labs**, whose primary
+> domain is `golden-codex.com`. The mismatch is real and we would rather explain it than have you
+> wonder whether the address is legitimate — a security contact you don't trust is a security contact
+> you don't use. It is a monitored mailbox and it does receive external mail. A dedicated
+> `lbrain.ai` reporting form is in progress and this section will point at it once it is live.
+
 Particularly interested in: anything that gets unfenced corpus text in front of an agent as
 instructions, anything that leaks a configured API key, and any path that writes outside the
 configured directories.
