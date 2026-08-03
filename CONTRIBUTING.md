@@ -67,13 +67,10 @@ learned this the hard way.
 
 ## Reporting a security issue
 
-Don't open a public issue. Email **curator@golden-codex.com** with details and we'll respond.
-
-> **Why that domain, and not `lbrain.ai`.** LBrain is a product of **Metavolve Labs**, whose primary
-> domain is `golden-codex.com`. The mismatch is real and we would rather explain it than have you
-> wonder whether the address is legitimate — a security contact you don't trust is a security contact
-> you don't use. It is a monitored mailbox and it does receive external mail. A dedicated
-> `lbrain.ai` reporting form is in progress and this section will point at it once it is live.
+Don't open a public issue. Use the private form at **<https://lbrain.ai/security.html>** —
+anonymous is fine, and we respond within 5 working days. Email works too:
+**curator@golden-codex.com** (a monitored Metavolve Labs mailbox — LBrain is a Metavolve product,
+which is why the domain differs). Both routes are delivery-tested, not assumed.
 
 Particularly interested in: anything that gets unfenced corpus text in front of an agent as
 instructions, anything that leaks a configured API key, and any path that writes outside the
