@@ -121,7 +121,13 @@ out to be an artifact of our own prompt. The retractions are published with the 
 - **Supersession** — a replaced note stops being *served* but is never deleted. Persistence and
   activation are separate concerns.
 - **Honest dating** — each record states whether its date came from the content, the filename, or the
-  filesystem. No invented timestamps.
+  filesystem. No invented timestamps. Precedence, strongest first: a `**Last Updated**:` header
+  (`verified`) → an `as of <date>` in the body → a YAML frontmatter `date:` **or** a date in the
+  filename (`dated`) → mtime (`file-dated`, the weakest — it moves on any edit).
+  > **Copying a corpus reages it.** `cp`, a git clone, and most sync tools reset mtime to *now*, so a
+  > document whose only date was its mtime serves as `file-dated <the day you copied it>`. Put a
+  > `date:` in the file's frontmatter (or the date in its filename) and the claim date rides inside
+  > the file — it survives the move. LBrain **indexes `*.md` only**; convert prose you want recalled.
 - **Untrusted-data fencing** — retrieved text is fenced and labelled as data, never instructions, so
   a note can't hijack the agent reading it.
 
