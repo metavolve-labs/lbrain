@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS chunks (
     chunk_hash TEXT NOT NULL,
     embedded   INTEGER NOT NULL DEFAULT 0,
     context    TEXT NOT NULL DEFAULT '',
+    heading_path TEXT NOT NULL DEFAULT '',
     UNIQUE(rel_path, chunk_idx),
     FOREIGN KEY (rel_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
@@ -195,6 +196,10 @@ class Store:
         chunk_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(chunks)")}
         if "context" not in chunk_cols:
             self.db.execute("ALTER TABLE chunks ADD COLUMN context TEXT NOT NULL DEFAULT ''")
+        if "heading_path" not in chunk_cols:
+            self.db.execute(
+                "ALTER TABLE chunks ADD COLUMN heading_path TEXT NOT NULL DEFAULT ''"
+            )
         doc_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(docs)")}
         if "disclosure" not in doc_cols:
             self.db.execute("ALTER TABLE docs ADD COLUMN disclosure TEXT NOT NULL DEFAULT ''")
@@ -564,25 +569,33 @@ class Store:
         ids: list[int] = []
         for c in chunks:
             cur = self.db.execute(
-                "INSERT INTO chunks (rel_path, chunk_idx, text, token_count, chunk_hash, context) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (c.doc_path, c.chunk_idx, c.text, c.token_count, c.chunk_hash, c.context),
+                "INSERT INTO chunks (rel_path, chunk_idx, text, token_count, chunk_hash, "
+                "context, heading_path) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (c.doc_path, c.chunk_idx, c.text, c.token_count, c.chunk_hash,
+                 c.context, c.heading_path),
             )
             chunk_id = cur.lastrowid
             ids.append(chunk_id)
-            # FTS indexes context+text so a chunk is findable under its doc's
-            # subject even when the chunk body never restates it. Display still
-            # reads the raw `text` column, so previews stay clean.
-            fts_text = f"{c.context}\n{c.text}" if c.context else c.text
+            # FTS indexes context+heading_path+text so a chunk is findable under
+            # its doc's subject and its section ancestry even when the chunk body
+            # never restates either. Display still reads the raw `text` column,
+            # so previews stay clean.
+            fts_text = "\n".join(p for p in (c.context, c.heading_path, c.text) if p)
             self.db.execute(
                 "INSERT INTO fts_chunks (rowid, text, rel_path, chunk_idx) VALUES (?, ?, ?, ?)",
                 (chunk_id, fts_text, c.doc_path, c.chunk_idx),
             )
         return ids
 
-    # Embed text = context + text when contextualized, else text. Used so the
-    # vector embedding carries the doc macro-context without touching display.
-    EMBED_TEXT_SQL = "CASE WHEN context != '' THEN context || char(10) || text ELSE text END"
+    # Embed text = context + heading_path + text, each included only when set, so
+    # the vector carries the doc macro-context and the section ancestry without
+    # touching display. Both empty → exactly `text`, byte-for-byte with pre-A-441
+    # builds, so a flat corpus embeds to the same vectors as before.
+    EMBED_TEXT_SQL = (
+        "CASE WHEN context != '' THEN context || char(10) ELSE '' END || "
+        "CASE WHEN heading_path != '' THEN heading_path || char(10) ELSE '' END || "
+        "text"
+    )
 
     def stale_chunks(self) -> list[tuple[int, str]]:
         rows = self.db.execute(

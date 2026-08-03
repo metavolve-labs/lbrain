@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a chunk carried the heading it STARTED on, not the ones it lived under
+
+Found in live use, not by inspection. A document titled
+`# RFC full-corpus mint — ✅ EXECUTED + VERIFIED 2026-07-25` splits into H2
+sections, and the splitter discarded the H1. So the section holding a superseded
+count reached the ranker as:
+
+```
+[1] binds      "Current corpus = 8,871 RFCs numbered 1000–9999 only"   ← stale
+[2] near-miss  "DONE. 9,791 RFCs minted (+15 pilot = 9,806)"           ← correct
+```
+
+**The admissibility gate admitted the stale figure and rejected the correct one**
+— and on the evidence it had, it was right to. The stale chunk began with
+`## Step 1 — COMPLETE the corpus (BLOCKER — do not skip)` and contained nothing
+saying the work had finished, or when. Supersession, honest dating and the gate
+all missed it, because all three read a chunk that had been stripped of the one
+line that dated and closed it.
+
+Chunks now carry `heading_path` — the ancestor headings above them — which
+reaches the embedding, the FTS row, and claim-date extraction. Continuation
+chunks of an oversized section also carry that section's own heading, so a table
+row split onto a later chunk still names where it came from.
+
+**Cost, stated plainly:** `CHUNKER_VERSION` 2 → 3. Chunk *boundaries* are
+unchanged, but any corpus with H2 sections under an H1 re-chunks and **re-embeds**
+on next import — on one live 31-document corpus that was 293 of 325 chunks (90%).
+A flat or single-heading corpus hashes identically and does not move.
+
+**Narrowed, not closed:** a date asserted in an ancestor *heading* now reaches a
+deep chunk. `**Last Updated**:` and frontmatter `date:` live in the document
+header block, which is not a heading — those are still visible only to the
+leading chunk.
+
 ## 0.1.2 — 2026-07-30 — Windows ranking, the knowledge graph, and consent
 
 **Upgrade from 0.1.1 if you are on Windows.** Three ranking features were silently

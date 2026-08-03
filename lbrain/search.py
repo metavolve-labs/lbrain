@@ -25,6 +25,7 @@ class Hit:
     doc_type: str = ""
     is_priority: bool = False
     mtime: float = 0.0
+    heading_path: str = ""  # ancestor headings above this chunk (A-441)
 
 
 # Temporal query signature — triggers the abstraction recency guardrail.
@@ -328,7 +329,7 @@ def search(
     q_vec = embedder.embed_one(query)
     vec_rows = store.db.execute(
         "SELECT v.rowid AS chunk_id, vec_distance_cosine(v.embedding, ?) AS dist, "
-        "       c.rel_path, c.chunk_idx, c.text, d.title, d.is_priority, d.doc_type, "
+        "       c.rel_path, c.chunk_idx, c.text, c.heading_path, d.title, d.is_priority, d.doc_type, "
         "       d.mtime "
         "FROM vec_chunks v "
         "JOIN chunks c ON c.chunk_id = v.rowid "
@@ -345,6 +346,7 @@ def search(
         try:
             kw_rows = store.db.execute(
                 "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
+                "       c.heading_path, "
                 "       d.title, d.is_priority, d.doc_type, d.mtime "
                 "FROM fts_chunks "
                 "JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
@@ -380,6 +382,7 @@ def search(
                 doc_type=r["doc_type"],
                 is_priority=bool(r["is_priority"]),
                 mtime=r["mtime"],
+                heading_path=r["heading_path"],
             )
             hits[cid] = h
         return h
@@ -511,6 +514,7 @@ def keyword_only(
     fetch = k * 4 if (store.belief_states() or envelope is not None) else k
     rows = store.db.execute(
         "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
+                "       c.heading_path, "
         "       d.title, d.is_priority, d.doc_type, d.mtime "
         "FROM fts_chunks "
         "JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
@@ -531,6 +535,7 @@ def keyword_only(
             doc_type=r["doc_type"],
             is_priority=bool(r["is_priority"]),
             mtime=r["mtime"],
+            heading_path=r["heading_path"],
         )
         for r in rows
     ]
