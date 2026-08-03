@@ -13,7 +13,7 @@ from . import amp
 from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import make_embedder, UnknownProviderError
 from .index import chunk as chunk_doc
-from .index import CHUNKER_VERSION, discover, parse
+from .index import CHUNKER_VERSION, chunker_fingerprint, discover, parse
 from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
@@ -70,6 +70,19 @@ _DIRECTION = {
     "gate_density": "↓ LOWER = STRICTER (fires the ambiguity notice sooner)",
     "serve_admissibility": "master ENABLE, not a dial — false turns the gate OFF entirely",
 }
+
+
+def _chunker_drift(live: str | None, stored: str | None) -> str | None:
+    """'match' | 'unset' | a human description of the mismatch | None if unreadable.
+
+    Exact inequality, never startswith — stored '20' starts with '2' and would
+    read as current against version 2 (the trap already noted in `import`).
+    """
+    if live is None:
+        return None
+    if stored is None:
+        return "unset"
+    return "match" if stored == live else f"{stored} != {live}"
 
 
 @main.command()
@@ -137,10 +150,20 @@ def doctor(as_json: bool):
         drift = store.embedding_config_status(
             cfg.embedding_dim, model, cfg.embedding_provider)
         stats = store.stats()
+        chunker_live = chunker_fingerprint(
+            cfg.chunk_tokens, cfg.chunk_overlap,
+            getattr(cfg, "contextual_prefix", False))
+        chunker_stored = store.get_meta("chunker_version")
+        if chunker_stored is None and stats.get("docs", 0):
+            # Same rule `import` uses: no recorded version on a populated brain
+            # means it predates the guard, i.e. v1 by definition. Reading absence
+            # as "current" is what made this blind spot invisible.
+            chunker_stored = "1 (unversioned)"
         store.close()
     except Exception as e:
         drift = f"unreadable: {e}"
         stored = {}
+        chunker_live = chunker_stored = None
 
     if as_json:
         click.echo(_json.dumps({
@@ -148,6 +171,8 @@ def doctor(as_json: bool):
             "settings": rows, "inert_config_keys": inert,
             "stored_fingerprint": stored,
             "embedding_drift": drift, "stats": stats,
+            "chunker_live": chunker_live, "chunker_stored": chunker_stored,
+            "chunker_drift": _chunker_drift(chunker_live, chunker_stored),
         }, indent=2, default=str))
     else:
         click.secho(f"config:  {CONFIG_PATH}"
@@ -183,10 +208,29 @@ def doctor(as_json: bool):
         else:
             click.secho(f"  ✗ EMBEDDING DRIFT: {drift} — re-embed required "
                         f"before these vectors can be trusted", fg="red")
+        cdrift = _chunker_drift(chunker_live, chunker_stored)
+        if cdrift == "match":
+            click.secho(f"  ✓ index was built by this chunker ({chunker_live})", fg="green")
+        elif cdrift == "unset":
+            click.secho("  · no chunks indexed yet (fresh brain)", fg="yellow")
+        elif cdrift is not None:
+            click.secho(
+                f"  ⚠ CHUNKER DRIFT: index built with {chunker_stored}, this run is "
+                f"{chunker_live}", fg="yellow")
+            click.secho(
+                "    Retrieval still works — it is served from chunks the current "
+                "code would not produce.\n"
+                "    Run `lbrain import` to re-chunk (it re-embeds what changed).",
+                fg="yellow")
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
 
+    # Deliberately NOT part of the non-zero contract. `doctor` exits 1 when the
+    # stored vectors cannot be trusted; chunker drift is a weaker claim — results
+    # are stale, not wrong — and `import` already repairs it. Widening the exit
+    # code would silently start failing every script that gates on `doctor`, to
+    # report something the next import fixes on its own.
     if isinstance(drift, str) and drift not in ("match", "unset"):
         raise SystemExit(1)
 
@@ -510,12 +554,11 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     # reader, applied to zero chunks. Fixing A-412 and leaving these out is the
     # "fixed the instance, missed the class" shape from the discipline doc, in a
     # fix written to prevent exactly that.
-    current_cv = ":".join(str(x) for x in (
-        CHUNKER_VERSION,
+    current_cv = chunker_fingerprint(
         getattr(cfg, "chunk_tokens", ""),
         getattr(cfg, "chunk_overlap", ""),
-        int(bool(getattr(cfg, "contextual_prefix", False))),
-    ))
+        getattr(cfg, "contextual_prefix", False),
+    )
     stored_cv = store.get_meta("chunker_version")
     # A brain that predates this guard carries NO version — and that is precisely
     # the population that needs re-chunking, since it was built by v1 by definition.

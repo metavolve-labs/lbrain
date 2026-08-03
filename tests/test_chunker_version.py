@@ -194,3 +194,62 @@ def test_partial_import_does_not_stamp_the_whole_brain(tmp_path, monkeypatch):
     st = Store(home / "brain.db", embedding_dim=384)
     assert st.get_meta("chunker_version") == "1", "partial import stamped the brain current"
     st.close()
+
+
+# --- A-442: `doctor` reported the embedding fingerprint and NOT the chunker one ---
+# So a v2 index under v3 code passed `doctor` with a clean bill of health. A-435
+# closed this for `import`, which ACTS on the mismatch; the command an operator
+# actually runs to ask "is my index sound?" never mentioned it. Same blind spot,
+# one layer up: the guard existed, the place people look didn't have it.
+
+def test_doctor_reports_chunker_drift_instead_of_a_clean_bill_of_health(
+        tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "init", "--source", str(src), "-y")
+    _run(home, monkeypatch, "import")
+
+    # Age the index to a previous chunker, exactly as a real upgrade would.
+    store = Store(home / "brain.db", embedding_dim=384)
+    store.set_meta("chunker_version", f"{CHUNKER_VERSION - 1}:512:64:0")
+    store.db.commit()
+    store.close()
+
+    res = _run(home, monkeypatch, "doctor")
+    assert "CHUNKER DRIFT" in res.output, res.output
+    assert f"{CHUNKER_VERSION - 1}:512:64:0" in res.output
+    assert "lbrain import" in res.output, "must say what to RUN, not just that it is wrong"
+
+
+def test_doctor_confirms_a_matching_chunker(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "init", "--source", str(src), "-y")
+    _run(home, monkeypatch, "import")
+    res = _run(home, monkeypatch, "doctor")
+    assert "CHUNKER DRIFT" not in res.output
+    assert "built by this chunker" in res.output, res.output
+
+
+def test_chunker_drift_does_not_change_doctors_exit_contract(tmp_path, monkeypatch):
+    """`doctor` exits non-zero when the stored VECTORS cannot be trusted. Chunker
+    drift is a weaker claim — stale, not wrong — and `import` repairs it. Widening
+    the exit code would start failing every script that gates on `doctor`."""
+    home = tmp_path / "home"
+    src = _corpus(tmp_path)
+    _run(home, monkeypatch, "init", "--source", str(src), "-y")
+    _run(home, monkeypatch, "import")
+    store = Store(home / "brain.db", embedding_dim=384)
+    store.set_meta("chunker_version", "1 (unversioned)")
+    store.db.commit()
+    store.close()
+    res = _run(home, monkeypatch, "doctor")
+    assert "CHUNKER DRIFT" in res.output
+    assert res.exit_code == 0, "chunker drift must warn, not gate"
+
+
+def test_doctor_and_import_share_one_fingerprint_implementation(tmp_path, monkeypatch):
+    """Two copies of the id string would drift apart and each look right alone."""
+    from lbrain.index import chunker_fingerprint
+    assert chunker_fingerprint(512, 64, False) == f"{CHUNKER_VERSION}:512:64:0"
+    assert chunker_fingerprint(512, 64, True) == f"{CHUNKER_VERSION}:512:64:1"

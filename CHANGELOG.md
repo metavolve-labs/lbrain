@@ -36,6 +36,78 @@ deep chunk. `**Last Updated**:` and frontmatter `date:` live in the document
 header block, which is not a heading — those are still visible only to the
 leading chunk.
 
+### Fixed — `doctor` gave a v2 index under v3 code a clean bill of health
+
+`doctor` printed the embedding fingerprint (`✓ stored vectors match the live
+embedding config`) and said nothing at all about the chunker. The chunker guard
+existed — 0.1.3 shipped it — but it lived only in `import`. So the command an
+operator runs to ask *"is my index sound?"* answered yes about an index built by
+code they no longer run.
+
+That is the A-435 blind spot one layer up: the guard was added where the code
+*acts* on drift and not where a person *looks* for it. `doctor` now reports
+`CHUNKER DRIFT` with the stored and live fingerprints and the command to fix it,
+and both commands derive that fingerprint from one shared implementation instead
+of two copies that could drift apart and each look right alone.
+
+Deliberately **not** part of `doctor`'s non-zero exit contract: that gate means
+"the stored vectors cannot be trusted". Chunker drift is a weaker claim — stale,
+not wrong — and `import` repairs it. Widening the exit code would start failing
+every script that gates on `doctor`, to report something the next import fixes.
+
+### Added — frontmatter `date:` is a claim-date tier (#7)
+
+A portable claim date that rides inside the file, so a corpus copied between
+machines no longer reages every file to its ingestion date.
+
+### Fixed — an unprovisioned brain said the wrong thing
+
+MCP reported a missing optional extra when the real problem was that the brain
+had never been provisioned.
+
+### Docs / CI
+
+Security reports point at the live, delivery-proven contact form; the contact
+domain is explained rather than left looking like phishing. The release workflow
+is dispatch-only with guards that can actually fire.
+
+## 0.1.3 — 2026-08-02 — fail-closed provider, macOS install, Trusted Publishing
+
+**This entry was reconstructed on 2026-08-03.** 0.1.3 shipped to PyPI with no
+changelog entry at all — the file jumped 0.1.2 → nothing while a release went
+public. Recording that plainly rather than backdating it silently, because a
+changelog that quietly grows entries is worth less than one that says when it
+was written.
+
+### Fixed — `lbrain init` died on stock macOS Python
+
+An `AttributeError` on Apple's system Python. This was the launch blocker, and it
+could only have been found on a real Mac — WSL Python always carries the
+`enable_load_extension` symbol, so every existing test environment passed.
+
+### Fixed — the provider now fails closed
+
+A provider typo was raising a stack trace instead of being reported as what it
+is: a config fault. Internal identifiers were also removed from shipped source.
+
+### Fixed — retrieval and onboarding papercuts
+
+- `lbrain serve` printed `type=?` for **every** record on a plain-markdown corpus.
+- `lbrain init`'s failure note told the user to run the command that had just failed.
+- `.gitignore`'s `~/.lbrain/` pattern never matched anything.
+- `AGENTS.md` served Gemini-native guidance as current doctrine.
+- `check-action`, the mistake-prevention tool, was inert — 1 of 8 rules live, now 5 of 8 (A-438).
+
+### Fixed — disclosure seam (CRITICAL)
+
+`check_action` bypassed disclosure scope through the MCP path. Also: an
+abstraction is synthesis, not an artifact, and was being classified as one.
+
+### Added — release integrity
+
+Trusted Publishing (OIDC) — no stored upload credential. Tests refuse to run at
+all against a real install, and isolation now covers every install path.
+
 ## 0.1.2 — 2026-07-30 — Windows ranking, the knowledge graph, and consent
 
 **Upgrade from 0.1.1 if you are on Windows.** Three ranking features were silently

@@ -319,6 +319,21 @@ def chunk(
 #          single-heading corpora hash identically and do not move.
 CHUNKER_VERSION = 3
 
+
+def chunker_fingerprint(chunk_tokens, chunk_overlap, contextual_prefix) -> str:
+    """The identity of the code+settings that built an index.
+
+    ONE implementation, called by both `import` (which acts on a mismatch) and
+    `doctor` (which reports one). `import` used to own the only copy, so `doctor`
+    reported the embedding fingerprint, said nothing about the chunker, and gave
+    a v2 index under v3 code a clean bill of health — the same
+    looks-correct-on-a-fresh-install blind spot A-435 was written to close, one
+    layer up (A-442).
+    """
+    return ":".join(str(x) for x in (
+        CHUNKER_VERSION, chunk_tokens, chunk_overlap, int(bool(contextual_prefix)),
+    ))
+
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _TABLE_SEP = re.compile(r"^\s*\|[\s:|\-]+\|\s*$")
 
