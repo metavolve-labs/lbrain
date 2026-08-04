@@ -691,6 +691,22 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
 
 
 @main.command()
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
+def selftest(as_json):
+    """Verify THIS installed build actually serves correctly, here.
+
+    Indexes a tiny shipped golden corpus into a throwaway brain via the real
+    pipeline and asserts the serving invariants — retrieval, honest dating,
+    supersession, staleness, and fencing. Pure FTS: no network, no API key, and
+    it never touches your real brain. Exits non-zero if any invariant fails, so
+    it works as an install smoke test in CI or after an upgrade."""
+    from .selftest import run_selftest
+
+    ok = run_selftest(as_json=as_json)
+    sys.exit(0 if ok else 1)
+
+
+@main.command()
 @click.option("--stale/--all", default=True, help="Only embed un-embedded chunks (default)")
 @click.option("--batch", default=96, type=int, help="Embedding batch size")
 def embed(stale: bool, batch: int):
