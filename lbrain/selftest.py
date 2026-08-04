@@ -21,6 +21,7 @@ Deterministic, offline, isolated: it never touches the user's real brain.
 """
 from __future__ import annotations
 
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +56,7 @@ _GOLDEN: dict[str, str] = {
     "tax-status.md": (
         "---\nname: tax-status\n---\n"
         "# Delaware franchise tax\n\n"
+        "**Last Updated**: 2026-01-10\n\n"
         "**Status**: ⚠️ **DELINQUENT** — the Delaware franchise tax is unpaid.\n"
     ),
 }
@@ -104,7 +106,9 @@ def _run_invariants(store, cfg) -> list[Invariant]:
     try:
         hits = keyword_only(store, "Vantage-780 cutover requests", k=5)
         i = by["retrieval"]
-        i.ok = any(h.rel_path == "vantage-cutover.md" for h in hits)
+        # Assert RANK, not mere presence — rank is what C1 was about, and the
+        # detail already claims it (CSO review of #13, finding 3).
+        i.ok = bool(hits) and hits[0].rel_path == "vantage-cutover.md"
         i.detail = f"{len(hits)} hit(s); top={hits[0].rel_path if hits else '-'}"
     except Exception as e:  # a raised serve path is itself a failed selftest
         by["retrieval"].detail = f"raised {type(e).__name__}: {e}"
@@ -117,8 +121,12 @@ def _run_invariants(store, cfg) -> list[Invariant]:
         i.ok = "verified 2026-01-15" in out
         i.detail = "served `verified 2026-01-15`" if i.ok else "claim-date label absent"
         f = by["untrusted-fence"]
-        f.ok = "│ " in out
-        f.detail = "body lines fenced with `│ `" if f.ok else "fence prefix absent"
+        # Assert a CORPUS BODY LINE is actually prefixed with the fence — not that
+        # the substring "│ " appears anywhere (the warning banner describes the
+        # fence and contains "│", so a substring check passes even with fencing
+        # entirely removed — CSO review of #13, finding 1, the security-relevant one).
+        f.ok = any(ln.startswith("│ ") and "Vantage-780" in ln for ln in out.splitlines())
+        f.detail = "corpus body line is fenced with `│ `" if f.ok else "corpus text NOT fenced"
     except Exception as e:
         by["honest-dating"].detail = f"raised {type(e).__name__}: {e}"
         by["untrusted-fence"].detail = f"raised {type(e).__name__}: {e}"
@@ -138,7 +146,10 @@ def _run_invariants(store, cfg) -> list[Invariant]:
         hits = keyword_only(store, "Delaware franchise tax status", k=5)
         out = render_response(cfg, hits, "Delaware franchise tax status")
         i = by["staleness"]
-        i.ok = "unverified" in out or "EXPIRED" in out
+        # Pin the real marker shape (`unverified <N>d` / `EXPIRED`), NOT the
+        # "unverified (no claim date)" fallback, which is a different claim — an
+        # open claim WITH a stale age, not one lacking a date (CSO review, finding 2).
+        i.ok = bool(re.search(r"unverified \d+d", out)) or "EXPIRED" in out
         i.detail = "open claim carries a perishability marker" if i.ok else "no stale marker"
     except Exception as e:
         by["staleness"].detail = f"raised {type(e).__name__}: {e}"
