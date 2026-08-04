@@ -57,6 +57,15 @@ code path that destroys user records.
 installs run is how you get a system that lies about itself. `lbrain doctor` exists because we
 learned this the hard way.
 
+**7. Test the OUTCOME, not the mechanism.** A change to serving, ranking, or chunking is not done
+until a test runs the *real* pipeline (`chunk` → `render_response`, or a real index → `search`) and
+asserts what a query *returns* — not merely that an internal now carries a value. We learned this the
+expensive way: a heading-ancestry fix shipped with a green suite while the served result was
+unchanged, because every test asserted "the chunk carries its H1" and none asserted "the query stops
+serving the stale figure." *A passing test on a mechanism is not evidence about behaviour.* Outcome
+gates live in `tests/test_outcome_serving.py`; a behaviour fix belongs there, and (rule below) it must
+fail before your patch **on the outcome**, not on the internal you happened to change.
+
 ## Pull requests
 
 - One concern per PR. A ranking change and a CLI change are two PRs.
