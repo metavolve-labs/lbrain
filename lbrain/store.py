@@ -589,7 +589,7 @@ class Store:
 
     # Embed text = context + heading_path + text, each included only when set, so
     # the vector carries the doc macro-context and the section ancestry without
-    # touching display. Both empty → exactly `text`, byte-for-byte with pre-A-441
+    # touching display. Both empty → exactly `text`, byte-for-byte with pre-A-513
     # builds, so a flat corpus embeds to the same vectors as before.
     EMBED_TEXT_SQL = (
         "CASE WHEN context != '' THEN context || char(10) ELSE '' END || "

@@ -25,7 +25,7 @@ class Hit:
     doc_type: str = ""
     is_priority: bool = False
     mtime: float = 0.0
-    heading_path: str = ""  # ancestor headings above this chunk (A-441)
+    heading_path: str = ""  # ancestor headings above this chunk (A-513)
 
 
 # Temporal query signature — triggers the abstraction recency guardrail.

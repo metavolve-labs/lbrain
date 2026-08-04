@@ -1,7 +1,7 @@
 """`lbrain selftest` must PASS on a working build and FAIL on a broken one.
 
 The second test is the point: a self-check that can only ever pass is worthless
-(that was the A-442 doctor failure — a guard that gave a broken index a clean
+(that was the A-517 doctor failure — a guard that gave a broken index a clean
 bill of health). Breaking the serve path here must turn selftest red.
 """
 from lbrain.selftest import run_selftest

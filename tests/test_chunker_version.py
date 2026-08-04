@@ -196,7 +196,7 @@ def test_partial_import_does_not_stamp_the_whole_brain(tmp_path, monkeypatch):
     st.close()
 
 
-# --- A-442: `doctor` reported the embedding fingerprint and NOT the chunker one ---
+# --- A-517: `doctor` reported the embedding fingerprint and NOT the chunker one ---
 # So a v2 index under v3 code passed `doctor` with a clean bill of health. A-435
 # closed this for `import`, which ACTS on the mismatch; the command an operator
 # actually runs to ask "is my index sound?" never mentioned it. Same blind spot,

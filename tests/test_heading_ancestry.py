@@ -1,4 +1,4 @@
-"""A-441 — a chunk must carry the headings it lives UNDER, not just the one it
+"""A-513 — a chunk must carry the headings it lives UNDER, not just the one it
 starts on.
 
 Found live, not by inspection. A real corpus doc titled
@@ -58,7 +58,7 @@ def test_h2_sections_carry_their_h1():
     for h2 in ("## State at handoff (2026-07-25)",
                "## Step 1 — COMPLETE the corpus (BLOCKER — do not skip)"):
         assert paths[h2] == "RFC full-corpus mint — EXECUTED + VERIFIED 2026-07-25", (
-            f"{h2!r} lost the H1 it lives under — this is the A-441 failure"
+            f"{h2!r} lost the H1 it lives under — this is the A-513 failure"
         )
 
 
@@ -113,6 +113,6 @@ def test_heading_path_changes_the_chunk_hash():
         "identical text under different ancestry hashes the same — import would "
         "short-circuit and leave the stale vectors in place"
     )
-    # ...and no path at all must reproduce the pre-A-441 hash exactly, or every
+    # ...and no path at all must reproduce the pre-A-513 hash exactly, or every
     # flat corpus in the wild re-embeds for nothing.
     assert _make_chunk(doc, 0, text, 20, "", "").chunk_hash == bare.chunk_hash
