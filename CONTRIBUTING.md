@@ -4,16 +4,22 @@ Thanks for looking. This document is short on ceremony and specific about what a
 
 ## Before you open an issue
 
-Run this and paste the output:
+Run these and paste the output:
 
 ```bash
-lbrain doctor
+lbrain doctor      # effective config + vector/chunker health
+lbrain selftest    # does this build actually serve correctly, on this machine?
 ```
 
-It prints the **effective** configuration with per-setting provenance (`[config]` vs `[DEFAULT]`),
-whether your stored vectors match your current embedding settings, and any config keys that are set
-but inert. Most reports resolve from that output alone — usually a provider mismatch, or an index
-that was never re-embedded after a settings change.
+`doctor` prints the **effective** configuration with per-setting provenance (`[config]` vs
+`[DEFAULT]`), whether your stored vectors match your current embedding settings, and any config keys
+that are set but inert. Most reports resolve from that output alone — usually a provider mismatch, or
+an index that was never re-embedded after a settings change.
+
+`selftest` indexes a tiny shipped corpus into a throwaway brain and asserts the serving invariants
+end-to-end (retrieval, honest dating, supersession, staleness, fencing). It needs no network and no
+API key, and never touches your brain. If it fails, the build's serve path is broken on your machine —
+which is a very different report from "a query gave a surprising result."
 
 Then check [`docs/DEVELOPER-NOTES.md`](docs/DEVELOPER-NOTES.md) — a running list of symptoms that read as
 bugs and are local nuances with their own fix. If yours is there, you're already done; if it's *nearly*
