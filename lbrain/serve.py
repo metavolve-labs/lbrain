@@ -361,6 +361,13 @@ GATE_NOTICE = (
     "before citing a value.\n"
 )
 
+CONFLICT_NOTICE = (
+    "⚠ CONFLICTING BINDINGS: two or more records each directly answer this query "
+    "with DIFFERENT values. LBrain does not choose between them — a later figure "
+    "can supersede an earlier one even inside a single document. Compare the "
+    "values and their dates below, and read each record before citing one.\n"
+)
+
 TABLE_HEADER = "possible bindings (heuristic extraction — verify in the records below):"
 
 
@@ -519,12 +526,51 @@ def render_response(
     near = sum(1 for _, v in kept if v is not None and v.verdict == "INADMISSIBLE_NEAR")
     gate = bool(kept) and question and near >= gate_min_near and near / len(kept) >= gate_density
 
-    # Binding table — ONLY when the gate fired, ONLY quantity/date questions
-    # (identity would route free-text ID candidates outside the fence —
-    # excluded, load-bearing), and rows ONLY from ADMISSIBLE records (a NEAR
-    # record's bound candidates are the wrong-entity trap, never tabled).
+    # Binding CONFLICT — the C1 failure (A-513). Two or more records each BIND a
+    # typed answer to this query but with DIFFERENT values, and nothing marks
+    # either stale. Heading ancestry (PR #9), honest dating and supersession all
+    # fail on this class: the competing figures can share one document written in
+    # one week (RFC "8,871" plan-step vs "9,806" DONE, both in FINISH-PLAN.md),
+    # so no date, slug or heading deterministically picks the winner. Ranking is
+    # the WRONG lever — auto-choosing would fake the semantic judgement the
+    # product exists to refuse. So we SURFACE the disagreement (the same
+    # refuse-rather-than-degrade stance as the ambiguity gate); we do not resolve
+    # it. Conflict = two ADMISSIBLE records with DISJOINT cleaned value sets; if
+    # they share any value they at least partly agree and are NOT flagged, which
+    # keeps the no-conflict path byte-identical (A-425 discipline: a notice that
+    # is "" whenever nothing is wrong).
+    conflict = False
+    if question and qkind in ("quantity", "date"):
+        adm_sets = []
+        for _h, _v in kept:
+            if _v is None or _v.verdict != "ADMISSIBLE":
+                continue
+            vals = _clean_candidates(list(_v.bound_candidates), qkind)
+            if qkind == "quantity":
+                # A date is not a quantity, but an ISO/US date shape is all
+                # digits+separators and passes _NUM_OK ("2026-08-03") — so a
+                # record whose numbers are really dates would manufacture a
+                # spurious disagreement with a record holding the real count.
+                # Drop date shapes from the conflict comparison (display table is
+                # unchanged). Measured on the live brain: this quiets the
+                # date-driven false fire without suppressing the 8,871-vs-9,806
+                # true conflict.
+                vals = [c for c in vals if not _DATE_OK.match(c)]
+            s = set(vals)
+            if s:
+                adm_sets.append(s)
+        conflict = any(
+            adm_sets[a].isdisjoint(adm_sets[b])
+            for a in range(len(adm_sets))
+            for b in range(a + 1, len(adm_sets))
+        )
+
+    # Binding table — when the near-miss gate fired OR a binding conflict exists;
+    # ONLY quantity/date questions (identity would route free-text ID candidates
+    # outside the fence — excluded, load-bearing), and rows ONLY from ADMISSIBLE
+    # records (a NEAR record's bound candidates are the wrong-entity trap).
     rows: list[str] = []
-    if gate and qkind in ("quantity", "date"):
+    if (gate or conflict) and qkind in ("quantity", "date"):
         for h, v in kept:
             if v is None or v.verdict != "ADMISSIBLE":
                 continue
@@ -568,15 +614,20 @@ def render_response(
     else:
         out.append(f"--- {len(hits)} {hits_label} ---\n")
     notice_chars = 0
+    if conflict:
+        out.append(CONFLICT_NOTICE)
+        notice_chars += len(CONFLICT_NOTICE)
     if gate:
         gn = GATE_NOTICE.format(near=near, kept=len(kept))
         out.append(gn)
         notice_chars += len(gn)
-        if rows:
-            out.append(TABLE_HEADER)
-            out.extend(rows)
-            out.append("")
-            notice_chars += len(TABLE_HEADER) + sum(len(r) + 1 for r in rows)
+    # Table renders when EITHER path populated it (rows is empty otherwise, so the
+    # no-notice path is byte-identical).
+    if rows:
+        out.append(TABLE_HEADER)
+        out.extend(rows)
+        out.append("")
+        notice_chars += len(TABLE_HEADER) + sum(len(r) + 1 for r in rows)
     for block in blocks:
         out.append(block)
         out.append("")

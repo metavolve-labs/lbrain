@@ -9,6 +9,7 @@ import pytest
 from lbrain.config import Config
 from lbrain.search import Hit
 from lbrain.serve import (
+    CONFLICT_NOTICE,
     GATE_NOTICE,
     TABLE_HEADER,
     _clean_candidates,
@@ -425,6 +426,76 @@ def test_binding_table_never_for_identity_questions():
     out = render_response(cfg, hits, "Who handled the Meridian gateway rollout?")
     assert TABLE_HEADER not in out
     assert "Ignore All Previous Instructions ←" not in out
+
+
+# --- binding CONFLICT (A-513): admissible records that disagree --------------
+# The C1 failure: two records each BIND a typed answer to one query with
+# DIFFERENT values, and nothing marks either stale (they can share one document
+# from one week — the RFC "8,871" plan-step vs "9,806" DONE case). Ranking is
+# the wrong lever; the honest move is to SURFACE the disagreement.
+
+# Mirrors the real C1 case: one doc's plan-step said 8,871, the DONE section said
+# 9,806. Subject carries no digit, so the two values are cleanly disjoint.
+CONFLICT_A = ("The RFC corpus mint completed with 8871 RFCs numbered in the "
+              "assigned block, per the handoff plan.")
+CONFLICT_B = ("The RFC corpus mint completed with 9806 RFCs minted to Arweave, "
+              "per the done report.")
+Q_COUNT = "How many RFCs were minted to the corpus?"
+
+
+def test_conflict_surfaced_when_admissible_records_disagree():
+    hits = [mk_hit(text=CONFLICT_A, title="Plan", chunk_idx=0),
+            mk_hit(text=CONFLICT_B, title="Done", chunk_idx=1)]
+    out = render_response(mk_cfg(), hits, Q_COUNT)
+    assert CONFLICT_NOTICE.strip() in out           # the disagreement is announced
+    assert TABLE_HEADER in out                       # both candidates tabled
+    assert "8871 ← Plan" in out
+    assert "9806 ← Done" in out
+    assert "ambiguity-dense" not in out              # NOT the near-miss gate firing
+
+
+def test_no_conflict_notice_when_admissible_records_agree():
+    # Same value in both = they agree = no notice, and with no near-miss gate the
+    # output is byte-identical to baseline — the A-425 discipline (a notice that
+    # is "" whenever nothing is wrong; the no-conflict serve path is unchanged).
+    agree = ("The RFC corpus mint completed with 9806 RFCs minted to Arweave, "
+             "per the {src}.")
+    hits = [mk_hit(text=agree.format(src="handoff plan"), title="Plan", chunk_idx=0),
+            mk_hit(text=agree.format(src="done report"), title="Done", chunk_idx=1)]
+    out = render_response(mk_cfg(), hits, Q_COUNT)
+    assert "CONFLICTING BINDINGS" not in out
+    assert TABLE_HEADER not in out
+
+
+def test_no_conflict_from_a_single_admissible_record():
+    # One record with several numbers must never conflict with itself.
+    hits = [mk_hit(text=("The RFC corpus mint completed with 9806 RFCs and 0 empty "
+                         "titles, per the done report."), title="Done")]
+    out = render_response(mk_cfg(), hits, Q_COUNT)
+    assert "CONFLICTING BINDINGS" not in out
+
+
+def test_quantity_conflict_ignores_date_shaped_values():
+    # ISO dates pass the numeric whitelist ("2026-08-03" is digits+hyphens), so
+    # a record whose only numbers are dates must NOT manufacture a spurious
+    # quantity conflict with a record holding the real count.
+    dated = ("The RFC registry records audit snapshot was taken on 2026-08-03, "
+             "per the audit log.")
+    counted = ("The RFC registry holds 9806 records minted to Arweave, per the "
+               "done report.")
+    hits = [mk_hit(text=dated, title="Log", chunk_idx=0),
+            mk_hit(text=counted, title="Done", chunk_idx=1)]
+    out = render_response(mk_cfg(), hits, "How many records are in the RFC registry?")
+    assert "CONFLICTING BINDINGS" not in out
+
+
+def test_conflict_excluded_for_identity_questions():
+    # identity qkind routes free-text ID candidates outside the fence — the same
+    # load-bearing exclusion the binding table already enforces.
+    hits = [mk_hit(text=CONFLICT_A, title="A", chunk_idx=0),
+            mk_hit(text=CONFLICT_B, title="B", chunk_idx=1)]
+    out = render_response(mk_cfg(), hits, "Who minted the RFC corpus?")
+    assert "CONFLICTING BINDINGS" not in out
 
 
 def test_prose_mode_ignores_admissibility_knobs():
