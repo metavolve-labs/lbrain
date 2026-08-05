@@ -86,7 +86,7 @@ class Chunk:
     # Ancestor headings ABOVE this chunk's own heading, outermost first (" > ").
     # Structural provenance, always populated — not an embedding option like
     # `context`. A chunk's own heading is already in `text`; what was missing is
-    # everything the split threw away above it (A-441).
+    # everything the split threw away above it (A-513).
     heading_path: str = ""
 
 
@@ -310,7 +310,7 @@ def chunk(
 # chunker, which had no version identity at all.
 #
 # 1 -> 2 : line-aware, table-aware _window_section (A-412, 2026-08-01)
-# 2 -> 3 : heading ancestry (A-441, 2026-08-03). Boundaries are UNCHANGED — this
+# 2 -> 3 : heading ancestry (A-513, 2026-08-03). Boundaries are UNCHANGED — this
 #          is the first bump that isn't about where the cuts land. It is here
 #          because the rule's PURPOSE is "the index must not silently disagree
 #          with the code that built it", and a chunk that gains ancestry embeds
@@ -328,7 +328,7 @@ def chunker_fingerprint(chunk_tokens, chunk_overlap, contextual_prefix) -> str:
     reported the embedding fingerprint, said nothing about the chunker, and gave
     a v2 index under v3 code a clean bill of health — the same
     looks-correct-on-a-fresh-install blind spot A-435 was written to close, one
-    layer up (A-442).
+    layer up (A-517).
     """
     return ":".join(str(x) for x in (
         CHUNKER_VERSION, chunk_tokens, chunk_overlap, int(bool(contextual_prefix)),
@@ -450,7 +450,7 @@ def _split_on_headers(body: str) -> list[tuple[str, str]]:
 
     Returns ``(section_text, heading_path)``. The path holds the ancestors ABOVE
     the section's own heading — for an H2 that is the H1 it lives under, which
-    the split otherwise discards. That discard is A-441: a doc titled
+    the split otherwise discards. That discard is A-513: a doc titled
     ``# RFC full-corpus mint — EXECUTED + VERIFIED 2026-07-25`` splits into H2
     sections, and the section holding a superseded count served as a live
     blocker because nothing in its chunk said the work was finished, or when.

@@ -128,7 +128,7 @@ def record_date(h: Hit) -> tuple[str, str]:
     # return, so both branches were dead code and the strongest evidence tier
     # never reached the serve path at all (anomaly A-402).
     #
-    # Honest limitation, NARROWED but not closed by A-441: h.text is a CHUNK.
+    # Honest limitation, NARROWED but not closed by A-513: h.text is a CHUNK.
     # Ancestry now rides along, so a date asserted in an ancestor HEADING
     # ("## Status as of 2026-07-25") reaches a deep chunk that could never see
     # it before. `**Last Updated**` and frontmatter `date:` still live in the
