@@ -1372,6 +1372,54 @@ def whoami(as_json: bool):
 
 
 @main.command()
+@click.option("--name", required=True, help="The gcx:// label you own (without the scheme), e.g. jarvis")
+@click.option("--address", required=True, help="The wallet/key address that owns the name")
+@click.option("--issuer", default="", help="Who attested this identity (e.g. gcx-registrar) — never yourself, for authority")
+@click.option("--credential", "credentials", multiple=True, help="A verified credential type (repeatable)")
+@click.option("--trust-score", type=float, default=None, help="Last known bureau trust score, if any")
+@click.option("--force", is_flag=True, help="Overwrite an existing identity")
+def register(name, address, issuer, credentials, trust_score, force):
+    """Bind this brain to its ecosystem identity — a gcx:// name it owns.
+
+    Persists the identity to ~/.lbrain/identity.json (0600). After this, `lbrain whoami`
+    and the MCP `lair_whoami` report this brain AS the gcx:// identity. Identity accretes
+    onto an anonymous install; it never gates one — an unregistered brain stays fully functional.
+    Typically run with the name + owning address returned by a gcx:// name purchase.
+    """
+    import re
+    from datetime import date
+
+    from .identity import Identity, IDENTITY_PATH
+
+    label = name.strip().lower()
+    if label.startswith("gcx://"):
+        label = label[len("gcx://"):]
+    label = label.strip("/")
+    if not re.fullmatch(r"[a-z0-9-]{1,63}", label) or label.startswith("-") or label.endswith("-"):
+        raise click.ClickException("Invalid gcx name — 1-63 chars, a-z / 0-9 / hyphen, no leading/trailing hyphen.")
+
+    existing = Identity.load()
+    if existing and not force:
+        raise click.ClickException(f"This brain already has an identity ({existing.gcx}). Use --force to replace it.")
+
+    ident = Identity(
+        name=label,
+        address=address.strip(),
+        credentials=list(credentials),
+        trust_score=trust_score,
+        registered_at=date.today().isoformat(),
+        issuer=issuer.strip(),
+    )
+    ident.save()
+    click.secho(f"  registered: {ident.gcx}", fg="green", bold=True)
+    click.echo(f"  address:     {ident.address}")
+    if ident.credentials:
+        click.echo(f"  credentials: {', '.join(ident.credentials)}")
+    click.echo(f"  saved to {IDENTITY_PATH} (0600)")
+    click.echo("  run `lbrain whoami` to see it.")
+
+
+@main.command()
 @click.argument("name")
 @click.option("--gateway", default=None, help="Arweave gateway (default arweave.net; point at your own).")
 @click.option("--graphql", default=None, help="GraphQL endpoint for name lookup.")
