@@ -191,6 +191,7 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
         core = amp.core_block(
             getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900),
             envelope=getattr(hits, "envelope", None), withheld=getattr(hits, "withheld", None),
+            serve=getattr(cfg, "core_memory_serve", "always"),
         )
         blind = blinding_notice(hits)   # prose must disclose the blinding too
         if blind:

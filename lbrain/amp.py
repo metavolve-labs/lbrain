@@ -97,8 +97,22 @@ def budget(hits, max_chars: int, per_chunk_chars: int):
 
 _CORE_TRUNCATION_WARNED: set = set()
 
+# Session-dedup state for core_memory_serve = "session" (opt-in). Keyed by
+# (path, max_chars, admits_context) so a disclosure-mode switch re-serves; value is
+# (mtime_at_last_full_serve, calls_since_full_serve). Process-scoped by design: the CLI
+# is one process per call and keeps today's behavior automatically; only a long-lived
+# MCP server dedups — which is where the measured waste was (the 2026-08-04 three-arm
+# pilot: full core re-served on every one of 16 calls, ~12% of the arm's token spend).
+_CORE_SESSION: dict = {}
 
-def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) -> str:
+# Compaction insurance: a conversation that outlives its context window can lose the
+# original full block to summarization while the server still remembers serving it.
+# Re-serving every Nth call bounds that outage to N-1 calls.
+_CORE_REFRESH_EVERY = 10
+
+
+def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None,
+               serve: str = "always") -> str:
     """Letta-style always-on 'core memory': a curated durable-context block injected
     ahead of retrieved hits, so the essentials are always present regardless of whether
     a query happens to match them. Where AMP gates/budgets the *episodic* recall, this
@@ -119,6 +133,13 @@ def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) ->
     long context block can no longer push doctrine out of the budget. That
     ordering matters: A-421 was exactly this failure — the char budget silently
     ate the newest, most-hedged lines because corrections are appended last.
+
+    `serve="session"` (opt-in via config `core_memory_serve`) dedups within a process:
+    the first call serves the full block; later calls serve a one-line marker instead,
+    EXCEPT when the file's mtime changed (an edit must always propagate — staleness is
+    worse than spend) or every `_CORE_REFRESH_EVERY`th call (compaction insurance).
+    Default remains "always": the block is a measured net-positive and its default does
+    not change without its own A/B (house rule: measure before you cut).
     """
     import os
 
@@ -134,9 +155,11 @@ def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) ->
         return ""
 
     label = "🧠 Core memory (always-on):"
+    admits = True
     if envelope is not None:
         doctrine, context = split_core(text)
-        if core_admits_context(envelope):
+        admits = core_admits_context(envelope)
+        if admits:
             text = "\n\n".join(p for p in (doctrine, context) if p)
         else:
             if withheld is not None and context:
@@ -145,6 +168,22 @@ def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None) ->
             label = "🧠 Core memory — DOCTRINE ONLY (context withheld by disclosure mode):"
         if not text:
             return ""
+
+    if serve == "session":
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            mtime = 0.0
+        key = (path, max_chars, admits)
+        prev = _CORE_SESSION.get(key)
+        if prev is not None and prev[0] == mtime and prev[1] < _CORE_REFRESH_EVERY - 1:
+            _CORE_SESSION[key] = (mtime, prev[1] + 1)
+            return (
+                f"🧠 Core memory: served in full earlier this session ({len(text)} chars, "
+                "unchanged — auto re-serves on edit and periodically).\n"
+            )
+        # First call, an edit, or the periodic refresh: serve full and reset the counter.
+        _CORE_SESSION[key] = (mtime, 0)
 
     if len(text) > max_chars:
         # Truncation here is SILENT no longer. A-421: the budget ate the newest,
