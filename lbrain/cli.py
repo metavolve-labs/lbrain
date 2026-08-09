@@ -209,6 +209,15 @@ def doctor(as_json: bool):
         if stored and any(v is not None for v in stored.values()):
             click.echo(f"  stored vectors:  {stored.get('embedding_model')} "
                        f"({stored.get('embedding_dim')}d, {stored.get('embedding_provider')})")
+        from .gcx import AUTHORITY_MODE
+        if AUTHORITY_MODE != "signature-verified":
+            click.secho(f"  ⚠ gcx:// authority: {AUTHORITY_MODE}", fg="yellow")
+            click.secho("    The operator address is computed locally, so a gateway cannot fake it —",
+                        fg="yellow")
+            click.secho("    but it is NOT proof the operator signed the record. For full", fg="yellow")
+            click.secho("    signature verification: pip install 'lbrain[verify]'  (coming)", fg="yellow")
+        else:
+            click.secho(f"  ✓ gcx:// authority: {AUTHORITY_MODE}", fg="green")
         if drift == "match":
             click.secho("  ✓ stored vectors match the live embedding config", fg="green")
         elif drift == "unset":
@@ -1428,10 +1437,18 @@ def whoami(as_json: bool):
     if ident["registered"]:
         click.secho(f"  {ident['gcx']}", fg="green", bold=True)
         click.echo(f"  address:      {ident['address']}")
+        selfsaid = ident.get("verification") != "chain-verified"
+        mark = "  (self-asserted, unchecked)" if selfsaid else ""
         creds = ", ".join(ident["credentials"]) or "none yet"
-        click.echo(f"  credentials:  {creds}")
+        click.echo(f"  credentials:  {creds}{mark if ident['credentials'] else ''}")
         if ident["trust_score"] is not None:
-            click.echo(f"  trust score:  {ident['trust_score']}")
+            click.echo(f"  trust score:  {ident['trust_score']}{mark}")
+        if ident.get("issuer"):
+            click.echo(f"  issuer:       {ident['issuer']}{mark}")
+        click.secho(f"  verification: {ident.get('verification', 'self-asserted')}",
+                    fg=("green" if not selfsaid else "yellow"))
+        if selfsaid and ident.get("note"):
+            click.secho(f"  {ident['note']}", fg="yellow")
     else:
         click.secho("  no ecosystem identity", fg="yellow")
         click.echo(f"  {ident['note']}")
@@ -1470,12 +1487,35 @@ def register(name, address, issuer, credentials, trust_score, force):
 
     from .identity import Identity, IDENTITY_PATH
 
-    label = name.strip().lower()
-    if label.startswith("gcx://"):
-        label = label[len("gcx://"):]
+    # A gcx:// name is a PATH, not a flat label (#16). The C-suite template is
+    # `gcx://metavolvelabs/csuite/<role>/<chosen-name>`, which the old single-segment
+    # rule rejected outright — the naming scheme could not bind its own identities.
+    #
+    # Case is PRESERVED. The old rule lowercased the whole name, but the scheme is
+    # case-insensitive only in its SCHEME part: `gcx.parse()` "case-normalizes the
+    # scheme only" and the spec's path grammar is case-sensitive. Lowercasing meant
+    # registering `…/Touchstone` silently stored a DIFFERENT identifier, which would
+    # not match a chain record minted with capitals. Silent corruption at exactly the
+    # moment an identity is bound.
+    #
+    # Charset follows the spec (`unreserved` per RFC 3986 §2.3) so this and the
+    # resolver accept the same names rather than two rules that drift.
+    label = name.strip()
+    if label[:6].lower() == "gcx://":
+        label = label[6:]
     label = label.strip("/")
-    if not re.fullmatch(r"[a-z0-9-]{1,63}", label) or label.startswith("-") or label.endswith("-"):
-        raise click.ClickException("Invalid gcx name — 1-63 chars, a-z / 0-9 / hyphen, no leading/trailing hyphen.")
+    segments = label.split("/") if label else []
+    _SEG = re.compile(r"[A-Za-z0-9._~-]{1,63}")
+    if not segments or any(
+        not _SEG.fullmatch(seg) or seg.startswith("-") or seg.endswith("-")
+        for seg in segments
+    ):
+        raise click.ClickException(
+            "Invalid gcx name. Each path segment: 1-63 chars from A-Z a-z 0-9 . _ ~ -, "
+            "no leading/trailing hyphen. Example: "
+            "gcx://metavolvelabs/csuite/cso/touchstone"
+        )
+    label = "/".join(segments)
 
     existing = Identity.load()
     if existing and not force:
@@ -1547,6 +1587,11 @@ def resolve(name: str, gateway: str, graphql: str, out: str, quiet: bool):
     click.echo(f"    expected: {r.expected_sha256 or '(none recorded on-chain)'}")
     click.echo(f"    actual:   {r.actual_sha256}")
     click.secho(f"    {r.status}", fg=("green" if ok else "red"), bold=True)
+    if ok and r.authority_mode and r.authority_mode != "signature-verified":
+        click.secho(f"    ⚠ authority is {r.authority_mode} — the operator address was computed",
+                    fg="yellow")
+        click.secho("      locally (a gateway cannot fake it), but the signature was not checked.",
+                    fg="yellow")
     click.echo(f"    gateway:  {r.gateway}")
     if not out:
         click.echo()

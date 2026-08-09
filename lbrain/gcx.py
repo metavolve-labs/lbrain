@@ -20,6 +20,7 @@ problems.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -35,6 +36,20 @@ GATEWAY = "https://arweave.net"
 # a specification revision plus an engine release, never a server-side swap: "trust the key our
 # server hands you" is exactly the dependency this scheme exists to remove.
 OPERATOR_ADDRESS = "BPLL7nZOmxMIveXkbt59Yotve0IDM-UCCunPFe2imUc"
+
+# How strongly an authority record can currently be established.
+#
+#   address-derived     the operator's address is COMPUTED locally from the public
+#                       key the gateway returns, so a gateway cannot fake it. Does
+#                       NOT prove the operator signed the transaction.
+#   signature-verified  RSA-PSS over the transaction deep-hash. Proves it.
+#
+# Decision (2026-08-09): signature verification ships as an
+# OPTIONAL EXTRA, `lbrain[verify]`, rather than vendored — roll-your-own crypto is
+# risk wearing a convenience costume, and the small default footprint is a real
+# selling point. The label is what keeps us truthful in the meantime: an install
+# without it says so, rather than reporting the stronger property.
+AUTHORITY_MODE = "address-derived"
 
 # scheme://collection/id  — e.g. gcx://rfc/793, aet://works/0020
 _NAME = re.compile(r"^(?P<scheme>gcx|aet)://(?P<path>[A-Za-z0-9._~/-]+)$")
@@ -58,6 +73,10 @@ class Resolved:
     # A-506: txid of the operator-signed pointer record that selected this transaction,
     # or None when resolution was by uniqueness (the legacy path).
     authority_txid: str | None = None
+
+    # How the AUTHORITY behind this name was established, when one was used.
+    # "" when no authority record applied (legacy path).
+    authority_mode: str = ""
 
     @property
     def content(self) -> bytes:
@@ -94,7 +113,17 @@ class Resolved:
             # RFC 793 has Canonical-SHA256, RFC 2616 does not). Absence is
             # reported as absence — never as a pass.
             return "UNVERIFIABLE (no hash recorded on-chain)"
-        return "VERIFIED" if self.verified else "HASH MISMATCH"
+        if not self.verified:
+            return "HASH MISMATCH"
+        # The hash verified. Say HOW the name was bound to this transaction, because
+        # those are different strengths and collapsing them is the whole class of bug
+        # this codebase keeps finding. `address-derived` means the operator's address
+        # was computed locally from the public key the gateway returned — a gateway
+        # cannot fake the address. It has NOT been proved the operator signed this
+        # transaction; that needs RSA-PSS over the tx deep-hash (`signature-verified`).
+        if self.authority_mode:
+            return f"VERIFIED ({self.authority_mode})"
+        return "VERIFIED"
 
 
 def parse(name: str) -> tuple[str, str]:
@@ -123,6 +152,31 @@ def _tagmap(n):
     return {t["name"]: t["value"] for t in n.get("tags", [])}
 
 
+def _address_from_owner_key(owner_key: str) -> str | None:
+    """Derive an Arweave address from the owner PUBLIC KEY, locally.
+
+    address = Base64URL( SHA-256( raw public-key bytes ) ), and `owner.key` is the
+    base64url RSA modulus. The address is therefore a FUNCTION of the key — not a
+    fact a gateway gets to assert.
+
+    G1. `_authority_target` filtered on `owners:` and then re-read `owner.address`,
+    but both come from the gateway. A hostile or compromised gateway could hand back
+    any transaction and label it ours. Deriving the address from the key it also
+    returns removes that: to fool this, a gateway must produce a public key that
+    SHA-256s to the operator's address, which it cannot.
+
+    hashlib only — no crypto dependency, no pending decision.
+    """
+    try:
+        pad = "=" * (-len(owner_key) % 4)
+        raw = base64.urlsafe_b64decode(owner_key + pad)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    return base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+
+
 def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, str] | None:
     """(authority record id, canonical target txid) per the operator-signed pointer
     records for `name`, or None when no valid record exists.
@@ -143,7 +197,7 @@ def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, 
     query = (
         "query($n:[String!],$o:[String!]){transactions(tags:[{name:\"GCX-Authority\","
         "values:$n}],owners:$o,first:10){edges{node{id tags{name value} "
-        "owner{address} block{height}}}}}"
+        "owner{address key} block{height}}}}}"
     )
     try:
         data = _post_json(
@@ -155,8 +209,13 @@ def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, 
     records = []
     for e in edges:
         n = e.get("node") or {}
-        # Defense in depth: verify the returned owner, never rely on the filter alone.
-        if ((n.get("owner") or {}).get("address")) != OPERATOR_ADDRESS:
+        # G1: derive the address from the returned public KEY rather than believing
+        # the gateway's `address` field. A record whose key is absent, undecodable,
+        # or hashes to anything else is not ours — drop it. Dropping every record
+        # degrades to legacy refuse-on-ambiguity, which is the safe direction.
+        owner = n.get("owner") or {}
+        derived = _address_from_owner_key(owner.get("key") or "")
+        if derived is None or derived != OPERATOR_ADDRESS:
             continue
         target = _tagmap(n).get("GCX-Target")
         if not target:
@@ -296,4 +355,8 @@ def resolve(
     return Resolved(
         name=name, txid=txid, expected_sha256=expected, actual_sha256=actual,
         raw_content=content, tags=tags, gateway=gateway, authority_txid=authority,
+        # An authority record was used → say how strongly it was established.
+        # ADDRESS_DERIVED today; SIGNATURE_VERIFIED when `lbrain[verify]` lands and
+        # the RSA-PSS check over the tx deep-hash runs.
+        authority_mode=(AUTHORITY_MODE if authority else ""),
     )
