@@ -95,6 +95,12 @@ THE QUESTIONS
 9. HISTORY IMPORT — "Want to seed the brain from your existing AI chat history?
    I can hand you an export prompt for the assistant you already use."
    Default: offer, don't push.
+   ⚠ LARGE-CORPUS WARNING (say this plainly whenever they import months or years of
+   material, here or in question 1): imported records are indexed AS-IS. The engine
+   dates every record and prefers newer over older, but it cannot know which old
+   claims are still true — recall will faithfully serve whatever was fed in.
+   Vet high-consequence records before trusting answers built on them, and show
+   them `lbrain stale` as the audit tool for exactly this.
 
 FINISH — THE RECEIPT (required, never skipped)
 - Run `lbrain doctor` and show the user the result.
