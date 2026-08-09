@@ -20,6 +20,7 @@ problems.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -123,6 +124,31 @@ def _tagmap(n):
     return {t["name"]: t["value"] for t in n.get("tags", [])}
 
 
+def _address_from_owner_key(owner_key: str) -> str | None:
+    """Derive an Arweave address from the owner PUBLIC KEY, locally.
+
+    address = Base64URL( SHA-256( raw public-key bytes ) ), and `owner.key` is the
+    base64url RSA modulus. The address is therefore a FUNCTION of the key — not a
+    fact a gateway gets to assert.
+
+    G1. `_authority_target` filtered on `owners:` and then re-read `owner.address`,
+    but both come from the gateway. A hostile or compromised gateway could hand back
+    any transaction and label it ours. Deriving the address from the key it also
+    returns removes that: to fool this, a gateway must produce a public key that
+    SHA-256s to the operator's address, which it cannot.
+
+    hashlib only — no crypto dependency, no pending decision.
+    """
+    try:
+        pad = "=" * (-len(owner_key) % 4)
+        raw = base64.urlsafe_b64decode(owner_key + pad)
+    except Exception:
+        return None
+    if not raw:
+        return None
+    return base64.urlsafe_b64encode(hashlib.sha256(raw).digest()).decode().rstrip("=")
+
+
 def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, str] | None:
     """(authority record id, canonical target txid) per the operator-signed pointer
     records for `name`, or None when no valid record exists.
@@ -143,7 +169,7 @@ def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, 
     query = (
         "query($n:[String!],$o:[String!]){transactions(tags:[{name:\"GCX-Authority\","
         "values:$n}],owners:$o,first:10){edges{node{id tags{name value} "
-        "owner{address} block{height}}}}}"
+        "owner{address key} block{height}}}}}"
     )
     try:
         data = _post_json(
@@ -155,8 +181,13 @@ def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, 
     records = []
     for e in edges:
         n = e.get("node") or {}
-        # Defense in depth: verify the returned owner, never rely on the filter alone.
-        if ((n.get("owner") or {}).get("address")) != OPERATOR_ADDRESS:
+        # G1: derive the address from the returned public KEY rather than believing
+        # the gateway's `address` field. A record whose key is absent, undecodable,
+        # or hashes to anything else is not ours — drop it. Dropping every record
+        # degrades to legacy refuse-on-ambiguity, which is the safe direction.
+        owner = n.get("owner") or {}
+        derived = _address_from_owner_key(owner.get("key") or "")
+        if derived is None or derived != OPERATOR_ADDRESS:
             continue
         target = _tagmap(n).get("GCX-Target")
         if not target:
