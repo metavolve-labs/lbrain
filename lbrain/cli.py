@@ -165,6 +165,13 @@ def doctor(as_json: bool):
         stored = {}
         chunker_live = chunker_stored = None
 
+    # --- dial-in manifest drift (recorded setup artifacts that vanished) ---
+    try:
+        from .dialin import drift_check
+        setup_drift = drift_check()
+    except Exception:
+        setup_drift = []
+
     if as_json:
         click.echo(_json.dumps({
             "config_path": str(CONFIG_PATH), "config_exists": cfg_exists,
@@ -173,6 +180,7 @@ def doctor(as_json: bool):
             "embedding_drift": drift, "stats": stats,
             "chunker_live": chunker_live, "chunker_stored": chunker_stored,
             "chunker_drift": _chunker_drift(chunker_live, chunker_stored),
+            "setup_drift": setup_drift,
         }, indent=2, default=str))
     else:
         click.secho(f"config:  {CONFIG_PATH}"
@@ -225,6 +233,10 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        if setup_drift:
+            click.echo()
+            for w in setup_drift:
+                click.secho(f"  ⚠ setup drift: {w}", fg="yellow")
 
     # Deliberately NOT part of the non-zero contract. `doctor` exits 1 when the
     # stored vectors cannot be trusted; chunker drift is a weaker claim — results
@@ -846,6 +858,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         core = amp.core_block(
             getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900),
             envelope=getattr(hits, "envelope", None), withheld=getattr(hits, "withheld", None),
+            serve=getattr(cfg, "core_memory_serve", "always"),
         )
         blind = blinding_notice(hits)   # prose must disclose the blinding too
         if blind:
@@ -991,6 +1004,72 @@ def check_action(action_text: str, k: int):
 def onboard(target_dir: str):
     """Interactive onboarding — scaffolds CLAUDE.md + starter lairs."""
     run_onboarding(Path(target_dir).expanduser().resolve())
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def setup(ctx):
+    """The dial-in — one-time, AGENT-led setup.
+
+    Bare `lbrain setup` prints the interview instruction: hand it to (or run it
+    as) the user's AI agent, which asks nine defaulted questions and performs
+    only the additive steps, recording each in ~/.lbrain/setup-manifest.md.
+    `init` gets keys; `onboard` scaffolds lairs; THIS wires the harness — the
+    recall-first habit, auto re-sync, MCP, memory placement.
+    """
+    if ctx.invoked_subcommand is None:
+        from .dialin import INTERVIEW_PROMPT
+        click.echo(INTERVIEW_PROMPT)
+
+
+@setup.command("templates")
+@click.option("--dir", "target_dir", type=click.Path(file_okay=False),
+              default="./lbrain-hooks", show_default=True,
+              help="Where to write the hook + harness templates.")
+def setup_templates(target_dir: str):
+    """Write hook templates (recall-first, autosync) + harness snippets."""
+    from .dialin import write_templates
+    written = write_templates(Path(target_dir).expanduser().resolve())
+    for p in written:
+        click.echo(f"  wrote {p}")
+    click.secho("  → edit __LBRAIN_SOURCE_DIRS__ in both hooks before wiring "
+                "them in (see README.md there)", fg="yellow")
+
+
+@setup.command("record")
+@click.argument("kind")
+@click.argument("desc")
+@click.option("--path", "path_", default=None, help="Artifact installed (file path).")
+@click.option("--undo", default=None, help="Exact command that reverses this step.")
+def setup_record(kind: str, desc: str, path_: str | None, undo: str | None):
+    """Record a performed setup step in the manifest (idempotent)."""
+    from .dialin import record_step
+    try:
+        added = record_step(kind, desc, path=path_, undo=undo)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    click.echo("recorded" if added else "already recorded — skipped (idempotent)")
+
+
+@setup.command("status")
+def setup_status():
+    """Show everything the dial-in installed, and any drift."""
+    from .dialin import drift_check, manifest_path, read_manifest
+    entries = read_manifest()
+    if not entries:
+        click.echo(f"no dial-in manifest at {manifest_path()} — run `lbrain setup`")
+        return
+    for e in entries:
+        click.echo(f"  [{e['kind']:<6}] {e['desc']}"
+                   f"{'' if e['path'] == '-' else '  → ' + e['path']}")
+        click.echo(f"           undo: {e['undo']}")
+    warnings = drift_check()
+    if warnings:
+        click.echo()
+        for w in warnings:
+            click.secho(f"  ⚠ {w}", fg="yellow")
+    else:
+        click.secho(f"\n  ✓ all {len(entries)} recorded artifacts present", fg="green")
 
 
 @main.command()
