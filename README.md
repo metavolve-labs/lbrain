@@ -10,10 +10,8 @@
   <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-555?style=flat-square" alt="Python 3.10-3.13">
 </p>
 
-> **BETA — use at your own risk.** This is early software from a small team. It has not yet been through an
-> independent security review. It runs on your machine against your files: **keep backups, and don't point it
-> at anything you can't afford to have read by a tool that is still being hardened.** LBrain never deletes
-> your source files, but that is a design commitment, not yet an audited guarantee.
+> **Beta.** Early software from a small team, with no independent security audit yet. Keep backups, as you
+> would with any beta.
 
 **Memory for AI agents that cites its sources — and says when it doesn't know.**
 
@@ -91,7 +89,7 @@ Four 2026 papers staked adjacent ground while we were building, and they deserve
   conflict resolution belongs in deterministic code, not model judgment — "the bottleneck … is assembly
   (post-retrieval aggregation), not storage."
 
-We claim no priority over any of this. What our 8-model matrix adds is the controlled variable: it
+What our 8-model matrix adds is the controlled variable: it
 reproduced the same failure class independently, in a different domain, before it had a name — and showed
 the **serving format**, not the model, is the controlling variable. How a record is *presented* to the
 generator is the axis these works leave open, and it is the axis LBrain operates on.
