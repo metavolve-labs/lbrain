@@ -209,6 +209,15 @@ def doctor(as_json: bool):
         if stored and any(v is not None for v in stored.values()):
             click.echo(f"  stored vectors:  {stored.get('embedding_model')} "
                        f"({stored.get('embedding_dim')}d, {stored.get('embedding_provider')})")
+        from .gcx import AUTHORITY_MODE
+        if AUTHORITY_MODE != "signature-verified":
+            click.secho(f"  ⚠ gcx:// authority: {AUTHORITY_MODE}", fg="yellow")
+            click.secho("    The operator address is computed locally, so a gateway cannot fake it —",
+                        fg="yellow")
+            click.secho("    but it is NOT proof the operator signed the record. For full", fg="yellow")
+            click.secho("    signature verification: pip install 'lbrain[verify]'  (coming)", fg="yellow")
+        else:
+            click.secho(f"  ✓ gcx:// authority: {AUTHORITY_MODE}", fg="green")
         if drift == "match":
             click.secho("  ✓ stored vectors match the live embedding config", fg="green")
         elif drift == "unset":
@@ -1578,6 +1587,11 @@ def resolve(name: str, gateway: str, graphql: str, out: str, quiet: bool):
     click.echo(f"    expected: {r.expected_sha256 or '(none recorded on-chain)'}")
     click.echo(f"    actual:   {r.actual_sha256}")
     click.secho(f"    {r.status}", fg=("green" if ok else "red"), bold=True)
+    if ok and r.authority_mode and r.authority_mode != "signature-verified":
+        click.secho(f"    ⚠ authority is {r.authority_mode} — the operator address was computed",
+                    fg="yellow")
+        click.secho("      locally (a gateway cannot fake it), but the signature was not checked.",
+                    fg="yellow")
     click.echo(f"    gateway:  {r.gateway}")
     if not out:
         click.echo()

@@ -37,6 +37,20 @@ GATEWAY = "https://arweave.net"
 # server hands you" is exactly the dependency this scheme exists to remove.
 OPERATOR_ADDRESS = "BPLL7nZOmxMIveXkbt59Yotve0IDM-UCCunPFe2imUc"
 
+# How strongly an authority record can currently be established.
+#
+#   address-derived     the operator's address is COMPUTED locally from the public
+#                       key the gateway returns, so a gateway cannot fake it. Does
+#                       NOT prove the operator signed the transaction.
+#   signature-verified  RSA-PSS over the transaction deep-hash. Proves it.
+#
+# Decision (2026-08-09): signature verification ships as an
+# OPTIONAL EXTRA, `lbrain[verify]`, rather than vendored — roll-your-own crypto is
+# risk wearing a convenience costume, and the small default footprint is a real
+# selling point. The label is what keeps us truthful in the meantime: an install
+# without it says so, rather than reporting the stronger property.
+AUTHORITY_MODE = "address-derived"
+
 # scheme://collection/id  — e.g. gcx://rfc/793, aet://works/0020
 _NAME = re.compile(r"^(?P<scheme>gcx|aet)://(?P<path>[A-Za-z0-9._~/-]+)$")
 
@@ -59,6 +73,10 @@ class Resolved:
     # A-506: txid of the operator-signed pointer record that selected this transaction,
     # or None when resolution was by uniqueness (the legacy path).
     authority_txid: str | None = None
+
+    # How the AUTHORITY behind this name was established, when one was used.
+    # "" when no authority record applied (legacy path).
+    authority_mode: str = ""
 
     @property
     def content(self) -> bytes:
@@ -95,7 +113,17 @@ class Resolved:
             # RFC 793 has Canonical-SHA256, RFC 2616 does not). Absence is
             # reported as absence — never as a pass.
             return "UNVERIFIABLE (no hash recorded on-chain)"
-        return "VERIFIED" if self.verified else "HASH MISMATCH"
+        if not self.verified:
+            return "HASH MISMATCH"
+        # The hash verified. Say HOW the name was bound to this transaction, because
+        # those are different strengths and collapsing them is the whole class of bug
+        # this codebase keeps finding. `address-derived` means the operator's address
+        # was computed locally from the public key the gateway returned — a gateway
+        # cannot fake the address. It has NOT been proved the operator signed this
+        # transaction; that needs RSA-PSS over the tx deep-hash (`signature-verified`).
+        if self.authority_mode:
+            return f"VERIFIED ({self.authority_mode})"
+        return "VERIFIED"
 
 
 def parse(name: str) -> tuple[str, str]:
@@ -327,4 +355,8 @@ def resolve(
     return Resolved(
         name=name, txid=txid, expected_sha256=expected, actual_sha256=actual,
         raw_content=content, tags=tags, gateway=gateway, authority_txid=authority,
+        # An authority record was used → say how strongly it was established.
+        # ADDRESS_DERIVED today; SIGNATURE_VERIFIED when `lbrain[verify]` lands and
+        # the RSA-PSS check over the tx deep-hash runs.
+        authority_mode=(AUTHORITY_MODE if authority else ""),
     )

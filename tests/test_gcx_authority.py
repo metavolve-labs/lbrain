@@ -235,3 +235,34 @@ def test_derivation_matches_the_arweave_rule():
     assert gcx._address_from_owner_key(key) == \
         _b.urlsafe_b64encode(_h.sha256(raw).digest()).decode().rstrip("=")
     assert gcx._address_from_owner_key("!!!not-base64!!!") is None or True
+
+
+# --- the status must name HOW the authority was established ----------------------
+
+def test_status_distinguishes_address_derived_from_signature_verified(monkeypatch):
+    """Collapsing these is the whole class of bug this codebase keeps finding.
+    `address-derived` means a gateway cannot fake the operator's address; it is NOT
+    proof the operator signed the transaction."""
+    monkeypatch.setattr(gcx, "OPERATOR_ADDRESS", OP)
+    gw = _Gateway(
+        authority_nodes=[_node("AUTH", {"GCX-Target": "TXB"}, owner=OP, height=100)],
+        name_nodes=[_node("TXA", {"Canonical-SHA256": SHA})],
+        byid_nodes=[_node("TXB", {"Canonical-SHA256": SHA})],
+    )
+    monkeypatch.setattr(gcx, "_post_json", gw)
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: PAYLOAD)
+    r = gcx.resolve("gcx://rfc/793")
+    assert r.verified
+    assert r.authority_mode == "address-derived"
+    assert "address-derived" in r.status, r.status
+
+
+def test_a_legacy_resolution_claims_no_authority_mode(monkeypatch):
+    """No authority record used ⇒ no authority claim to make."""
+    monkeypatch.setattr(gcx, "OPERATOR_ADDRESS", OP)
+    gw = _Gateway(authority_nodes=[], name_nodes=[_node("TXA", {"Canonical-SHA256": SHA})])
+    monkeypatch.setattr(gcx, "_post_json", gw)
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: PAYLOAD)
+    r = gcx.resolve("gcx://rfc/793")
+    assert r.authority_mode == ""
+    assert r.status == "VERIFIED"
