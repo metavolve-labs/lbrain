@@ -29,6 +29,13 @@ from dataclasses import dataclass
 GRAPHQL = "https://arweave.net/graphql"
 GATEWAY = "https://arweave.net"
 
+# The gcx:// operator wallet (A-506, operator-signed pointer records). This value is anchored in
+# the gcx:// URI-scheme specification itself — the one artifact a verifier must already read to
+# know what gcx:// means — and duplicated here so resolution can check it. Changing operators is
+# a specification revision plus an engine release, never a server-side swap: "trust the key our
+# server hands you" is exactly the dependency this scheme exists to remove.
+OPERATOR_ADDRESS = "BPLL7nZOmxMIveXkbt59Yotve0IDM-UCCunPFe2imUc"
+
 # scheme://collection/id  — e.g. gcx://rfc/793, aet://works/0020
 _NAME = re.compile(r"^(?P<scheme>gcx|aet)://(?P<path>[A-Za-z0-9._~/-]+)$")
 
@@ -48,6 +55,9 @@ class Resolved:
     raw_content: bytes            # NEVER hand this to a caller — see `content`
     tags: dict
     gateway: str
+    # A-506: txid of the operator-signed pointer record that selected this transaction,
+    # or None when resolution was by uniqueness (the legacy path).
+    authority_txid: str | None = None
 
     @property
     def content(self) -> bytes:
@@ -109,12 +119,87 @@ def _post_json(url: str, payload: dict, timeout: float) -> dict:
         return json.loads(r.read().decode("utf-8"))
 
 
-def lookup(name: str, *, graphql: str = GRAPHQL, timeout: float = 30.0) -> tuple[str, dict]:
-    """(txid, tags) for a gcx:// name, by on-chain tag query.
+def _tagmap(n):
+    return {t["name"]: t["value"] for t in n.get("tags", [])}
 
-    Raises if the name is unknown, or if more than one transaction claims it —
-    an ambiguous name must never resolve silently to whichever came back first.
+
+def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, str] | None:
+    """(authority record id, canonical target txid) per the operator-signed pointer
+    records for `name`, or None when no valid record exists.
+
+    A-506: anyone can mint a `GCX-Name` tag for any name, so uniqueness is deniable for one
+    transaction fee. An AUTHORITY record selects on a verifiable signer instead: only records
+    whose on-chain owner is the operator address pinned above (and in the spec) count.
+
+    Supersession is defined BEFORE ship, not after: among the operator's authority records,
+    latest-by-block-height wins. Unconfirmed records (no block yet) lose to any confirmed one;
+    more than one unconfirmed record with no confirmed anchor cannot be ordered and refuses.
+
+    On gateway failure this returns None — resolution then degrades to the legacy
+    refuse-on-ambiguity behaviour, which never resolves LESS safely than the pre-authority
+    engine did (a suppressed authority query can re-create yesterday's refusal, never a
+    wrong answer).
     """
+    query = (
+        "query($n:[String!],$o:[String!]){transactions(tags:[{name:\"GCX-Authority\","
+        "values:$n}],owners:$o,first:10){edges{node{id tags{name value} "
+        "owner{address} block{height}}}}}"
+    )
+    try:
+        data = _post_json(
+            graphql, {"query": query, "variables": {"n": [name], "o": [OPERATOR_ADDRESS]}}, timeout
+        )
+    except Exception:
+        return None
+    edges = (data.get("data") or {}).get("transactions", {}).get("edges") or []
+    records = []
+    for e in edges:
+        n = e.get("node") or {}
+        # Defense in depth: verify the returned owner, never rely on the filter alone.
+        if ((n.get("owner") or {}).get("address")) != OPERATOR_ADDRESS:
+            continue
+        target = _tagmap(n).get("GCX-Target")
+        if not target:
+            continue
+        height = (n.get("block") or {}).get("height")
+        records.append((height, n.get("id"), target))
+    if not records:
+        return None
+    confirmed = [r for r in records if r[0] is not None]
+    if confirmed:
+        chosen = max(confirmed, key=lambda r: r[0])
+    elif len(records) == 1:
+        chosen = records[0]
+    else:
+        raise ResolveError(
+            f"{name} has {len(records)} unconfirmed authority records — they cannot be "
+            "ordered until at least one is mined; refusing to guess"
+        )
+    return chosen[1], chosen[2]  # (authority record id, canonical target txid)
+
+
+def _lookup_by_id(txid: str, *, graphql: str, timeout: float) -> tuple[str, dict]:
+    query = (
+        "query($ids:[ID!]){transactions(ids:$ids,first:1){edges{node{id tags{name value}}}}}"
+    )
+    try:
+        data = _post_json(graphql, {"query": query, "variables": {"ids": [txid]}}, timeout)
+    except Exception as e:
+        raise ResolveError(f"gateway query failed ({graphql}): {e}") from e
+    edges = (data.get("data") or {}).get("transactions", {}).get("edges") or []
+    if not edges:
+        raise ResolveError(
+            f"authority record points at {txid}, which this gateway cannot find — "
+            "refusing to resolve past a dangling pointer"
+        )
+    node = edges[0]["node"]
+    return node["id"], _tagmap(node)
+
+
+def _lookup_full(
+    name: str, *, graphql: str = GRAPHQL, timeout: float = 30.0
+) -> tuple[str, dict, str | None]:
+    """(txid, tags, authority_txid_or_None) — see lookup() for the contract."""
     parse(name)  # validate before spending a round trip
     query = (
         "query($n:[String!]){transactions(tags:[{name:\"GCX-Name\",values:$n}],"
@@ -132,9 +217,6 @@ def lookup(name: str, *, graphql: str = GRAPHQL, timeout: float = 30.0) -> tuple
     if not nodes:
         raise ResolveError(f"{name} is not registered on this gateway")
 
-    def tagmap(n):
-        return {t["name"]: t["value"] for t in n.get("tags", [])}
-
     # One gcx:// name legitimately covers two transactions: the payload and a
     # JSON metadata sidecar. Select on SEMANTICS, not on a naming convention —
     # a first attempt filtered `Type` ending in "sidecar" and missed, because the
@@ -142,10 +224,26 @@ def lookup(name: str, *, graphql: str = GRAPHQL, timeout: float = 30.0) -> tuple
     # describing signals distinguish them, and neither depends on a string guess:
     #   * the sidecar points AT the payload via `Fulltext-Tx`
     #   * only the payload carries `Canonical-SHA256`
-    tagged = [(n, tagmap(n)) for n in nodes]
+    tagged = [(n, _tagmap(n)) for n in nodes]
     payloads = [(n, t) for n, t in tagged if "Fulltext-Tx" not in t]
     hashed = [(n, t) for n, t in payloads if t.get("Canonical-SHA256")]
     chosen = hashed or payloads or tagged
+
+    # A-506: an operator-signed pointer record, when one exists, selects the canonical
+    # transaction by VERIFIABLE SIGNER rather than by uniqueness. Additive and opt-in:
+    # with no authority record, behaviour below is byte-for-byte the legacy engine —
+    # including the refusal — so the 9,806 already-minted records need no backfill, and
+    # the record doubles as a REMEDY: a squatted name recovers the day an authority
+    # record is mined for it.
+    authority = _authority_target(name, graphql=graphql, timeout=timeout)
+    if authority:
+        auth_id, target = authority
+        pointed = [(n, t) for n, t in chosen if n["id"] == target]
+        if pointed:
+            node, tags = pointed[0]
+            return node["id"], tags, auth_id
+        node_id, tags = _lookup_by_id(target, graphql=graphql, timeout=timeout)
+        return node_id, tags, auth_id
 
     if len(chosen) > 1:
         ids = ", ".join(n["id"] for n, _ in chosen[:5])
@@ -154,7 +252,18 @@ def lookup(name: str, *, graphql: str = GRAPHQL, timeout: float = 30.0) -> tuple
             "guess which is canonical"
         )
     node, tags = chosen[0]
-    return node["id"], tags
+    return node["id"], tags, None
+
+
+def lookup(name: str, *, graphql: str = GRAPHQL, timeout: float = 30.0) -> tuple[str, dict]:
+    """(txid, tags) for a gcx:// name, by on-chain tag query.
+
+    Raises if the name is unknown, or if more than one transaction claims it and no
+    operator-signed authority record disambiguates — an ambiguous name must never
+    resolve silently to whichever came back first.
+    """
+    txid, tags, _authority = _lookup_full(name, graphql=graphql, timeout=timeout)
+    return txid, tags
 
 
 def fetch(txid: str, *, gateway: str = GATEWAY, timeout: float = 60.0) -> bytes:
@@ -180,11 +289,11 @@ def resolve(
     timeout: float = 60.0,
 ) -> Resolved:
     """Resolve a gcx://name, fetch it, and verify it against the chain."""
-    txid, tags = lookup(name, graphql=graphql, timeout=min(timeout, 30.0))
+    txid, tags, authority = _lookup_full(name, graphql=graphql, timeout=min(timeout, 30.0))
     content = fetch(txid, gateway=gateway, timeout=timeout)
     expected = (tags.get("Canonical-SHA256") or "").strip().lower()
     actual = hashlib.sha256(content).hexdigest()
     return Resolved(
         name=name, txid=txid, expected_sha256=expected, actual_sha256=actual,
-        raw_content=content, tags=tags, gateway=gateway,
+        raw_content=content, tags=tags, gateway=gateway, authority_txid=authority,
     )
