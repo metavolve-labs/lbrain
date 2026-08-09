@@ -1478,12 +1478,35 @@ def register(name, address, issuer, credentials, trust_score, force):
 
     from .identity import Identity, IDENTITY_PATH
 
-    label = name.strip().lower()
-    if label.startswith("gcx://"):
-        label = label[len("gcx://"):]
+    # A gcx:// name is a PATH, not a flat label (#16). The C-suite template is
+    # `gcx://metavolvelabs/csuite/<role>/<chosen-name>`, which the old single-segment
+    # rule rejected outright — the naming scheme could not bind its own identities.
+    #
+    # Case is PRESERVED. The old rule lowercased the whole name, but the scheme is
+    # case-insensitive only in its SCHEME part: `gcx.parse()` "case-normalizes the
+    # scheme only" and the spec's path grammar is case-sensitive. Lowercasing meant
+    # registering `…/Touchstone` silently stored a DIFFERENT identifier, which would
+    # not match a chain record minted with capitals. Silent corruption at exactly the
+    # moment an identity is bound.
+    #
+    # Charset follows the spec (`unreserved` per RFC 3986 §2.3) so this and the
+    # resolver accept the same names rather than two rules that drift.
+    label = name.strip()
+    if label[:6].lower() == "gcx://":
+        label = label[6:]
     label = label.strip("/")
-    if not re.fullmatch(r"[a-z0-9-]{1,63}", label) or label.startswith("-") or label.endswith("-"):
-        raise click.ClickException("Invalid gcx name — 1-63 chars, a-z / 0-9 / hyphen, no leading/trailing hyphen.")
+    segments = label.split("/") if label else []
+    _SEG = re.compile(r"[A-Za-z0-9._~-]{1,63}")
+    if not segments or any(
+        not _SEG.fullmatch(seg) or seg.startswith("-") or seg.endswith("-")
+        for seg in segments
+    ):
+        raise click.ClickException(
+            "Invalid gcx name. Each path segment: 1-63 chars from A-Z a-z 0-9 . _ ~ -, "
+            "no leading/trailing hyphen. Example: "
+            "gcx://metavolvelabs/csuite/cso/touchstone"
+        )
+    label = "/".join(segments)
 
     existing = Identity.load()
     if existing and not force:
