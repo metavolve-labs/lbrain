@@ -20,7 +20,7 @@ N copies, N drifts, N secret-gate passes, and claim dates reaged on every copy.
 
 **It has already failed once, observably.** On 2026-08-06 the CTO applied three corpus fixes
 (S-019, S-025) to the pipeline **source** and asked the CSO to re-sync and close them. The CSO
-could not: `sync-corpus.sh` roots at `/mnt/c/Users/…/golden_codex_pipeline/lairs`, which does not
+could not: `sync-corpus.sh` roots at an absolute path on the pipeline host, which does not
 exist on the CSO's machine. The evidence copies remained byte-identical to their old seals. **A
 correction was made at the source and was invisible to the only reviewer who was asked to confirm
 it.** That is the copy model's failure mode, not an operator error.
@@ -121,7 +121,7 @@ against each other during transition, which is a free correctness check nobody h
 1. **Per-agent DB, or one DB with an agent column?** This design assumes per-agent (isolation is the
    filesystem's job). One DB is cheaper and reintroduces exactly the per-query filter Option B was
    rejected for.
-2. **Does the MANIFEST pin a corpus version?** Tad answered *pinned* for `wear`. If views pin too,
+2. **Does the MANIFEST pin a corpus version?** The owner answered *pinned* for `wear`. If views pin too,
    pinning belongs in the MANIFEST and reproducibility follows for free.
 3. **Glob dialect** — full globs, or literal paths plus directory prefixes? Narrower is easier to
    audit, and the MANIFEST's value is that a human can read it.
