@@ -549,6 +549,7 @@ def render_response(
             getattr(cfg, "core_memory_path", ""), getattr(cfg, "core_memory_chars", 900),
             envelope=getattr(hits, "envelope", None),
             withheld=getattr(hits, "withheld", None),
+            serve=getattr(cfg, "core_memory_serve", "always"),
         )
 
     # Blinding notice FIRST — ahead of the untrusted fence, the core block and

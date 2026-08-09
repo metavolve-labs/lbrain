@@ -184,6 +184,10 @@ class Config:
     # --- core memory (Letta-style always-on context) ---
     core_memory_path: str = ""  # markdown file injected ahead of every query (empty = off)
     core_memory_chars: int = 900  # budget for the always-on core block
+    # "always" (default) re-serves the full block on every call; "session" serves it once
+    # per process, then a one-line marker (full re-serve on file edit + periodic refresh).
+    # Default stays "always" until the session mode has its own answer-presence A/B.
+    core_memory_serve: str = "always"
     # --- supersession-aware retrieval (Zep-inspired) — bury superseded, surface live truth ---
     supersede_aware: bool = True  # de-rank docs another doc explicitly supersedes
     supersede_penalty: float = 0.25  # multiplicative score penalty for a superseded doc
@@ -318,6 +322,7 @@ class Config:
             amp_provenance=raw.get("amp_provenance", cls.amp_provenance),
             core_memory_path=raw.get("core_memory_path", cls.core_memory_path),
             core_memory_chars=raw.get("core_memory_chars", cls.core_memory_chars),
+            core_memory_serve=raw.get("core_memory_serve", cls.core_memory_serve),
             supersede_aware=raw.get("supersede_aware", cls.supersede_aware),
             supersede_penalty=raw.get("supersede_penalty", cls.supersede_penalty),
             abstraction_topk_cap=raw.get("abstraction_topk_cap", cls.abstraction_topk_cap),
@@ -365,6 +370,7 @@ class Config:
             f"amp_provenance = {str(self.amp_provenance).lower()}",
             f"core_memory_path = {q(self.core_memory_path)}",
             f"core_memory_chars = {self.core_memory_chars}",
+            f"core_memory_serve = {q(self.core_memory_serve)}",
             f"supersede_aware = {str(self.supersede_aware).lower()}",
             f"supersede_penalty = {self.supersede_penalty}",
             # NOTE: write() must emit every field load() reads — the 2026-07-24
