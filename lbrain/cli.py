@@ -1446,29 +1446,42 @@ def resolve(name: str, gateway: str, graphql: str, out: str, quiet: bool):
         click.secho(f"✗ {e}", fg="red")
         raise SystemExit(1)
 
+    # Check BEFORE emitting. Writing bytes and reporting the failure afterwards
+    # is not a refusal — a shell redirect has already captured them (G2).
+    if (out or quiet) and not r.verified:
+        click.secho(f"✗ {r.name}: {r.status} — refusing to emit unverified bytes", fg="red", err=True)
+        raise SystemExit(1)
+
     if out:
         Path(out).write_bytes(r.content)
 
     if quiet:
         click.echo(r.content.decode("utf-8", errors="replace"), nl=False)
-        raise SystemExit(0 if r.verified else 1)
+        raise SystemExit(0)
 
     ok = r.verified
     click.secho(f"  {r.name}", fg="cyan", bold=True)
     click.echo(f"    txid:     {r.txid}")
     if r.tags.get("Title"):
         click.echo(f"    title:    {r.tags['Title']}")
-    click.echo(f"    bytes:    {len(r.content):,}")
+    click.echo(f"    bytes:    {len(r.raw_content):,}")
     click.echo(f"    expected: {r.expected_sha256 or '(none recorded on-chain)'}")
     click.echo(f"    actual:   {r.actual_sha256}")
     click.secho(f"    {r.status}", fg=("green" if ok else "red"), bold=True)
     click.echo(f"    gateway:  {r.gateway}")
     if not out:
-        head = r.content.decode("utf-8", errors="replace").strip().splitlines()[:4]
         click.echo()
-        for ln in head:
-            click.echo(f"    │ {ln[:96]}")
-        click.echo(f"    │ … ({len(r.content):,} bytes — use --out FILE or --quiet)")
+        if ok:
+            head = r.content.decode("utf-8", errors="replace").strip().splitlines()[:4]
+            for ln in head:
+                click.echo(f"    │ {ln[:96]}")
+            click.echo(f"    │ … ({len(r.raw_content):,} bytes — use --out FILE or --quiet)")
+        else:
+            # No preview of bytes that failed verification. A four-line excerpt is
+            # still content, and a reader who has just been told HASH MISMATCH will
+            # read it anyway. Report the size; withhold the substance.
+            click.secho(f"    │ (preview withheld — {len(r.raw_content):,} bytes did not verify)",
+                        fg="yellow")
     raise SystemExit(0 if ok else 1)
 
 

@@ -45,9 +45,32 @@ class Resolved:
     txid: str
     expected_sha256: str          # from the ON-CHAIN tag, never from us
     actual_sha256: str
-    content: bytes
+    raw_content: bytes            # NEVER hand this to a caller — see `content`
     tags: dict
     gateway: str
+
+    @property
+    def content(self) -> bytes:
+        """The payload — ONLY when it verified. Raises otherwise.
+
+        G2 (2026-08-09). `resolve()` used to return bytes in every state and left
+        refusal to whoever happened to be calling. Exactly one caller enforced it
+        (the MCP resource); the CLI wrote `--out` and printed `--quiet` BEFORE
+        checking, so `lbrain resolve … --quiet > file` captured unverified bytes
+        and reported the failure afterwards — by which point the shell had the
+        content. The exit code was correct and useless.
+
+        "Refuse rather than degrade" has to be a property of the resolver, not a
+        habit of its callers: a rule enforced at one call site is enforced
+        nowhere. Deliberate handling of unverified bytes uses `raw_content`,
+        which is greppable precisely because it should be rare.
+        """
+        if not self.verified:
+            raise ResolveError(
+                f"refusing to return unverified content for {self.name}: {self.status}. "
+                f"Use .raw_content only if you intend to handle unverified bytes."
+            )
+        return self.raw_content
 
     @property
     def verified(self) -> bool:
@@ -163,5 +186,5 @@ def resolve(
     actual = hashlib.sha256(content).hexdigest()
     return Resolved(
         name=name, txid=txid, expected_sha256=expected, actual_sha256=actual,
-        content=content, tags=tags, gateway=gateway,
+        raw_content=content, tags=tags, gateway=gateway,
     )
