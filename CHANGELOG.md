@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased
+## 0.1.4 — 2026-08-09
+
+### Added — the dial-in: agent-led one-time setup (`lbrain setup`)
+
+Your agent interviews you (nine defaulted questions — sources, embeddings,
+recall-first hook, auto re-sync, memory placement, core memory, MCP, secret
+hygiene, history import) and performs only the additive steps, recording each
+in `~/.lbrain/setup-manifest.md` with its undo command. `lbrain setup
+templates` writes the hook scripts (recall-first is warn-by-default;
+`LBRAIN_FIRST_MODE=block` opts into gating). `lbrain setup status` lists what
+was installed and flags drift; `lbrain doctor` reports the same drift. The
+interview says plainly: a large imported corpus is served as-is — the engine
+dates and supersedes, it cannot know which old claims are still true. Vet
+high-consequence records; `lbrain stale` is the audit tool.
+
+### Added — operator-signed authority records for `gcx://` resolution (opt-in)
+
+A squatted or contested name can now be resolved by an operator-signed
+authority record: `GCX-Authority` tag query, signature-holder selection,
+supersession by greatest confirmed block height, refusal on ties, unconfirmed
+ordering, and dangling pointers. Additive by design — a name with no authority
+record resolves exactly as before. Covered by U.S. Provisional 64/128,651
+(filed 2026-08-09). Local verification against the specification-pinned
+operator key (design in `docs/DESIGN-gcx-authority-verification.md`) lands in
+a follow-up.
+
+### Changed — refusal moved into the resolver (G2)
+
+`Resolved.content` now raises unless the record verified; deliberate handling
+of unverified bytes must name `raw_content`. The CLI refuses to write or pipe
+unverified bytes and withholds previews of content that failed verification.
+
+### Added — session-scoped core-memory serving (opt-in, default off)
+
+Config-gated; with the gate off, serving is byte-for-byte identical to 0.1.3.
 
 ### Fixed — a chunk carried the heading it STARTED on, not the ones it lived under
 
