@@ -1428,10 +1428,18 @@ def whoami(as_json: bool):
     if ident["registered"]:
         click.secho(f"  {ident['gcx']}", fg="green", bold=True)
         click.echo(f"  address:      {ident['address']}")
+        selfsaid = ident.get("verification") != "chain-verified"
+        mark = "  (self-asserted, unchecked)" if selfsaid else ""
         creds = ", ".join(ident["credentials"]) or "none yet"
-        click.echo(f"  credentials:  {creds}")
+        click.echo(f"  credentials:  {creds}{mark if ident['credentials'] else ''}")
         if ident["trust_score"] is not None:
-            click.echo(f"  trust score:  {ident['trust_score']}")
+            click.echo(f"  trust score:  {ident['trust_score']}{mark}")
+        if ident.get("issuer"):
+            click.echo(f"  issuer:       {ident['issuer']}{mark}")
+        click.secho(f"  verification: {ident.get('verification', 'self-asserted')}",
+                    fg=("green" if not selfsaid else "yellow"))
+        if selfsaid and ident.get("note"):
+            click.secho(f"  {ident['note']}", fg="yellow")
     else:
         click.secho("  no ecosystem identity", fg="yellow")
         click.echo(f"  {ident['note']}")

@@ -36,6 +36,9 @@ class Identity:
     trust_score: float | None = None        # last known bureau score, if any
     registered_at: str = ""                 # ISO date
     issuer: str = ""                        # who attested (never ourselves, for authority)
+    # How much of the above was CHECKED. `register` writes plain CLI strings, so the
+    # default is the honest one. Only a code path that actually verifies may raise it.
+    verification: str = "self-asserted"     # self-asserted | chain-verified
 
     @property
     def gcx(self) -> str:
@@ -77,6 +80,26 @@ class Identity:
         os.replace(tmp, IDENTITY_PATH)
 
 
+def _identity_note(ident) -> str:
+    """The one line a consuming agent must read before trusting anything above."""
+    if ident is None:
+        return ("unregistered — local brain, fully functional; no ecosystem "
+                "identity claimed")
+    if (ident.verification or "self-asserted") != "chain-verified":
+        claimed = []
+        if ident.credentials:
+            claimed.append("credentials")
+        if ident.trust_score is not None:
+            claimed.append("a trust score")
+        if ident.issuer:
+            claimed.append(f"an issuer ({ident.issuer})")
+        extra = (" It claims " + ", ".join(claimed) + ", none of which were checked."
+                 if claimed else "")
+        return ("SELF-ASSERTED — this brain declared this identity locally; nothing "
+                "verified it against the chain." + extra)
+    return ""
+
+
 def describe(cfg, stats: dict | None = None) -> dict:
     """The structured answer to 'who am I and what am I trusted for?'.
 
@@ -91,12 +114,18 @@ def describe(cfg, stats: dict | None = None) -> dict:
             "address": ident.address if ident else "",
             "credentials": ident.credentials if ident else [],
             "trust_score": ident.trust_score if ident else None,
+            # issue #17. `whoami` exists to answer whether a brain "carries any
+            # credential beyond its own say-so" — and `register` takes credentials,
+            # trust_score and issuer as unvalidated CLI strings. Reporting them with
+            # no marker made this surface a trust-laundering primitive: any brain
+            # could claim any credential and `lair_whoami` would relay it to another
+            # agent as fact. Same rule as gcx.Resolved.status — absence of a check is
+            # reported as absence, never as a pass.
+            "verification": (ident.verification or "self-asserted") if ident else "",
+            "issuer": (ident.issuer or "") if ident else "",
             # An unregistered brain is fully functional. Say so, so an agent
             # reading this does not treat absence as breakage.
-            "note": (
-                "unregistered — local brain, fully functional; no ecosystem "
-                "identity claimed" if ident is None else ""
-            ),
+            "note": _identity_note(ident),
         },
         "brain": {
             "db": str(getattr(cfg, "db_path", "")),
