@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.5 — 2026-08-14
+
+### Fixed — agents no longer miss the onboarding ladder
+
+Field-verified on the first fully agent-led install (2026-08-14): `lbrain init`'s
+epilogue ended at `import && embed`, so an AI agent driving setup reasonably
+concluded it was finished — and the dial-in (`lbrain setup`, the step that wires
+the recall-first habit, MCP registration, and auto re-sync) plus the authoring
+tools (`lbrain framework`, `lbrain lair-from-repo`, `lbrain onboard`) stayed
+invisible unless a human happened to know to ask. A tool built for agents was
+gating its own onboarding behind human folklore.
+
+`init` and `embed` now end by printing the full ladder, addressed explicitly to
+an agent running the setup, until `~/.lbrain/setup-manifest.md` exists — then
+they go silent.
+
+
 ## 0.1.4 — 2026-08-09
 
 ### Added — the dial-in: agent-led one-time setup (`lbrain setup`)
