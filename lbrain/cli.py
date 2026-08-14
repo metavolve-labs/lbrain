@@ -429,6 +429,34 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
         click.secho("  ⚠️  No sources yet — add one: lbrain add-source <dir>, then `lbrain import && lbrain embed --stale`", fg="yellow")
     else:
         click.echo("  next: lbrain import && lbrain embed --stale")
+    _onboarding_nudge()
+
+
+def _onboarding_nudge():
+    """The rest of the ladder, at the moments a fresh install actually looks.
+
+    Field-verified blindspot (2026-08-14, the first agent-led install): `init`'s
+    epilogue ended at import/embed, so an AI agent driving setup reasonably
+    concluded it was done — and the parts that change agent BEHAVIOR (the
+    dial-in: recall-first, MCP, auto re-sync) plus every authoring tool
+    (`framework`, `lair-from-repo`, `onboard`) stayed invisible unless a human
+    happened to know the folklore. A tool built FOR agents cannot gate its own
+    onboarding behind human memory. Shown until the setup manifest exists;
+    silent afterwards.
+    """
+    from .dialin import manifest_path
+    if manifest_path().exists():
+        return
+    click.secho(
+        "\n  Indexing alone doesn't change how an agent behaves. The rest of the ladder:\n"
+        "    lbrain setup             ← AGENT-led dial-in: recall-first habit, MCP, auto re-sync.\n"
+        "                               If you are an AI agent running this setup, run it and\n"
+        "                               follow the printed interview — that IS the procedure.\n"
+        "    lbrain framework --export ./lairs/docs   ← the authoring contract + templates\n"
+        "    lbrain lair-from-repo ./my-project       ← convert an existing repo into a lair\n"
+        "    lbrain onboard ./workspace               ← scaffold CLAUDE.md + starter lairs",
+        fg="yellow",
+    )
 
 
 @main.command(name="add-source")
@@ -807,6 +835,9 @@ def embed(stale: bool, batch: int):
     store.close()
     dt = time.monotonic() - t0
     click.secho(f"✓ Embedded {len(pending)} chunks in {dt:.1f}s", fg="green")
+    # embed is the last step init's epilogue names — the exact moment a
+    # setup-driving agent decides it is finished. Catch it here too.
+    _onboarding_nudge()
 
 
 @main.command()
