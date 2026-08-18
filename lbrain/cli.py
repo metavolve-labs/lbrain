@@ -14,6 +14,7 @@ from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import make_embedder, UnknownProviderError
 from .index import chunk as chunk_doc
 from .index import CHUNKER_VERSION, chunker_fingerprint, discover, parse
+from . import index_currency
 from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
@@ -83,6 +84,82 @@ def _chunker_drift(live: str | None, stored: str | None) -> str | None:
     if stored is None:
         return "unset"
     return "match" if stored == live else f"{stored} != {live}"
+
+
+# How each divergence class is explained at the point of reading. `doctor` is
+# where an operator goes to learn what their brain's state MEANS, and a bare
+# count teaches nothing — the same reasoning that put the direction annotations
+# on the A-427 threshold knobs.
+_CURRENCY_HELP = {
+    index_currency.CHANGED:
+        "body edited since import — chunks and vectors are stale",
+    index_currency.METADATA:
+        "frontmatter edited since import — type/name/verify_by are stale",
+    index_currency.UNINDEXED:
+        "on disk, never indexed — invisible to every query",
+    index_currency.ORPHANED:
+        "source gone, still indexed — served from a file that no longer exists",
+}
+
+
+def _echo_currency(c) -> None:
+    """Report the index-vs-source survey (issue #34).
+
+    Ordered worst-first, and every abnormal condition gets a line — including
+    the ones that mean "I could not look". A survey that skipped a source root
+    and printed the all-clear anyway would be the exact defect this check was
+    written to remove, reproduced one layer up.
+    """
+    if c is None:
+        return
+    if not c.ran:
+        click.secho("  · no sources configured — index currency NOT checked", fg="yellow")
+        return
+
+    for root in c.roots_missing:
+        click.secho(f"  ⚠ source root MISSING: {root}", fg="yellow")
+        click.secho("    Not mounted? Nothing under it was surveyed, and nothing "
+                    "under it will be pruned.", fg="yellow")
+    if c.unchecked:
+        click.secho(f"  ⚠ {c.unchecked} indexed doc(s) NOT CHECKED — they live under "
+                    f"a missing source root", fg="yellow")
+
+    if c.is_current:
+        click.secho(f"  ✓ index is current with its sources "
+                    f"({c.on_disk} file(s), {c.elapsed:.1f}s)", fg="green")
+    elif c.divergent:
+        click.secho(f"  ✗ INDEX NOT CURRENT — {c.divergent} record(s) diverge from "
+                    f"their sources:", fg="red")
+        for state, n in c.counts().items():
+            if not n:
+                continue
+            click.secho(f"      {state:<10} {n:>5}  {_CURRENCY_HELP[state]}", fg="red")
+        for state, paths in ((index_currency.CHANGED, c.changed),
+                             (index_currency.ORPHANED, c.orphaned),
+                             (index_currency.UNINDEXED, c.unindexed),
+                             (index_currency.METADATA, c.metadata)):
+            for rel in paths[:3]:
+                click.echo(f"      · {state} {rel}")
+            if len(paths) > 3:
+                click.echo(f"      · … and {len(paths) - 3} more {state}")
+        click.secho("    Run `lbrain import` to reconcile.", fg="red")
+    else:
+        # Nothing diverged, but something above stopped us seeing the whole
+        # corpus. Saying "current" here is precisely the false green light.
+        click.secho("  · index currency INCOMPLETE — no divergence found in what "
+                    "was surveyed, but the survey was not complete", fg="yellow")
+
+    if c.unreachable:
+        click.secho(f"  ⚠ {len(c.unreachable)} indexed doc(s) are UNREACHABLE from any "
+                    f"configured source:", fg="yellow")
+        for rel in c.unreachable[:3]:
+            click.echo(f"      · {rel}")
+        if len(c.unreachable) > 3:
+            click.echo(f"      · … and {len(c.unreachable) - 3} more")
+        click.secho("    They are served but no `import` will refresh them and no "
+                    "`--prune` will remove them.", fg="yellow")
+    for u in c.unreadable[:3]:
+        click.secho(f"  ⚠ unreadable source: {u}", fg="yellow")
 
 
 @main.command()
@@ -159,11 +236,17 @@ def doctor(as_json: bool):
             # means it predates the guard, i.e. v1 by definition. Reading absence
             # as "current" is what made this blind spot invisible.
             chunker_stored = "1 (unversioned)"
+        # --- index vs the SOURCES it was built from (issue #34) ---
+        # Every check above compares the index to the CONFIG. None of them can
+        # see a corpus that changed on disk, which is the question a user is
+        # actually asking when they run `doctor` before trusting an answer.
+        currency = index_currency.survey(store, cfg.sources)
         store.close()
     except Exception as e:
         drift = f"unreadable: {e}"
         stored = {}
         chunker_live = chunker_stored = None
+        currency = None
 
     # --- dial-in manifest drift (recorded setup artifacts that vanished) ---
     try:
@@ -181,6 +264,7 @@ def doctor(as_json: bool):
             "chunker_live": chunker_live, "chunker_stored": chunker_stored,
             "chunker_drift": _chunker_drift(chunker_live, chunker_stored),
             "setup_drift": setup_drift,
+            "index_currency": currency.as_dict() if currency else None,
         }, indent=2, default=str))
     else:
         click.secho(f"config:  {CONFIG_PATH}"
@@ -242,6 +326,7 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        _echo_currency(currency)
         if setup_drift:
             click.echo()
             for w in setup_drift:
@@ -252,6 +337,13 @@ def doctor(as_json: bool):
     # are stale, not wrong — and `import` already repairs it. Widening the exit
     # code would silently start failing every script that gates on `doctor`, to
     # report something the next import fixes on its own.
+    #
+    # Index-vs-source currency (issue #34) is the same weaker claim and gets the
+    # same treatment, for the same reason: `import` repairs it, and a corpus that
+    # is edited between imports is the NORMAL state of a working brain, not a
+    # fault. Turning routine work into a red build is how a gate gets disabled.
+    # A script that genuinely needs to gate on currency reads `is_current` from
+    # `doctor --json`, which is exact and does not overload an existing contract.
     if isinstance(drift, str) and drift not in ("match", "unset"):
         raise SystemExit(1)
 
