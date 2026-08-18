@@ -27,6 +27,7 @@ import re
 import unicodedata
 
 from . import amp
+from . import grading as _grading
 from .admissibility import _terms, judge, qtype
 from .search import Hit, _is_abstraction
 
@@ -131,14 +132,25 @@ def record_date(h: Hit) -> tuple[str, str]:
     # Honest limitation, NARROWED but not closed by A-513: h.text is a CHUNK.
     # Ancestry now rides along, so a date asserted in an ancestor HEADING
     # ("## Status as of 2026-07-25") reaches a deep chunk that could never see
-    # it before. `**Last Updated**` and frontmatter `date:` still live in the
-    # document's header block, which is not a heading and is still visible only
-    # to the leading chunk — deeper chunks keep falling through to the
-    # filename/mtime tiers. Carrying the header block per-doc is a separate fix.
+    # it before. `**Last Updated**` still lives in the document's header block,
+    # which is not a heading, so deeper chunks keep falling through for it.
+    #
+    # Frontmatter `date:` no longer falls through at all, and WHY it used to is
+    # worth keeping: it was never visible to ANY chunk, leading or deep.
+    # `index.parse()` strips the YAML block out of `body`, chunks are cut from
+    # that body, and `_FM_DATE` is anchored to the start of a frontmatter block —
+    # so the most PORTABLE claim-date tier, the one added so a copied corpus does
+    # not reage to its copy day, reached no reader on this path. It went unnoticed
+    # because the two callers that pass RAW file text (`lbrain stale`, and the
+    # tier's own unit tests) resolved it correctly the whole time. A tier can be
+    # covered by tests and satisfied by two of three callers and still be dead on
+    # the path the user sees. The value is now resolved at parse time and carried
+    # on the doc, so the ladder gets it without needing text it cannot have.
     from .staleness import claim_date
 
     scan = f"{h.heading_path}\n{h.text}" if h.heading_path else h.text
-    return claim_date(scan, h.rel_path, _iso(h.mtime) if h.mtime else "")
+    return claim_date(scan, h.rel_path, _iso(h.mtime) if h.mtime else "",
+                      fm_date=getattr(h, "doc_date", "") or "")
 
 
 # --- query-aware excerpting ---------------------------------------------------
@@ -422,6 +434,22 @@ def blinding_notice(hits) -> str:
     return w.notice(getattr(env, "mode", "?"))
 
 
+def _source_grade(h: Hit) -> str:
+    """The source axis for a hit. Today: always F.
+
+    Grading a source above F requires a VERIFIED binding from the record to an
+    authoring identity, and verified org membership rather than an asserted one.
+    Neither exists yet, so this returns `grading.SRC_UNJUDGEABLE` and says so
+    here rather than reading an `author:` field and believing it — an unverified
+    author string is an assertion, and promoting an assertion to B is precisely
+    the laundering the two-axis grade exists to prevent.
+
+    One function, so the day the binding lands there is one place to change and
+    no caller quietly kept its own answer.
+    """
+    return _grading.SRC_UNJUDGEABLE
+
+
 def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True) -> str:
     star = "★ " if h.is_priority else ""
     title = sanitize_field(h.title, 100)
@@ -439,6 +467,13 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
         parts.append(f"type={h.doc_type}")
     if date:
         parts.append(f"{label} {date}")
+    # Two-axis evidence grade (lbrain/grading.py), rendered word-then-pair:
+    # `observed (F1)`. The word is for the reader, the Admiralty pair is the
+    # thing the system reasons about. Shown ONLY when the record declared a
+    # class — printing F6 on every line of every corpus that predates grading
+    # is the `type=?` noise of A-403 wearing a new badge.
+    if _grading.is_graded(h.evidence):
+        parts.append(f"{h.evidence} ({_grading.pair(h.evidence, _source_grade(h))})")
     if staleness_on:
         mark = stale_marker(h)
         if mark:
