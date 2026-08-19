@@ -1,0 +1,4 @@
+# Import contracts downstream repos build on — one per line.
+# lbrain-teams (pyproject: lbrain>=0.1.5) imports:
+from lbrain import grading
+import lbrain.cli
