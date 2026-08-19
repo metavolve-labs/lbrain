@@ -50,8 +50,18 @@ EXECUTABLE_SUFFIXES = {
     ".bat", ".cmd", ".exe", ".dylib", ".so", ".command",
 }
 ALLOWED_SUFFIXES = {".md", ".toml"}
+# Suffix-less files that are unambiguously data. Without these, a module carrying
+# an ordinary `LICENSE` fails validation and `lbrain module add` dies on it.
+ALLOWED_NAMES = {"LICENSE", "LICENCE", "NOTICE", "COPYING", "AUTHORS"}
 
 _ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# The module NAME is the install directory: `install()` writes to dest/<name>/.
+# So it must be one ordinary path segment and nothing else. `../../../tmp/x`
+# escapes the destination and `/tmp/x` ignores it entirely, because
+# `Path('/dest') / '/abs' == Path('/abs')` — and `validate()`, which documents
+# itself as "every reason this module must not ship", checked every field except
+# the one used to build the write path.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 @dataclass
@@ -140,6 +150,12 @@ def validate(root: Path) -> list[str]:
     except ValueError as e:
         return [str(e)]
 
+    if not _SAFE_NAME.match(mod.name) or mod.name in {".", ".."}:
+        problems.append(
+            f"[module] name = {mod.name!r} is not a single safe path segment — the "
+            "name IS the install directory, so a traversal or an absolute path "
+            "writes outside the destination"
+        )
     if not _ISO.match(mod.authored):
         problems.append(f"[module] authored = {mod.authored!r} is not YYYY-MM-DD")
     if not mod.questions:
@@ -150,6 +166,13 @@ def validate(root: Path) -> list[str]:
 
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root)
+        # Dot paths are never the author's content and can never ship: `.git/`
+        # objects, the `.DS_Store` the Finder writes into any directory it
+        # browses, editor swap files. Walking into them made validation a
+        # function of what the directory had been *looked at* with — a
+        # git-tracked module failed on its own `.git/` contents.
+        if any(part.startswith(".") for part in rel.parts):
+            continue
         if p.is_symlink():
             problems.append(f"{rel}: symlink — a module is data, and a link leaves it")
             continue
@@ -158,17 +181,22 @@ def validate(root: Path) -> list[str]:
         if p.suffix.lower() in EXECUTABLE_SUFFIXES:
             problems.append(f"{rel}: executable content — a module is data, not code")
             continue
-        if p.suffix.lower() not in ALLOWED_SUFFIXES:
+        # A suffix-less file has `Path.suffix == ""`, which is in no allowlist, so
+        # `LICENSE` or `NOTICE` sitting beside a module blocked it entirely — a
+        # rejection on the grounds of "not on my list" rather than "must not
+        # ship". Named metadata files are data by definition; the allowlist keeps
+        # doing its real job on everything else, including a bare `Makefile`.
+        if p.suffix.lower() not in ALLOWED_SUFFIXES and p.name not in ALLOWED_NAMES:
             problems.append(f"{rel}: only {'/'.join(sorted(ALLOWED_SUFFIXES))} may ship")
             continue
         if p.stat().st_mode & 0o111:
             problems.append(f"{rel}: has the execute bit set")
         if p.suffix.lower() == ".md":
-            problems.extend(f"{rel}: {w}" for w in _check_record(p))
+            problems.extend(f"{rel}: {w}" for w in _check_record(p, root))
     return problems
 
 
-def _check_record(path: Path) -> list[str]:
+def _check_record(path: Path, root: Path | None = None) -> list[str]:
     """Grading and dating rules for one shipped record."""
     import frontmatter
 
@@ -179,7 +207,17 @@ def _check_record(path: Path) -> list[str]:
     except Exception as e:
         return [f"frontmatter does not parse ({e})"]
 
-    if path.name.lower() in {"readme.md"}:
+    # The README is prose ABOUT the module, not a record IN it — exempt, but only
+    # at the module ROOT. The exemption used to be filename-only and unscoped, so
+    # `questions/README.md` — which `install()` copies into the corpus like any
+    # other question — was exempt from both the `date:` rule and the format's
+    # centrepiece prohibition on `evidence: observed`. DESIGN-modules.md calls
+    # that rule "enforced mechanically because an advisory rule is one an exporter
+    # forgets"; a filename-only exemption made it opt-out by renaming a file, in
+    # the exact directory the installer ships from.
+    if root is not None and path.resolve() == (Path(root) / "README.md").resolve():
+        return out
+    if root is None and path.name.lower() == "readme.md":
         return out
 
     date = str(meta.get("date", "")).strip()
@@ -217,11 +255,39 @@ def install(mod: Module, dest: Path) -> list[Path]:
         raise ValueError(
             f"module {mod.name!r} does not validate:\n  - " + "\n  - ".join(problems)
         )
-    target = Path(dest) / mod.name
+    # Containment, independently of the name check in validate(). Two guards for
+    # one property is right here: the regex states what a name may look like, this
+    # states what must be true of the path regardless — and a write outside `dest`
+    # is not recoverable by noticing it afterwards.
+    dest_root = Path(dest).resolve()
+    target = (dest_root / mod.name).resolve()
+    if target != dest_root and dest_root not in target.parents:
+        raise ValueError(
+            f"module {mod.name!r} would install to {target}, outside {dest_root}"
+        )
+
+    plan = [(src, target / src.relative_to(mod.root))
+            for src in [*mod.questions,
+                        *(p for p in [mod.root / "README.md"] if p.is_file())]]
+
+    # Pre-scan for symlinked destinations BEFORE writing anything. The guard used
+    # to be `out.exists()`, which follows links: a DANGLING symlink is not
+    # `exists()`, so it passed the never-overwrite check and `write_text` created
+    # the file at the link's target — outside `dest`, while the CLI printed the
+    # in-dest path. A live symlink hit the opposite failure and was silently
+    # skipped as "already there". Wrong in both directions, and `validate()`
+    # rejects symlinks INSIDE a module for precisely this reason. Refusing rather
+    # than skipping: a symlink here is either an attack or a broken tree, and both
+    # deserve to be seen. Pre-scanning means this error never leaves a half-copy.
+    linked = [out for _, out in plan if out.is_symlink()]
+    if linked:
+        raise ValueError(
+            "refusing to write through a symlink at the destination:\n  - "
+            + "\n  - ".join(str(x) for x in linked)
+        )
+
     written: list[Path] = []
-    for src in [*mod.questions, *(p for p in [mod.root / "README.md"] if p.is_file())]:
-        rel = src.relative_to(mod.root)
-        out = target / rel
+    for src, out in plan:
         if out.exists():
             continue
         out.parent.mkdir(parents=True, exist_ok=True)

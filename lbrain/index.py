@@ -233,7 +233,20 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     # the frontmatter exists — `body` below has it stripped.
     from .staleness import normalize_claim_date as _norm_date
 
-    fm_claim_date = _norm_date(meta.get("date"))
+    # Nested `metadata: date:` first, then top level — the SAME precedence
+    # `parse_evidence` six lines above uses, and for the reason its docstring
+    # already gives: it matches "how `type:` and `disclosure:` are already
+    # written in this corpus." Reading only the top level meant a record written
+    # in the house nested form got its GRADE through and lost its DATE, so it
+    # still reaged to its import day — the headline fix missing the half of the
+    # corpus that follows the house convention. The in-text `_FM_DATE` regex
+    # cannot rescue it either: it is anchored to a column-0 `^date:`.
+    _nested = meta.get("metadata")
+    fm_claim_date = ""
+    if isinstance(_nested, dict) and _nested.get("date") is not None:
+        fm_claim_date = _norm_date(_nested.get("date"))
+    if not fm_claim_date:
+        fm_claim_date = _norm_date(meta.get("date"))
 
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
     # Split on BOTH separators: on Windows `rel` is "TOPIC\000-PRIORITY-Y\LAIR.md",

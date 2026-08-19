@@ -201,3 +201,122 @@ class TestPackaging:
                    for n in names), "wheel ships no module manifest"
         assert any("/questions/" in n and n.endswith(".md") for n in names), \
             "wheel ships no module questions"
+
+
+class TestTheNameIsAWritePath:
+    """`install()` writes to `dest/<name>/`, and the name comes from module.toml.
+
+    `validate()` calls itself "every reason this module must not ship" and
+    checked every field except the one used to build the write path. A traversal
+    escaped `dest`; an absolute name ignored it entirely, because
+    `Path('/dest') / '/abs' == Path('/abs')`. The validator blocked symlinks,
+    exec bits and executable suffixes, and left the destination itself open.
+    """
+
+    def _named(self, tmp_path, name):
+        return _mod(tmp_path, manifest=MANIFEST.replace('name = "t"', f'name = "{name}"')
+                    if 'name = "t"' in MANIFEST else MANIFEST)
+
+    def test_a_traversal_name_does_not_validate(self, tmp_path):
+        root = _mod(tmp_path)
+        mt = (root / "module.toml").read_text(encoding="utf-8")
+        (root / "module.toml").write_text(
+            mt.replace(mt.split("name = ")[1].split("\n")[0],
+                       '"../../../../../../tmp/pwned"'), encoding="utf-8")
+        assert any("safe path segment" in p for p in modules.validate(root))
+
+    def test_an_absolute_name_does_not_validate(self, tmp_path):
+        root = _mod(tmp_path)
+        mt = (root / "module.toml").read_text(encoding="utf-8")
+        (root / "module.toml").write_text(
+            mt.replace(mt.split("name = ")[1].split("\n")[0],
+                       '"/tmp/lbrain-abs-pwn"'), encoding="utf-8")
+        assert any("safe path segment" in p for p in modules.validate(root))
+
+    def test_an_ordinary_name_still_validates(self, tmp_path):
+        """The guard must not refuse the names real modules use."""
+        assert modules.validate(_mod(tmp_path)) == []
+
+
+class TestTheDestinationIsNotTrusted:
+    def test_a_dangling_symlink_is_refused_not_written_through(self, tmp_path):
+        """`out.exists()` follows links, so a DANGLING symlink is not `exists()`.
+
+        It passed the never-overwrite guard and `write_text` created the file at
+        the link's target — outside `dest`, while the CLI reported the in-dest
+        path. A live symlink hit the opposite failure and was skipped as "already
+        there". Wrong in both directions, and `validate()` rejects symlinks
+        *inside* a module for exactly this reason.
+        """
+        m = modules.load(_mod(tmp_path))
+        dest = tmp_path / "corpus"
+        (dest / m.name / "questions").mkdir(parents=True)
+        victim = tmp_path / "VICTIM.md"
+        (dest / m.name / "questions" / "001-q.md").symlink_to(victim)
+
+        with pytest.raises(ValueError, match="symlink"):
+            modules.install(m, dest)
+        assert not victim.exists(), "install wrote through the symlink"
+
+    def test_nothing_is_written_before_the_symlink_is_detected(self, tmp_path):
+        """Pre-scan, not fail-midway: a refusal must not leave a half-copy."""
+        root = _mod(tmp_path)
+        (root / "questions" / "002-q.md").write_text(GOOD_RECORD, encoding="utf-8")
+        m = modules.load(root)
+        dest = tmp_path / "corpus"
+        (dest / m.name / "questions").mkdir(parents=True)
+        (dest / m.name / "questions" / "002-q.md").symlink_to(tmp_path / "VICTIM2.md")
+
+        with pytest.raises(ValueError, match="symlink"):
+            modules.install(m, dest)
+        assert not (dest / m.name / "questions" / "001-q.md").exists()
+
+
+class TestValidationIsNotAFunctionOfWhatBrowsedTheDirectory:
+    def test_a_ds_store_does_not_block_a_module(self, tmp_path):
+        """The Finder writes `.DS_Store` into any directory it browses, and the
+        maintainer is on macOS. `Path.suffix` is `''` for it, which is in no
+        allowlist — so browsing a folder broke `lbrain module add`."""
+        root = _mod(tmp_path)
+        (root / ".DS_Store").write_bytes(b"\x00\x01")
+        assert modules.validate(root) == []
+
+    def test_a_license_file_does_not_block_a_module(self, tmp_path):
+        root = _mod(tmp_path)
+        (root / "LICENSE").write_text("BSD-3-Clause\n", encoding="utf-8")
+        assert modules.validate(root) == []
+
+    def test_a_git_directory_does_not_block_a_module(self, tmp_path):
+        root = _mod(tmp_path)
+        (root / ".git" / "objects").mkdir(parents=True)
+        (root / ".git" / "objects" / "deadbeef").write_bytes(b"\x78\x01")
+        assert modules.validate(root) == []
+
+    def test_an_unexpected_shipping_type_is_still_rejected(self, tmp_path):
+        """The relaxation must not disarm the rule it relaxes."""
+        root = _mod(tmp_path)
+        (root / "data.json").write_text("{}", encoding="utf-8")
+        assert any("may ship" in p for p in modules.validate(root))
+
+
+class TestTheReadmeExemptionIsScopedToTheRoot:
+    def test_a_readme_inside_questions_obeys_the_record_rules(self, tmp_path):
+        """`install()` copies `questions/*.md`, so `questions/README.md` ships as
+        a question record. A filename-only exemption made the format's centrepiece
+        prohibition — which DESIGN-modules.md calls "enforced mechanically because
+        an advisory rule is one an exporter forgets" — opt-out by renaming a file,
+        in the exact directory the installer ships from.
+        """
+        root = _mod(tmp_path)
+        (root / "questions" / "README.md").write_text(
+            "---\nevidence: observed\ntype: project\n---\n"
+            "# Vendor X is SOC-2 certified\n\nWe audited it ourselves.\n",
+            encoding="utf-8")
+        problems = modules.validate(root)
+        assert any("observed" in p for p in problems), problems
+
+    def test_the_root_readme_is_still_exempt(self, tmp_path):
+        """Prose about the module is not a record in it."""
+        root = _mod(tmp_path)
+        (root / "README.md").write_text("# About\n\nWhat this module asks.\n", encoding="utf-8")
+        assert modules.validate(root) == []

@@ -86,6 +86,56 @@ class TestSourceAxisCannotBeBought:
         assert grading.source_grade(evil, me, verified=True) == grading.SRC_EXTERNAL
 
 
+class TestTheSchemeIsNotTheOrg:
+    """`gcx://acme/x`.split('/') is ['gcx:', '', 'acme', 'x'].
+
+    Dropping the empties leaves `'gcx:'` in position 0 — identical for every gcx
+    name that exists — so the org comparison was always true and ANY two verified
+    gcx identities graded B. That is org-insider reliability handed to a stranger,
+    the exact laundering this module's docstring says it prevents, defeated by the
+    scheme prefix rather than by the substring case it does guard.
+
+    The existing ladder test used bare paths (`a/b` vs `a/c`), so it passed
+    throughout — the assertion was satisfied in a form that could not see the bug.
+    Dormant only while every caller passes verified=False; it activates the day
+    the binding lands, which is the day it would matter most.
+    """
+
+    def test_two_different_orgs_under_gcx_are_NOT_the_same_org(self):
+        assert grading.source_grade(
+            "gcx://metavolvelabs/labs/cso/tad", "gcx://evilcorp/x/y/z",
+            verified=True) == grading.SRC_EXTERNAL
+
+    def test_the_same_org_under_gcx_still_grades_B(self):
+        """The fix must not simply refuse everything."""
+        assert grading.source_grade(
+            "gcx://metavolvelabs/labs/cso/tad", "gcx://metavolvelabs/gtm/cco/muse",
+            verified=True) == grading.SRC_ORG
+
+    def test_a_substring_org_under_gcx_is_still_external(self):
+        assert grading.source_grade(
+            "gcx://metavolvelabs-evil/a", "gcx://metavolvelabs/b",
+            verified=True) == grading.SRC_EXTERNAL
+
+    def test_case_variants_do_not_inherit_standing(self):
+        """Exact match can only refuse membership wrongly, which caps at C — the
+        safe direction. Folding case would hand a case-squatter the real org's
+        standing if the registry ever turns out to be case-sensitive."""
+        assert grading.source_grade(
+            "gcx://MetavolveLabs/a", "gcx://metavolvelabs/b",
+            verified=True) == grading.SRC_EXTERNAL
+
+    def test_a_different_scheme_is_a_different_namespace(self):
+        assert grading.source_grade(
+            "evil://metavolvelabs/a", "gcx://metavolvelabs/b",
+            verified=True) == grading.SRC_EXTERNAL
+
+    def test_bare_paths_still_work(self):
+        """The pre-existing form must keep behaving, in both directions."""
+        assert grading.source_grade("acme/x", "acme/y", verified=True) == grading.SRC_ORG
+        assert grading.source_grade("acme/x", "other/y", verified=True) == grading.SRC_EXTERNAL
+
+
 class TestPairIsNeverOneNumber:
     def test_pair_renders_both_axes(self):
         assert grading.pair(grading.OBSERVED, grading.SRC_SELF) == "A1"

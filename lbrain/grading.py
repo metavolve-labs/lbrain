@@ -75,6 +75,27 @@ def credibility(evidence: str) -> str:
     return _CREDIBILITY.get(evidence, CRED_UNGRADED)
 
 
+def _identity_parts(name: str) -> tuple[str, str]:
+    """(scheme, org) for an identity, either of which may be ''.
+
+    Comparison is EXACT, deliberately including case. If the registry is
+    case-insensitive then no attacker can hold a case-variant of an org name, so
+    matching exactly costs nothing; if it is case-sensitive, then folding case
+    here would hand `MetavolveLabs` the standing of `metavolvelabs`. Exact match
+    can only ever refuse membership wrongly, which caps a record at C — the safe
+    direction. The other error grants org-insider reliability to a stranger.
+
+    The scheme is compared too: same org name under a different scheme is a
+    different namespace, and nothing here is entitled to assume they are one.
+    """
+    s = name.strip()
+    scheme = ""
+    if "://" in s:
+        scheme, s = s.split("://", 1)
+    segs = [x for x in s.split("/") if x]
+    return scheme, (segs[0] if segs else "")
+
+
 def source_grade(author: str, reader: str, *, verified: bool = False) -> str:
     """Author identity vs the reader's → Admiralty alpha. Derived, never authored.
 
@@ -96,9 +117,18 @@ def source_grade(author: str, reader: str, *, verified: bool = False) -> str:
     # gcx:// names are PATHS (org/division/role/name), so org membership is a
     # path-prefix test on segments — not a substring match, which would make
     # `metavolvelabs-evil` a member of `metavolvelabs`.
-    a = [s for s in author.split("/") if s]
-    r = [s for s in reader.split("/") if s]
-    if a and r and a[0] == r[0]:
+    #
+    # The SCHEME must come off first. `'gcx://acme/x'.split('/')` is
+    # `['gcx:', '', 'acme', 'x']`, and dropping the empties leaves `'gcx:'` in
+    # position 0 — which is identical for every gcx name in existence. Comparing
+    # position 0 therefore returned B for ANY two verified gcx identities,
+    # laundering every external author into org-insider reliability: the exact
+    # failure this function's docstring says it exists to prevent, defeated by
+    # the scheme prefix rather than by the substring case it guards against.
+    # Dormant only while every caller passes verified=False.
+    a_scheme, a_org = _identity_parts(author)
+    r_scheme, r_org = _identity_parts(reader)
+    if a_org and a_scheme == r_scheme and a_org == r_org:
         return SRC_ORG
     return SRC_EXTERNAL
 
