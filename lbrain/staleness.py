@@ -102,7 +102,26 @@ def is_excluded(rel_path: str) -> bool:
     return any(m in p for m in _ARCHIVE)
 
 
-def claim_date(text: str, rel_path: str, mtime_iso: str = "") -> tuple[str, str]:
+def normalize_claim_date(value) -> str:
+    """A frontmatter `date:` value as an ISO string, or '' if it is not one.
+
+    PyYAML parses an unquoted `date: 2026-06-01` into a `datetime.date`, and a
+    quoted one into a `str` — the same field arrives as two types depending on
+    how the author wrote it. Both are the same claim, so both normalise here
+    rather than at each call site.
+    """
+    import datetime as _dt
+
+    if isinstance(value, _dt.date):          # covers datetime, its subclass
+        return value.isoformat()[:10]
+    if isinstance(value, str):
+        v = value.strip().strip("'\"")[:10]
+        return v if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v) else ""
+    return ""
+
+
+def claim_date(text: str, rel_path: str, mtime_iso: str = "",
+               fm_date: str = "") -> tuple[str, str]:
     """(label, YYYY-MM-DD) — when the CLAIM was last stood behind, not when the
     file was touched.
 
@@ -122,6 +141,19 @@ def claim_date(text: str, rel_path: str, mtime_iso: str = "") -> tuple[str, str]
     reage the whole corpus to the ingestion date. Without it, a corpus copied
     between machines serves `file-dated <copy-day>` for every file whose date was
     only ever an mtime.
+
+    ``fm_date`` is that same tier, supplied by a caller that has ALREADY parsed
+    the frontmatter away. It exists because the in-text `_FM_DATE` regex is
+    anchored to the START of a frontmatter block, so it can only match raw file text — and the serve path
+    does not have raw file text. `index.parse()` sets `body = post.content`, the
+    document with its YAML block removed, and chunks are cut from that body. So
+    every served chunk fell through this tier to the filename or the mtime, and
+    the portable date reached no reader.
+
+    It stayed invisible because the two callers that DO pass raw text — `lbrain
+    stale` and this function's own unit tests — resolved it correctly. A tier can
+    be covered by tests and satisfied by two of three callers and still be dead
+    on the path the user actually sees.
     """
     m = _UPDATED_HDR.search(text)
     if m:
@@ -129,6 +161,8 @@ def claim_date(text: str, rel_path: str, mtime_iso: str = "") -> tuple[str, str]
     asof = _AS_OF.findall(text)
     if asof:
         return ("as-of", max(asof))          # newest, not first
+    if fm_date:                               # frontmatter, parsed away by the caller
+        return ("dated", fm_date)
     m = _FM_DATE.search(text)                 # portable: survives copy/clone/reage
     if m:
         return ("dated", m.group(1))
