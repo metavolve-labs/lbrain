@@ -26,6 +26,12 @@ class Hit:
     is_priority: bool = False
     mtime: float = 0.0
     heading_path: str = ""  # ancestor headings above this chunk (A-513)
+    # Evidence class from the doc (lbrain/grading.py). The credibility axis of
+    # the served grade; '' = UNGRADED and renders nothing.
+    evidence: str = ""
+    # Frontmatter `date:` from the doc. The serve path cannot re-derive this from
+    # chunk text — the frontmatter is stripped before chunking.
+    doc_date: str = ""
 
 
 # Temporal query signature — triggers the abstraction recency guardrail.
@@ -330,7 +336,7 @@ def search(
     vec_rows = store.db.execute(
         "SELECT v.rowid AS chunk_id, vec_distance_cosine(v.embedding, ?) AS dist, "
         "       c.rel_path, c.chunk_idx, c.text, c.heading_path, d.title, d.is_priority, d.doc_type, "
-        "       d.mtime "
+        "       d.mtime, d.evidence, d.claim_date "
         "FROM vec_chunks v "
         "JOIN chunks c ON c.chunk_id = v.rowid "
         "JOIN docs d ON d.rel_path = c.rel_path "
@@ -347,7 +353,7 @@ def search(
             kw_rows = store.db.execute(
                 "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
                 "       c.heading_path, "
-                "       d.title, d.is_priority, d.doc_type, d.mtime "
+                "       d.title, d.is_priority, d.doc_type, d.mtime, d.evidence, d.claim_date "
                 "FROM fts_chunks "
                 "JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
                 "JOIN docs d ON d.rel_path = c.rel_path "
@@ -383,6 +389,8 @@ def search(
                 is_priority=bool(r["is_priority"]),
                 mtime=r["mtime"],
                 heading_path=r["heading_path"],
+                evidence=r["evidence"],
+                doc_date=r["claim_date"],
             )
             hits[cid] = h
         return h
@@ -515,7 +523,7 @@ def keyword_only(
     rows = store.db.execute(
         "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
                 "       c.heading_path, "
-        "       d.title, d.is_priority, d.doc_type, d.mtime "
+        "       d.title, d.is_priority, d.doc_type, d.mtime, d.evidence, d.claim_date "
         "FROM fts_chunks "
         "JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
         "JOIN docs d ON d.rel_path = c.rel_path "
@@ -536,6 +544,8 @@ def keyword_only(
             is_priority=bool(r["is_priority"]),
             mtime=r["mtime"],
             heading_path=r["heading_path"],
+            evidence=r["evidence"],
+            doc_date=r["claim_date"],
         )
         for r in rows
     ]

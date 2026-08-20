@@ -1246,6 +1246,109 @@ def framework(name: str | None, export_dir: str | None):
     click.echo("  lbrain framework --export <DIR>  write them all out")
 
 
+@main.group(invoke_without_command=True)
+@click.pass_context
+def module(ctx):
+    """Role scaffolding for a corpus — questions, not answers.
+
+    \b
+    lbrain module list                  what is available
+    lbrain module show <name>           what it contains
+    lbrain module add <name> --dest D   write its questions into your corpus
+    lbrain module validate <path>       check one before shipping it
+
+    A module ships QUESTIONS. The records that matter are the ones you write
+    answering them — those are `evidence: observed`, and they outrank the
+    questions from the moment they exist. A module may not ship an `observed`
+    record: its author has witnessed nothing at your organisation.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(module_list)
+
+
+@module.command("list")
+def module_list():
+    """List available modules."""
+    from .modules import discover
+
+    mods = discover()
+    if not mods:
+        click.echo("no modules available")
+        return
+    click.secho("Modules", bold=True)
+    click.echo()
+    for m in mods:
+        click.secho(f"  {m.name:<22}", fg="cyan", nl=False)
+        click.echo(f"{m.description}")
+        click.echo(f"  {'':<22}v{m.version} · authored {m.authored} · "
+                   f"{len(m.questions)} question record(s)")
+    click.echo()
+    click.echo("  lbrain module show <name>")
+
+
+@module.command("show")
+@click.argument("name")
+def module_show(name: str):
+    """Show what a module contains."""
+    from .modules import get
+
+    try:
+        m = get(name)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    click.secho(f"{m.title}  ({m.name} v{m.version})", bold=True)
+    click.echo(f"  {m.description}")
+    click.echo(f"  authored {m.authored}")
+    if m.doc_types:
+        click.echo(f"  record types: {', '.join(m.doc_types)}")
+    if m.staleness_days:
+        click.echo(f"  default staleness: {m.staleness_days}d")
+    click.echo()
+    for q in m.questions:
+        click.echo(f"  questions/{q.name}")
+    click.echo()
+    click.echo(f"  lbrain module add {m.name} --dest ./lairs")
+
+
+@module.command("validate")
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+def module_validate(path: str):
+    """Check a module before shipping it. Exits non-zero if it must not ship."""
+    from .modules import validate
+
+    problems = validate(Path(path))
+    if not problems:
+        click.secho("✓ clean", fg="green")
+        return
+    for w in problems:
+        click.secho(f"  ✗ {w}", fg="red")
+    raise SystemExit(1)
+
+
+@module.command("add")
+@click.argument("name")
+@click.option("--dest", type=click.Path(file_okay=False), default="./lairs",
+              show_default=True, help="Where to write the module's records.")
+def module_add(name: str, dest: str):
+    """Write a module's question records into your corpus."""
+    from .modules import get, install
+
+    try:
+        m = get(name)
+        written = install(m, Path(dest).expanduser().resolve())
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    if not written:
+        click.secho(f"  {m.name} already present in {dest} — nothing overwritten",
+                    fg="yellow")
+    for w in written:
+        click.echo(f"  wrote {w}")
+    click.echo()
+    click.echo("Next:")
+    click.echo(f"  1. lbrain import {dest} && lbrain embed --stale")
+    click.echo("  2. work through the questions — your answers are the corpus")
+
+
 @main.command()
 @click.option(
     "--transport",
@@ -1419,12 +1522,9 @@ def consolidate(threshold: float, model: str, limit: int, dry_run: bool):
 # the archive/capture/recall/retrieve/shred/archive-status/archives commands
 # simply do not appear and the core CLI runs unchanged.
 # ---------------------------------------------------------------------------
-try:
-    from .archive.cli import register as _register_archive_commands
+from .plugins import load as _load_plugins
 
-    _register_archive_commands(main)
-except ImportError:
-    pass
+_load_plugins(main)
 
 
 @main.command()

@@ -56,6 +56,16 @@ class Doc:
     # value is normalised to '' rather than trusted: a class nobody defined
     # cannot be proven safe to disclose.
     disclosure: str = ""
+    # Frontmatter `date:`, normalised to ISO. The PORTABLE claim date — it rides
+    # inside the file, so it survives a copy/clone/mtime reset. Carried as a doc
+    # field because `parse()` strips the frontmatter out of `body`, so nothing
+    # downstream of chunking can recover it from text.
+    claim_date: str = ""
+    # Evidence class (lbrain/grading.py): observed | sourced | synthesized.
+    # '' = UNGRADED, which grades Admiralty 6 ("truth cannot be judged") and is
+    # never promoted to 3. The credibility axis of the two-axis grade; the
+    # source axis is DERIVED and never read from a file.
+    evidence: str = ""
 
     @property
     def name_slug(self) -> str:
@@ -213,6 +223,31 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         )
         disclosure = ""
 
+    # Evidence class. Same accept-or-warn shape as disclosure directly above,
+    # and for the same reason: an unrecognised grade must not reach the ranker.
+    from .grading import parse_evidence as _parse_evidence
+
+    evidence = _parse_evidence(meta, path)
+
+    # The frontmatter claim date, resolved HERE because this is the last place
+    # the frontmatter exists — `body` below has it stripped.
+    from .staleness import normalize_claim_date as _norm_date
+
+    # Nested `metadata: date:` first, then top level — the SAME precedence
+    # `parse_evidence` six lines above uses, and for the reason its docstring
+    # already gives: it matches "how `type:` and `disclosure:` are already
+    # written in this corpus." Reading only the top level meant a record written
+    # in the house nested form got its GRADE through and lost its DATE, so it
+    # still reaged to its import day — the headline fix missing the half of the
+    # corpus that follows the house convention. The in-text `_FM_DATE` regex
+    # cannot rescue it either: it is anchored to a column-0 `^date:`.
+    _nested = meta.get("metadata")
+    fm_claim_date = ""
+    if isinstance(_nested, dict) and _nested.get("date") is not None:
+        fm_claim_date = _norm_date(_nested.get("date"))
+    if not fm_claim_date:
+        fm_claim_date = _norm_date(meta.get("date"))
+
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
     # Split on BOTH separators: on Windows `rel` is "TOPIC\000-PRIORITY-Y\LAIR.md",
     # so rel.split("/") returned the whole string as one element and the
@@ -237,6 +272,8 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         doc_type=doc_type,
         metadata_ok=metadata_ok,
         disclosure=disclosure,
+        evidence=evidence,
+        claim_date=fm_claim_date,
     )
 
 

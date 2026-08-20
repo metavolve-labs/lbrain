@@ -1,5 +1,109 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — a frontmatter `date:` never reached the served header
+
+`index.parse()` sets `body = post.content` — the document with its YAML block
+removed — chunks are cut from that body, and `staleness._FM_DATE` is anchored to
+the start of a frontmatter block. So the most PORTABLE claim-date tier, the one
+added so a copied corpus does not reage to its copy day, was invisible to every
+chunk. Not only deep ones: every one, including the leading chunk.
+
+It survived because two of three callers pass RAW file text. `lbrain stale` reads
+files off disk and the tier's own four unit tests hand it a string with the
+frontmatter still attached — both resolved it correctly the whole time, while the
+path a user actually reads fell through to the filename or the mtime. A tier can
+be covered by tests and satisfied by two of three callers and still be dead where
+it counts.
+
+The claim date is now resolved at parse time — the last point at which the
+frontmatter still exists — carried on `Doc.claim_date`, a `docs.claim_date`
+column and `Hit.doc_date`, and passed into `claim_date()` as a new `fm_date`
+argument sitting at the documented `dated` tier. One implementation, unchanged
+precedence: `**Last Updated**` still outranks it, and it still outranks a
+filename date. `stale_marker()` is downstream of the same call, so affected
+records now report an age instead of `unverified (no claim date)`.
+
+Regression coverage goes through the store and the serve path on purpose — a unit
+test of `claim_date` cannot catch this class, because `claim_date` was never wrong.
+
+**A second gap, on the upgrade path.** `doc_metadata_differs()` compared only the
+frontmatter-derived columns that existed when it was written. A column added by
+migration starts empty on an existing brain, the body hash is unchanged, nothing
+notices the disagreement — so every unchanged file is skipped on every future
+import and the column stays empty forever. The fix would have reached only
+corpora imported after it shipped. Every derived column is now in that
+comparison, so an existing brain heals on the next plain `lbrain import`: a
+one-row UPDATE, no re-chunk, no re-embed. (A-401, one level down.)
+
+### Added — two-axis evidence grading (`lbrain/grading.py`)
+
+A record asserts, the citation makes the assertion look checked, nothing checked
+it. Dating solved the *when* half of that; this is the *how well known* half, in
+the same shape.
+
+Two axes, never one number, after the Admiralty System (NATO STANAG 2044 /
+AJP-2.1): **source reliability** (`A` own · `B` verified in-org · `C` verified
+external · `F` cannot be judged) and **information credibility** (`1` observed ·
+`2` sourced · `3` synthesized · `6` ungraded). Multiplying them into one score
+reintroduces the correlation the scheme exists to prevent — there is no
+arithmetic that makes `B1` and `A3` comparable.
+
+`evidence:` is read from frontmatter with the same accept-or-warn handling as
+`disclosure:`; an unrecognised value falls to UNGRADED rather than minting a
+grade the ranker cannot reason about. Ungraded is `6` ("truth cannot be judged"),
+never `3` — defaulting to `3` would assert something nobody said.
+
+The source axis is **derived, never authored**, and caps at `F` until a signature
+backs the binding: an unverified `author:` field is an assertion, and promoting an
+assertion to `B` is precisely the laundering the two axes exist to catch. The
+ladder ships inert so the dependency is visible in code, not only in a design doc.
+
+`judge()` is unchanged — relevance and credibility stay separate questions. With
+nothing graded anywhere, output is byte-identical plus one label.
+
+Succession property, for free: a predecessor's records were `A` to them and
+become `B` to a successor. Same bytes, same dates, different reader. The
+successor's own observations enter at `A1` and outrank them without anything
+being deleted.
+
+### Added — modules: role scaffolding as data (`lbrain module`)
+
+A frame, not a payload. A module ships QUESTIONS; the records that matter are the
+ones the user writes answering them. A declarative module asserts things about an
+organisation its author never saw, and this engine would serve those assertions
+dated, attributed and `binds`. A question asserts nothing, and answering it
+produces a record that is `observed` by the person who answered — so the
+scaffolding is outranked by the corpus it provoked, with no graduation mechanism
+to build.
+
+Two invariants, enforced mechanically because an advisory rule is one an exporter
+forgets: **a module cannot run** (no executable suffixes, execute bits or
+symlinks; `.md`/`.toml` only) and **a module may not ship a record graded
+`observed`**. Every record must carry `date:` and `evidence:` — a module is
+copied by definition, and a claim date living only in an mtime does not survive
+the copy.
+
+`lbrain module list|show|add|validate`. `add` never overwrites: the module exists
+to produce the user's records, so replacing one deletes exactly the thing it was
+for. Ships `role-continuity`.
+
+### Changed — plugin registration is an entry point, not a hardcoded import
+
+`cli.py` and `mcp_server.py` each imported the optional archive subpackage by
+name inside a `try/except ImportError` — a plugin system with one plugin name
+written into the host. Both now discover through standard entry-point groups
+(`lbrain.plugins`, `lbrain.mcp_plugins`), so an out-of-tree distribution can
+register commands and tools without this repository knowing it exists. The
+archive registers through the same group any third party would use: if the group
+breaks, archive commands vanish here rather than silently elsewhere.
+
+A missing optional dependency stays silent — that is the contract this replaced.
+Anything else warns and carries on: a user who cannot run `lbrain query` because
+someone else's package has a bug has lost the product in order to fix an
+extension.
+
 ## 0.1.5 — 2026-08-14
 
 ### Fixed — agents no longer miss the onboarding ladder
