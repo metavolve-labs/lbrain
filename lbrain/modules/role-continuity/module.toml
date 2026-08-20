@@ -1,0 +1,13 @@
+[module]
+name = "role-continuity"
+title = "Role continuity"
+version = "0.1.0"
+authored = "2026-08-17"
+description = "The questions that make a role resumable by someone who was not in the room."
+
+[corpus]
+doc_types = ["decision", "commitment", "state", "boundary"]
+lairs = ["000-PRIORITY-handover", "decisions", "commitments"]
+
+[staleness]
+default_days = 90

@@ -469,13 +469,12 @@ def lair_stats() -> str:
         store.close()
 
 
-# Optional Tier-2 archive tool — registered only when the archive extra is installed.
-try:
-    from .archive.mcp import register as _register_archive_tools
+# Optional and out-of-tree MCP tools. The Tier-2 archive registers through the
+# same entry-point group as any third-party plugin — see lbrain/plugins.py.
+from .plugins import GROUP_MCP as _GROUP_MCP
+from .plugins import load as _load_plugins
 
-    _register_archive_tools(mcp)
-except ImportError:
-    pass
+_load_plugins(mcp, _GROUP_MCP)
 
 
 def serve(transport: str = "stdio", host: str = "127.0.0.1", port: int = 7370) -> None:

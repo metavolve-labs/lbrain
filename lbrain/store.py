@@ -35,7 +35,16 @@ CREATE TABLE IF NOT EXISTS docs (
     -- because the blinding filter touches every candidate on every query and
     -- JSON-parsing ~2,000 metadata blobs per query is not a filter, it is a
     -- tax. '' = unclassified, which every blinding mode withholds.
-    disclosure TEXT NOT NULL DEFAULT ''
+    disclosure TEXT NOT NULL DEFAULT '',
+    -- Evidence class from frontmatter (lbrain/grading.py): observed | sourced |
+    -- synthesized. A COLUMN for the same reason as disclosure: the served header
+    -- renders it for every hit on every query, and JSON-parsing `metadata` per
+    -- hit to read one field is a tax, not a lookup. '' = UNGRADED (Admiralty 6).
+    evidence TEXT NOT NULL DEFAULT '',
+    -- Frontmatter `date:` (lbrain/staleness.py). A COLUMN because the served
+    -- header resolves a claim date for every hit, and the value cannot be
+    -- recovered from chunk text: parse() strips the frontmatter out of the body.
+    claim_date TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -203,6 +212,10 @@ class Store:
         doc_cols = {r["name"] for r in self.db.execute("PRAGMA table_info(docs)")}
         if "disclosure" not in doc_cols:
             self.db.execute("ALTER TABLE docs ADD COLUMN disclosure TEXT NOT NULL DEFAULT ''")
+        if "evidence" not in doc_cols:
+            self.db.execute("ALTER TABLE docs ADD COLUMN evidence TEXT NOT NULL DEFAULT ''")
+        if "claim_date" not in doc_cols:
+            self.db.execute("ALTER TABLE docs ADD COLUMN claim_date TEXT NOT NULL DEFAULT ''")
         self.db.execute(
             f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(embedding float[{embedding_dim}])"
         )
@@ -311,7 +324,8 @@ class Store:
         import json
 
         row = self.db.execute(
-            "SELECT title, doc_type, is_priority, metadata, disclosure FROM docs WHERE rel_path = ?",
+            "SELECT title, doc_type, is_priority, metadata, disclosure, evidence, claim_date "
+            "FROM docs WHERE rel_path = ?",
             (rel_path := doc.rel_path,),
         ).fetchone()
         if row is None:
@@ -331,6 +345,16 @@ class Store:
             (row["title"] or "") != (doc.title or "")
             or (row["doc_type"] or "") != (doc.doc_type or "")
             or (row["disclosure"] or "") != (getattr(doc, "disclosure", "") or "")
+            # Every frontmatter-DERIVED column belongs in this comparison, not
+            # just the ones that existed when it was written. A column added by
+            # migration starts empty on an existing brain, and if nothing here
+            # notices, an unchanged file is skipped on every future import and the
+            # column stays empty forever — the feature ships and reaches only
+            # corpora imported after it. That is A-401 one level down: the stored
+            # PROJECTION disagrees with what a fresh parse would derive, and the
+            # body hash cannot see it because the body did not change.
+            or (row["evidence"] or "") != (getattr(doc, "evidence", "") or "")
+            or (row["claim_date"] or "") != (getattr(doc, "claim_date", "") or "")
             or bool(row["is_priority"]) != bool(doc.is_priority)
             or stored_meta != parsed_meta
         )
@@ -340,11 +364,12 @@ class Store:
 
         self.db.execute(
             "INSERT INTO docs (rel_path, abs_path, title, doc_hash, mtime, is_priority, doc_type, "
-            "metadata, disclosure) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "metadata, disclosure, evidence, claim_date) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(rel_path) DO UPDATE SET abs_path=excluded.abs_path, title=excluded.title, "
             "doc_hash=excluded.doc_hash, mtime=excluded.mtime, is_priority=excluded.is_priority, "
-            "doc_type=excluded.doc_type, metadata=excluded.metadata, disclosure=excluded.disclosure",
+            "doc_type=excluded.doc_type, metadata=excluded.metadata, disclosure=excluded.disclosure, "
+            "evidence=excluded.evidence, claim_date=excluded.claim_date",
             (
                 doc.rel_path,
                 str(doc.path),
@@ -355,6 +380,8 @@ class Store:
                 doc.doc_type,
                 json.dumps(_safe_meta(doc.metadata)),
                 getattr(doc, "disclosure", "") or "",
+                getattr(doc, "evidence", "") or "",
+                getattr(doc, "claim_date", "") or "",
             ),
         )
 
