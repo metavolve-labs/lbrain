@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.1.6 — 2026-08-20
+
+### Fixed — `--version` answers with the version that shipped
+
+0.1.5 published with `pyproject.toml` bumped and `lbrain/__init__.py` still
+reading 0.1.4, so every 0.1.5 install answered `--version` with the wrong
+number — the number that decides whether a fix is present. Both strings now
+agree, and `tests/test_version_is_single_sourced.py` fails any future release
+cut that forgets the second file. (#39)
+
+### Changed — `doctor` checks the index against its sources, not only its config
+
+`lbrain doctor` now compares the index to the source directories it claims to
+mirror — unimported files and stale chunks surface in the health report instead
+of waiting for a failed recall to reveal them. (#38)
+
+### Added — the release gate is executable (`scripts/release_gate.sh`)
+
+Every check in the gate is a failure that actually shipped: version split
+across files, a module published from one machine's tree, a wheel missing a
+module a downstream repo imports. `release-consumers.txt` carries the import
+contracts downstream repos build on; the gate imports each against the built
+wheel. No green, no publish. (#40)
 
 ### Fixed — a frontmatter `date:` never reached the served header
 
