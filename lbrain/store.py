@@ -297,6 +297,18 @@ class Store:
 
     # ---------- docs ----------
 
+    def doc_paths(self) -> list[tuple[str, str]]:
+        """Every indexed doc as (rel_path, abs_path) — the index's own claim
+        about which files it was built from.
+
+        Both columns, because they answer different questions: `rel_path` is the
+        key an importer would write for a file it rediscovers, and `abs_path` is
+        the only way to ask whether that file is still there. Comparing on one
+        alone loses a whole class of divergence (see index_currency.survey).
+        """
+        return [(r["rel_path"], r["abs_path"]) for r in
+                self.db.execute("SELECT rel_path, abs_path FROM docs")]
+
     def get_doc_hash(self, rel_path: str) -> str | None:
         row = self.db.execute(
             "SELECT doc_hash FROM docs WHERE rel_path = ?", (rel_path,)
