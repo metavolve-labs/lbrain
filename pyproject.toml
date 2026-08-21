@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lbrain"
-version = "0.1.4"
+version = "0.1.6"
 description = "LBrain by Metavolve Labs — AI-native engineering memory with the Lair Protocol."
 requires-python = ">=3.10"
 authors = [{name = "Metavolve Labs, Inc."}]
@@ -46,8 +46,20 @@ rerank = ["fastembed>=0.3,<1"]
 [project.scripts]
 lbrain = "lbrain.cli:main"
 
+# The Tier-2 archive registers through the SAME entry-point group any out-of-tree
+# package uses (lbrain/plugins.py). It was previously imported by name inside a
+# try/except in cli.py and mcp_server.py — a plugin system with one plugin name
+# written into the host. Dogfooding the general mechanism is what keeps it
+# working: if the group breaks, the archive commands vanish HERE rather than
+# silently at a third party.
+[project.entry-points."lbrain.plugins"]
+archive = "lbrain.archive.cli:register"
+
+[project.entry-points."lbrain.mcp_plugins"]
+archive = "lbrain.archive.mcp:register"
+
 [tool.setuptools]
-packages = ["lbrain", "lbrain.archive", "lbrain.framework"]
+packages = ["lbrain", "lbrain.archive", "lbrain.framework", "lbrain.modules"]
 
 # The lair framework docs are the AUTHORING CONTRACT for the corpus this engine
 # ranks over — garbage in, confidently-ranked garbage out. They previously lived
@@ -56,6 +68,10 @@ packages = ["lbrain", "lbrain.archive", "lbrain.framework"]
 # install with the tool and are reachable at runtime via `lbrain framework`.
 [tool.setuptools.package-data]
 "lbrain.framework" = ["*.md"]
+# Modules are content, so they are package data for the same reason the framework
+# is: a module that does not install with the tool reaches nobody. The nested
+# globs are the module layout (<name>/module.toml, <name>/questions/*.md).
+"lbrain.modules" = ["*/*.toml", "*/*.md", "*/*/*.md"]
 
 [project.urls]
 Homepage = "https://lbrain.ai"

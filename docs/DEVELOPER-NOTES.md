@@ -127,10 +127,27 @@ cache.** LBrain doesn't watch the filesystem — it reads what was last imported
 **Fix**
 
 ```bash
+lbrain doctor                     # says whether the index is behind, and by what
 lbrain import <dir> && lbrain embed --stale
 ```
 
 **If they ever disagree, trust the file.** Never edit the DB to match your memory of a file's contents.
+
+**`doctor` can now answer this before you notice the symptom.** It used to compare the index only to
+your *config* — vectors, chunker, inert keys — and reported clean on an index that was days behind its
+sources, which is the reading everyone took as *my brain is current* (issue #34). It now also compares the
+index to the **files**, asking `import`'s own question — *would an import change anything?* — and names
+each divergence: `CHANGED` (body edited, chunks stale), `METADATA` (frontmatter edited, body identical),
+`UNINDEXED` (on disk, never imported), `ORPHANED` (source gone, still served).
+
+Two readings are deliberately *not* an all-clear. A **missing source root** is reported as missing, and the
+docs beneath it as `NOT CHECKED` — never as thousands of orphans, which is what an existence-only check
+reports for an unmounted drive. And an incomplete survey says so rather than printing the tick: *no
+divergence found in what was surveyed* is a different claim from *the index is current*, and collapsing the
+two is the original bug.
+
+The exit code is unchanged — a corpus edited between imports is the normal state of a working brain, not a
+failed build. Scripts that need to gate read `index_currency.is_current` from `lbrain doctor --json`.
 
 ---
 

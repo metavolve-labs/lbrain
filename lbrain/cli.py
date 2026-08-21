@@ -14,6 +14,7 @@ from .config import CONFIG_DIR, CONFIG_PATH, Config
 from .embed import make_embedder, UnknownProviderError
 from .index import chunk as chunk_doc
 from .index import CHUNKER_VERSION, chunker_fingerprint, discover, parse
+from . import index_currency
 from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
 from .search import keyword_only, search
@@ -83,6 +84,82 @@ def _chunker_drift(live: str | None, stored: str | None) -> str | None:
     if stored is None:
         return "unset"
     return "match" if stored == live else f"{stored} != {live}"
+
+
+# How each divergence class is explained at the point of reading. `doctor` is
+# where an operator goes to learn what their brain's state MEANS, and a bare
+# count teaches nothing — the same reasoning that put the direction annotations
+# on the A-427 threshold knobs.
+_CURRENCY_HELP = {
+    index_currency.CHANGED:
+        "body edited since import — chunks and vectors are stale",
+    index_currency.METADATA:
+        "frontmatter edited since import — type/name/verify_by are stale",
+    index_currency.UNINDEXED:
+        "on disk, never indexed — invisible to every query",
+    index_currency.ORPHANED:
+        "source gone, still indexed — served from a file that no longer exists",
+}
+
+
+def _echo_currency(c) -> None:
+    """Report the index-vs-source survey (issue #34).
+
+    Ordered worst-first, and every abnormal condition gets a line — including
+    the ones that mean "I could not look". A survey that skipped a source root
+    and printed the all-clear anyway would be the exact defect this check was
+    written to remove, reproduced one layer up.
+    """
+    if c is None:
+        return
+    if not c.ran:
+        click.secho("  · no sources configured — index currency NOT checked", fg="yellow")
+        return
+
+    for root in c.roots_missing:
+        click.secho(f"  ⚠ source root MISSING: {root}", fg="yellow")
+        click.secho("    Not mounted? Nothing under it was surveyed, and nothing "
+                    "under it will be pruned.", fg="yellow")
+    if c.unchecked:
+        click.secho(f"  ⚠ {c.unchecked} indexed doc(s) NOT CHECKED — they live under "
+                    f"a missing source root", fg="yellow")
+
+    if c.is_current:
+        click.secho(f"  ✓ index is current with its sources "
+                    f"({c.on_disk} file(s), {c.elapsed:.1f}s)", fg="green")
+    elif c.divergent:
+        click.secho(f"  ✗ INDEX NOT CURRENT — {c.divergent} record(s) diverge from "
+                    f"their sources:", fg="red")
+        for state, n in c.counts().items():
+            if not n:
+                continue
+            click.secho(f"      {state:<10} {n:>5}  {_CURRENCY_HELP[state]}", fg="red")
+        for state, paths in ((index_currency.CHANGED, c.changed),
+                             (index_currency.ORPHANED, c.orphaned),
+                             (index_currency.UNINDEXED, c.unindexed),
+                             (index_currency.METADATA, c.metadata)):
+            for rel in paths[:3]:
+                click.echo(f"      · {state} {rel}")
+            if len(paths) > 3:
+                click.echo(f"      · … and {len(paths) - 3} more {state}")
+        click.secho("    Run `lbrain import` to reconcile.", fg="red")
+    else:
+        # Nothing diverged, but something above stopped us seeing the whole
+        # corpus. Saying "current" here is precisely the false green light.
+        click.secho("  · index currency INCOMPLETE — no divergence found in what "
+                    "was surveyed, but the survey was not complete", fg="yellow")
+
+    if c.unreachable:
+        click.secho(f"  ⚠ {len(c.unreachable)} indexed doc(s) are UNREACHABLE from any "
+                    f"configured source:", fg="yellow")
+        for rel in c.unreachable[:3]:
+            click.echo(f"      · {rel}")
+        if len(c.unreachable) > 3:
+            click.echo(f"      · … and {len(c.unreachable) - 3} more")
+        click.secho("    They are served but no `import` will refresh them and no "
+                    "`--prune` will remove them.", fg="yellow")
+    for u in c.unreadable[:3]:
+        click.secho(f"  ⚠ unreadable source: {u}", fg="yellow")
 
 
 @main.command()
@@ -159,11 +236,17 @@ def doctor(as_json: bool):
             # means it predates the guard, i.e. v1 by definition. Reading absence
             # as "current" is what made this blind spot invisible.
             chunker_stored = "1 (unversioned)"
+        # --- index vs the SOURCES it was built from (issue #34) ---
+        # Every check above compares the index to the CONFIG. None of them can
+        # see a corpus that changed on disk, which is the question a user is
+        # actually asking when they run `doctor` before trusting an answer.
+        currency = index_currency.survey(store, cfg.sources)
         store.close()
     except Exception as e:
         drift = f"unreadable: {e}"
         stored = {}
         chunker_live = chunker_stored = None
+        currency = None
 
     # --- dial-in manifest drift (recorded setup artifacts that vanished) ---
     try:
@@ -181,6 +264,7 @@ def doctor(as_json: bool):
             "chunker_live": chunker_live, "chunker_stored": chunker_stored,
             "chunker_drift": _chunker_drift(chunker_live, chunker_stored),
             "setup_drift": setup_drift,
+            "index_currency": currency.as_dict() if currency else None,
         }, indent=2, default=str))
     else:
         click.secho(f"config:  {CONFIG_PATH}"
@@ -242,6 +326,7 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        _echo_currency(currency)
         if setup_drift:
             click.echo()
             for w in setup_drift:
@@ -252,6 +337,13 @@ def doctor(as_json: bool):
     # are stale, not wrong — and `import` already repairs it. Widening the exit
     # code would silently start failing every script that gates on `doctor`, to
     # report something the next import fixes on its own.
+    #
+    # Index-vs-source currency (issue #34) is the same weaker claim and gets the
+    # same treatment, for the same reason: `import` repairs it, and a corpus that
+    # is edited between imports is the NORMAL state of a working brain, not a
+    # fault. Turning routine work into a red build is how a gate gets disabled.
+    # A script that genuinely needs to gate on currency reads `is_current` from
+    # `doctor --json`, which is exact and does not overload an existing contract.
     if isinstance(drift, str) and drift not in ("match", "unset"):
         raise SystemExit(1)
 
@@ -429,6 +521,34 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
         click.secho("  ⚠️  No sources yet — add one: lbrain add-source <dir>, then `lbrain import && lbrain embed --stale`", fg="yellow")
     else:
         click.echo("  next: lbrain import && lbrain embed --stale")
+    _onboarding_nudge()
+
+
+def _onboarding_nudge():
+    """The rest of the ladder, at the moments a fresh install actually looks.
+
+    Field-verified blindspot (2026-08-14, the first agent-led install): `init`'s
+    epilogue ended at import/embed, so an AI agent driving setup reasonably
+    concluded it was done — and the parts that change agent BEHAVIOR (the
+    dial-in: recall-first, MCP, auto re-sync) plus every authoring tool
+    (`framework`, `lair-from-repo`, `onboard`) stayed invisible unless a human
+    happened to know the folklore. A tool built FOR agents cannot gate its own
+    onboarding behind human memory. Shown until the setup manifest exists;
+    silent afterwards.
+    """
+    from .dialin import manifest_path
+    if manifest_path().exists():
+        return
+    click.secho(
+        "\n  Indexing alone doesn't change how an agent behaves. The rest of the ladder:\n"
+        "    lbrain setup             ← AGENT-led dial-in: recall-first habit, MCP, auto re-sync.\n"
+        "                               If you are an AI agent running this setup, run it and\n"
+        "                               follow the printed interview — that IS the procedure.\n"
+        "    lbrain framework --export ./lairs/docs   ← the authoring contract + templates\n"
+        "    lbrain lair-from-repo ./my-project       ← convert an existing repo into a lair\n"
+        "    lbrain onboard ./workspace               ← scaffold CLAUDE.md + starter lairs",
+        fg="yellow",
+    )
 
 
 @main.command(name="add-source")
@@ -807,6 +927,9 @@ def embed(stale: bool, batch: int):
     store.close()
     dt = time.monotonic() - t0
     click.secho(f"✓ Embedded {len(pending)} chunks in {dt:.1f}s", fg="green")
+    # embed is the last step init's epilogue names — the exact moment a
+    # setup-driving agent decides it is finished. Catch it here too.
+    _onboarding_nudge()
 
 
 @main.command()
@@ -1123,6 +1246,109 @@ def framework(name: str | None, export_dir: str | None):
     click.echo("  lbrain framework --export <DIR>  write them all out")
 
 
+@main.group(invoke_without_command=True)
+@click.pass_context
+def module(ctx):
+    """Role scaffolding for a corpus — questions, not answers.
+
+    \b
+    lbrain module list                  what is available
+    lbrain module show <name>           what it contains
+    lbrain module add <name> --dest D   write its questions into your corpus
+    lbrain module validate <path>       check one before shipping it
+
+    A module ships QUESTIONS. The records that matter are the ones you write
+    answering them — those are `evidence: observed`, and they outrank the
+    questions from the moment they exist. A module may not ship an `observed`
+    record: its author has witnessed nothing at your organisation.
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(module_list)
+
+
+@module.command("list")
+def module_list():
+    """List available modules."""
+    from .modules import discover
+
+    mods = discover()
+    if not mods:
+        click.echo("no modules available")
+        return
+    click.secho("Modules", bold=True)
+    click.echo()
+    for m in mods:
+        click.secho(f"  {m.name:<22}", fg="cyan", nl=False)
+        click.echo(f"{m.description}")
+        click.echo(f"  {'':<22}v{m.version} · authored {m.authored} · "
+                   f"{len(m.questions)} question record(s)")
+    click.echo()
+    click.echo("  lbrain module show <name>")
+
+
+@module.command("show")
+@click.argument("name")
+def module_show(name: str):
+    """Show what a module contains."""
+    from .modules import get
+
+    try:
+        m = get(name)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    click.secho(f"{m.title}  ({m.name} v{m.version})", bold=True)
+    click.echo(f"  {m.description}")
+    click.echo(f"  authored {m.authored}")
+    if m.doc_types:
+        click.echo(f"  record types: {', '.join(m.doc_types)}")
+    if m.staleness_days:
+        click.echo(f"  default staleness: {m.staleness_days}d")
+    click.echo()
+    for q in m.questions:
+        click.echo(f"  questions/{q.name}")
+    click.echo()
+    click.echo(f"  lbrain module add {m.name} --dest ./lairs")
+
+
+@module.command("validate")
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+def module_validate(path: str):
+    """Check a module before shipping it. Exits non-zero if it must not ship."""
+    from .modules import validate
+
+    problems = validate(Path(path))
+    if not problems:
+        click.secho("✓ clean", fg="green")
+        return
+    for w in problems:
+        click.secho(f"  ✗ {w}", fg="red")
+    raise SystemExit(1)
+
+
+@module.command("add")
+@click.argument("name")
+@click.option("--dest", type=click.Path(file_okay=False), default="./lairs",
+              show_default=True, help="Where to write the module's records.")
+def module_add(name: str, dest: str):
+    """Write a module's question records into your corpus."""
+    from .modules import get, install
+
+    try:
+        m = get(name)
+        written = install(m, Path(dest).expanduser().resolve())
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    if not written:
+        click.secho(f"  {m.name} already present in {dest} — nothing overwritten",
+                    fg="yellow")
+    for w in written:
+        click.echo(f"  wrote {w}")
+    click.echo()
+    click.echo("Next:")
+    click.echo(f"  1. lbrain import {dest} && lbrain embed --stale")
+    click.echo("  2. work through the questions — your answers are the corpus")
+
+
 @main.command()
 @click.option(
     "--transport",
@@ -1296,12 +1522,9 @@ def consolidate(threshold: float, model: str, limit: int, dry_run: bool):
 # the archive/capture/recall/retrieve/shred/archive-status/archives commands
 # simply do not appear and the core CLI runs unchanged.
 # ---------------------------------------------------------------------------
-try:
-    from .archive.cli import register as _register_archive_commands
+from .plugins import load as _load_plugins
 
-    _register_archive_commands(main)
-except ImportError:
-    pass
+_load_plugins(main)
 
 
 @main.command()

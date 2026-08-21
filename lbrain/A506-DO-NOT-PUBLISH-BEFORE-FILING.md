@@ -19,5 +19,5 @@ implementation may proceed in the open.
 
 **History, for the record:** the original block (placed 2026-08-08) was breached for ~2 hours
 on 2026-08-09 (PR #19 design doc public 08:16Z; repo taken private ~09:45Z; filing receipt
-10:48Z) — anomaly A-450. Same-day filing brackets the exposure; foreign-rights impact of the
+10:48Z) — anomaly A-534. Same-day filing brackets the exposure; foreign-rights impact of the
 2-hour window is a counsel question, minimized by the takedown + immediate filing.
