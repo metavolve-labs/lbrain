@@ -1,16 +1,9 @@
-# VHS script (github.com/charmbracelet/vhs) — renders the README hero GIF.
-#   vhs examples/demo.tape   →  demo.gif
-Output examples/demo.gif
+# VHS scripts (github.com/charmbracelet/vhs) — the two README GIFs.
+# Plain terminal, no cinema. Render:  vhs examples/demo.tape
+Output examples/demo-supersession.gif
 Set FontSize 12
 Set Width 900
-Set Height 620
-Set Theme "Catppuccin Mocha"
-Type "cat examples/demo-corpus/deploy-flag.md"
-Enter
-Sleep 2s
-Type "cat examples/demo-corpus/deploy-flag-update.md"
-Enter
-Sleep 2.5s
+Set Height 560
 Type "lbrain query 'what flag do deploys use?'"
 Enter
-Sleep 6s
+Sleep 7s
