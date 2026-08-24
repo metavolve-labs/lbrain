@@ -247,6 +247,15 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         fm_claim_date = _norm_date(_nested.get("date"))
     if not fm_claim_date:
         fm_claim_date = _norm_date(meta.get("date"))
+    if not fm_claim_date:
+        # `generated:` is the house key for synthesized records (`lbrain consolidate`).
+        # Without this tier a synthesis carried NO in-content date, so its age came only
+        # from mtime — and any later revision reaged it. 2026-08-22: eleven abstractions
+        # were corrected in place (false "under review at TMLR" claims) and every one
+        # jumped from `generated 2026-07-11` to `generated 2026-08-22`, making the
+        # STALEST records in the corpus look like the freshest. A correction is not a
+        # re-synthesis. The date has to live in the content, like every other tier here.
+        fm_claim_date = _norm_date(meta.get("generated"))
 
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
     # Split on BOTH separators: on Windows `rel` is "TOPIC\000-PRIORITY-Y\LAIR.md",

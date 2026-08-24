@@ -116,8 +116,13 @@ def record_date(h: Hit) -> tuple[str, str]:
             return ""
 
     if _is_abstraction(h):
-        # mtime IS synthesis time for a generated record, by definition.
-        d = _iso(h.mtime) if h.mtime else ""
+        # Prefer the in-content `generated:` date; mtime is only the fallback.
+        # The old comment here read "mtime IS synthesis time for a generated record,
+        # by definition" — true only while nobody ever edits the file, and on
+        # 2026-08-22 somebody did: eleven abstractions were corrected in place and
+        # every one reaged from 2026-07-11 to the edit day. Standing rule: a revision
+        # that is not a supersession must retain the record's existing date.
+        d = getattr(h, "doc_date", "") or (_iso(h.mtime) if h.mtime else "")
         return ("generated", d) if d else ("", "")
 
     # Delegate to staleness.claim_date — ONE implementation of claim-date
