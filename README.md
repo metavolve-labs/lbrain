@@ -24,6 +24,11 @@ current, and flags when a record doesn't actually answer the question.
 
 No API key. No account. Your memory stays on your machine.
 
+<p align="center">
+  <a href="https://youtu.be/gYgtFuD9piE"><img src="https://img.youtube.com/vi/gYgtFuD9piE/hqdefault.jpg" alt="Watch: the two-minute XPRIZE submission — Metavolve Labs" width="480"></a>
+  <br><em>The two-minute story — our XPRIZE submission.</em>
+</p>
+
 ## See it work
 
 Say your project contains two notes.
@@ -233,9 +238,9 @@ identical failure ordering in 8 of 8 models. Changing models didn't remove the e
 model not to guess didn't either. So the fix belongs before generation, on the input side, and it
 has to be deterministic.
 
-The work is published as DOI-backed preprints and datasets — not peer-reviewed — and the experiments
-are available for others to challenge: [lbrain.ai/papers](https://lbrain.ai/papers.html). We also
-killed three of our own claims while building this; the retractions are published with the findings.
+The work is published as DOI-backed preprints and datasets, and the experiments are available for
+others to challenge: [lbrain.ai/papers](https://lbrain.ai/papers.html). We also killed three of our
+own claims while building this; the retractions are published with the findings.
 
 <details>
 <summary><b>Related work — read these too</b></summary>
