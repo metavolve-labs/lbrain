@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.1.7 — 2026-08-26
+
+### Security / correctness — 8 engine landmines from an adversarial self-audit
+
+A cross-vendor red-team panel was pointed at the engine and its doctrine; every
+finding was reproduced as a failing fixture before it was fixed, and each fix was
+independently re-verified blind (RED on the prior commit, GREEN on this one).
+
+- **Supersession parse** no longer mints an edge from a *quoted*, *indented*, or
+  *fenced* `Supersedes:` line — an incident review that quoted a record's own
+  supersession line used to de-rank the live record (SUP-05). The bare-slug body
+  form `**Supersedes:** name` is captured instead of silently dropped (L5), and
+  the empty-guard (`nothing`/`none`/`-`) now applies on the frontmatter paths too
+  (SUP-14).
+- **Supersession identity is path-qualified.** A basename slug that collides
+  across directories (`teamA/status.md` vs `teamB/status.md`) resolves to the
+  same-directory target; an ambiguous edge buries nothing, so superseding one
+  record can no longer bury an unrelated same-named one (AX-06).
+- **`doctor` currency counts UNREACHABLE records.** A lair dropped from config
+  but still served no longer certifies the index current (CUR-07).
+- **Header sanitizer** neutralizes seven more dot/colon confusables that passed
+  NFKC and could forge the `· binds` trust marker (FENCE-06).
+- **Disclosure blinding** promotes a doctrine section only on always-on/binding
+  intent, not on any heading that merely contains the word "doctrine" (AX-04).
+- **The tokenizer loads lazily**, not at import — a local-first engine now
+  imports with no network on a cold tiktoken cache (OFF-13).
+
+### Added — the public engine refuses proprietary-mechanism code
+
+`scripts/check-ip-boundary.sh` (CI job `ip-boundary`) scans tracked source for the
+compaction-mechanism vocabulary that belongs in the private harness, not this
+BSD-3 engine. The invariant: the engine gains primitives, never the orchestration.
+
+### Added — `doctor` reports build provenance
+
+`doctor --json` now carries a `build` block (package path, commit, editable, dirty)
+and text mode warns loudly when the operational CLI is running from a dirty editable
+checkout — the condition behind a torn-read a live query hit during development.
+
 ## 0.1.6 — 2026-08-20
 
 ### Fixed — `--version` answers with the version that shipped
