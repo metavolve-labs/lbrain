@@ -56,6 +56,13 @@ _FIELD_TRANS = str.maketrans({
     # (2026-07-24 review: U+0387 forged ' · binds' through the single-char map).
     "·": "-", "·": "-", "‧": "-", "・": "-",
     "•": "-", "∙": "-", "⋅": "-", "᛫": "-",
+    # FENCE-06 (2026-08-26 RSI): seven more dot/colon confusables that pass NFKC
+    # unchanged and forged ' <dot> binds' through the header grammar — U+2E31 word
+    # sep middle dot, U+10FB georgian paragraph sep, U+02D1 half-triangular colon,
+    # U+0589 armenian full stop, U+1427 canadian syllabics middle dot, U+A789
+    # modifier letter colon, U+2E33 raised dot.
+    "⸱": "-", "჻": "-", "ˑ": "-", "։": "-",
+    "ᐧ": "-", "꞉": "-", "⸳": "-",
     # code-generated salience markers a corpus title must not forge
     "★": "*", "☆": "*",
 })

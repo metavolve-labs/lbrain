@@ -86,9 +86,17 @@ class Survey:
         False. The alternative — reporting current because the divergence lists
         happen to be empty — is how a check earns trust it has not done the work
         to deserve.
+
+        UNREACHABLE records count too (CUR-07): an indexed doc that no configured
+        source covers is served to every query while nothing vouches for it — the
+        exact silent-staleness this survey exists to catch. `import` will not fix
+        it (so it is not `divergent`), but the index is not trustworthy-current
+        while it is served, so retiring a lair by dropping it from config no longer
+        certifies clean.
         """
         return (self.ran and not self.divergent and not self.roots_missing
-                and not self.unchecked and not self.unreadable)
+                and not self.unchecked and not self.unreadable
+                and not self.unreachable)
 
     def counts(self) -> dict[str, int]:
         return {

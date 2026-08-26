@@ -486,6 +486,16 @@ class Store:
             for r in self.db.execute("SELECT DISTINCT tgt_slug FROM supersessions")
         }
 
+    def superseded_edges(self) -> list[tuple[str, str]]:
+        """(superseding_doc_rel_path, target_slug) pairs. The src_path lets a
+        caller resolve a basename-slug that collides across directories to the
+        target in the SAME directory as the superseding doc — a bare slug alone
+        is non-unique and buries every same-named doc (AX-06)."""
+        return [
+            (r["src_path"], r["tgt_slug"])
+            for r in self.db.execute("SELECT src_path, tgt_slug FROM supersessions")
+        ]
+
     def disclosure_classes(self) -> dict[str, str]:
         """rel_path → raw disclosure class, for docs that declare one.
 

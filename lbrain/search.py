@@ -67,6 +67,52 @@ def _basename_slug(rel_path: str) -> str:
     return stem
 
 
+def _dir_of(rel_path: str) -> str:
+    parts = [x for x in re.split(r"[\\/]", rel_path) if x]
+    return "/".join(parts[:-1])
+
+
+def _resolve_superseded_paths(store) -> set[str]:
+    """Map each supersession edge to the specific rel_path(s) it retires.
+
+    A `Supersedes:` target written as a PATH matches that exact document. A bare
+    slug that names exactly one document retires it. A bare slug that COLLIDES
+    across directories (AX-06: `teamA/status.md` vs `teamB/status.md`) retires
+    only the target in the same directory as the superseding doc; if the collision
+    cannot be resolved that way, the edge retires NOTHING — an ambiguous edge must
+    never bury an unrelated same-named record.
+    """
+    edges = store.superseded_edges()
+    if not edges:
+        return set()
+    all_paths = [r["rel_path"] for r in store.db.execute("SELECT rel_path FROM docs")]
+    by_slug: dict[str, list[str]] = {}
+    for rp in all_paths:
+        by_slug.setdefault(canonical_slug(_basename_slug(rp)), []).append(rp)
+
+    resolved: set[str] = set()
+    for src_path, tgt in edges:
+        if ("/" in tgt) or ("\\" in tgt):  # author wrote a path — match it exactly
+            norm = tgt[:-3] if tgt.endswith(".md") else tgt
+            exact = [rp for rp in all_paths
+                     if rp == tgt or (rp[:-3] if rp.endswith(".md") else rp) == norm
+                     or rp.endswith("/" + tgt) or rp.endswith("/" + norm + ".md")]
+            if len(exact) == 1:
+                resolved.add(exact[0])
+                continue
+            # fall through to slug resolution if the path form was not unique
+        cands = by_slug.get(canonical_slug(tgt), [])
+        if len(cands) == 1:
+            resolved.add(cands[0])
+        elif len(cands) > 1:
+            src_dir = _dir_of(src_path)
+            same_dir = [c for c in cands if _dir_of(c) == src_dir]
+            if len(same_dir) == 1:
+                resolved.add(same_dir[0])
+            # else: genuinely ambiguous — bury nothing
+    return resolved
+
+
 def canonical_slug(target: str) -> str:
     """Normalize a WIKILINK TARGET to the same slug space as a document path.
 
@@ -455,15 +501,14 @@ def search(
     #     the "amendable, supersede-not-overwrite" convention into actual ranking
     #     behavior: "permanence at the substrate, selectivity at the surface."
     if getattr(cfg, "supersede_aware", True) and out:
-        # Normalize the same way as the wikilink side: a `Supersedes:` target is
-        # author text and is just as likely to be written as a relative path.
-        superseded = {canonical_slug(x) for x in store.superseded_slugs()}
-        superseded.discard("")
-        if superseded:
+        # AX-06: resolve each edge to a SPECIFIC target path, not a bare slug that
+        # buries every same-named doc across directories. A collision resolves to
+        # the same-directory target; a still-ambiguous edge buries nothing.
+        superseded_paths = _resolve_superseded_paths(store)
+        if superseded_paths:
             pen = getattr(cfg, "supersede_penalty", 0.25)
             for h in out:
-                slug = _basename_slug(h.rel_path)
-                if slug in superseded:
+                if h.rel_path in superseded_paths:
                     h.score *= pen
                     h.boosts["superseded"] = pen
 
