@@ -6,6 +6,17 @@ on:
   pull_request:
 
 jobs:
+  ip-boundary:
+    # The public engine REFUSES proprietary-mechanism code. lbrain is the memory
+    # engine (BSD-3); the erasable-context-window / compaction mechanism stays in
+    # the private harness. This gate makes that invariant something the repo
+    # enforces on every PR, not something a contributor has to remember.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: IP boundary
+        run: bash scripts/check-ip-boundary.sh
+
   test:
     runs-on: ubuntu-latest
     strategy:
