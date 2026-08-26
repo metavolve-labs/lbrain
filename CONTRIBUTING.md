@@ -92,3 +92,21 @@ is stated plainly so nobody is surprised later. You keep the copyright in your c
 licensing it under BSD-3 like the rest of the tree.
 
 If you're contributing on behalf of an employer, make sure you're allowed to.
+
+## IP boundary — the engine, not the mechanism
+
+`lbrain` is the memory **engine** (BSD-3, public): ingest, store, retrieve, serve.
+The **erasable-context-window / compaction mechanism** — KV surgery, pointer-scar,
+relocation-as-eviction, the re-retrieval interval, baton-pass — is proprietary and
+lives in the private harness that *calls* this engine. The invariant: **the engine
+gains primitives, never the orchestration.**
+
+`scripts/check-ip-boundary.sh` enforces it on every PR (CI job `ip-boundary`) and,
+if you opt in locally, on every commit:
+
+```bash
+git config core.hooksPath scripts/git-hooks   # local fast-fail (optional)
+```
+
+If a change genuinely describes a *public* primitive but trips the scan, re-run with
+`IP_BOUNDARY_OK="<why it is public-safe>"` — the reason is recorded, not hidden.

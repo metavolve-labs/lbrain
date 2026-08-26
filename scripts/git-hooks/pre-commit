@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Local fast-fail for the IP boundary (CI is the real gate). Install with:
+#   git config core.hooksPath scripts/git-hooks
+exec bash "$(git rev-parse --show-toplevel)/scripts/check-ip-boundary.sh" --staged

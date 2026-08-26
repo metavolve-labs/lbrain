@@ -26,11 +26,65 @@ HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 # the dead one.
 SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
 
+# SUP-05: a supersession declaration is a real edge only when it is the author's
+# OWN column-0 statement — not a line QUOTED (`>`), INDENTED (code), or FENCED
+# (```). The old regex allowed `[#>\s]*` before "supersedes", so an incident
+# review quoting the Anomaly Register's own Supersedes line minted an edge that
+# de-ranked the live register. The regex cannot see fences, so the scan is
+# line-aware: it tracks fence state and rejects non-column-0 lines.
+_SUPERSEDE_LINE_RE = re.compile(r"(?i)^\*{0,2}\s*supersedes\b[\s:*]*([^\n·|]*)")
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _body_supersedes(body: str) -> list[str]:
+    """Slugs a doc declares it replaces, from its OWN column-0 body lines only.
+
+    Rejects quoted / indented / fenced lines (SUP-05). Captures both the wikilink
+    form `**Supersedes:** [[X]]` and the bare-slug form `**Supersedes:** X` (L5),
+    honouring the empty-guard (`nothing`/`none`/`-`)."""
+    out: list[str] = []
+    in_fence = False
+    for line in body.splitlines():
+        if _FENCE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence or line[:1] in (" ", "\t", ">", "#"):
+            continue  # fenced, indented (code), quoted, or a heading — not a declaration
+        m = _SUPERSEDE_LINE_RE.match(line)
+        if not m:
+            continue
+        clause = m.group(1).strip().strip("*").strip()
+        if clause.lower() in _SUPERSEDE_EMPTY:
+            continue
+        links = WIKILINK_RE.findall(clause)
+        out.extend(links or [clause])   # L5: bare slug when no wikilink present
+    return out
+
 # "nothing" / "none" / "n/a" is an author saying explicitly that this document
 # replaces no other. Treating it as a value produced no edge by luck (no wikilink
 # to find); being explicit costs one check and documents the intent.
 _SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—"}
-ENCODER = tiktoken.get_encoding("cl100k_base")
+# OFF-13: load the tokenizer LAZILY, not at module scope. `get_encoding` fetches
+# the BPE vocabulary from a CDN on a cold `~/.tiktoken`; doing it at import made a
+# "local-first" engine unimportable offline. The fetch now happens on first
+# actual USE (chunking needs it anyway), so import — and every read path that
+# doesn't chunk — works with no network. `index.ENCODER` still resolves, lazily,
+# via module __getattr__ for any external caller.
+_ENCODER = None
+
+
+def _encoder():
+    """The cl100k_base tokenizer, loaded once on first use."""
+    global _ENCODER
+    if _ENCODER is None:
+        _ENCODER = tiktoken.get_encoding("cl100k_base")
+    return _ENCODER
+
+
+def __getattr__(name):
+    if name == "ENCODER":
+        return _encoder()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass
@@ -186,14 +240,18 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     supersedes: list[str] = []
     fm_sup = meta.get("supersedes")
     if isinstance(fm_sup, str):
-        supersedes.extend(WIKILINK_RE.findall(fm_sup) or [fm_sup])
+        # SUP-14: the empty-guard applies on the frontmatter STRING path too —
+        # `supersedes: nothing` is an author saying "replaces nothing", not an
+        # edge named 'nothing'. Previously guarded only on the body path.
+        if fm_sup.strip().lower() not in _SUPERSEDE_EMPTY:
+            supersedes.extend(WIKILINK_RE.findall(fm_sup) or [fm_sup.strip()])
     elif isinstance(fm_sup, list):
-        supersedes.extend(str(x) for x in fm_sup)
-    for m in SUPERSEDE_RE.finditer(body):
-        clause = m.group(1).strip().strip("*").strip()
-        if clause.lower() in _SUPERSEDE_EMPTY:
-            continue
-        supersedes.extend(WIKILINK_RE.findall(clause))
+        # SUP-14: and on the LIST path — `- nothing` in a list is not an edge.
+        for x in fm_sup:
+            xs = str(x).strip()
+            if xs.lower() not in _SUPERSEDE_EMPTY:
+                supersedes.extend(WIKILINK_RE.findall(xs) or [xs])
+    supersedes.extend(_body_supersedes(body))
     supersedes = sorted({s.strip() for s in supersedes if s and s.strip()})
     doc_type = ""
     if isinstance(meta.get("metadata"), dict):
@@ -247,6 +305,15 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         fm_claim_date = _norm_date(_nested.get("date"))
     if not fm_claim_date:
         fm_claim_date = _norm_date(meta.get("date"))
+    if not fm_claim_date:
+        # `generated:` is the house key for synthesized records (`lbrain consolidate`).
+        # Without this tier a synthesis carried NO in-content date, so its age came only
+        # from mtime — and any later revision reaged it. 2026-08-22: eleven abstractions
+        # were corrected in place (false "under review at TMLR" claims) and every one
+        # jumped from `generated 2026-07-11` to `generated 2026-08-22`, making the
+        # STALEST records in the corpus look like the freshest. A correction is not a
+        # re-synthesis. The date has to live in the content, like every other tier here.
+        fm_claim_date = _norm_date(meta.get("generated"))
 
     rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
     # Split on BOTH separators: on Windows `rel` is "TOPIC\000-PRIORITY-Y\LAIR.md",
@@ -308,7 +375,7 @@ def chunk(
     buf_path = ""  # heading path of the FIRST section in the buffer
     idx = 0
     for sec, hpath in sections:
-        sec_tokens = len(ENCODER.encode(sec))
+        sec_tokens = len(_encoder().encode(sec))
         if buf_tokens + sec_tokens <= max_tokens:
             if not buf:
                 buf_path = hpath
@@ -419,7 +486,7 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
     cont_path = " > ".join(p for p in (hpath, own_text) if p)
 
     def _tok(text: str) -> int:
-        return len(ENCODER.encode(text))
+        return len(_encoder().encode(text))
 
     def _flush() -> list[str]:
         """Emit the buffer; return its trailing lines within the overlap budget."""
@@ -453,11 +520,11 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
         if lt > max_tokens:
             # One line larger than the whole budget. Nothing to preserve — slice it.
             _flush()
-            toks = ENCODER.encode(line)
+            toks = _encoder().encode(line)
             step = max(1, max_tokens - overlap)
             for start in range(0, len(toks), step):
                 out.append(_make_chunk(
-                    doc, idx, ENCODER.decode(toks[start : start + max_tokens]),
+                    doc, idx, _encoder().decode(toks[start : start + max_tokens]),
                     min(max_tokens, len(toks) - start), ctx,
                     hpath if not out else cont_path))
                 idx += 1

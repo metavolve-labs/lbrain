@@ -56,6 +56,13 @@ _FIELD_TRANS = str.maketrans({
     # (2026-07-24 review: U+0387 forged ' · binds' through the single-char map).
     "·": "-", "·": "-", "‧": "-", "・": "-",
     "•": "-", "∙": "-", "⋅": "-", "᛫": "-",
+    # FENCE-06 (2026-08-26 RSI): seven more dot/colon confusables that pass NFKC
+    # unchanged and forged ' <dot> binds' through the header grammar — U+2E31 word
+    # sep middle dot, U+10FB georgian paragraph sep, U+02D1 half-triangular colon,
+    # U+0589 armenian full stop, U+1427 canadian syllabics middle dot, U+A789
+    # modifier letter colon, U+2E33 raised dot.
+    "⸱": "-", "჻": "-", "ˑ": "-", "։": "-",
+    "ᐧ": "-", "꞉": "-", "⸳": "-",
     # code-generated salience markers a corpus title must not forge
     "★": "*", "☆": "*",
 })
@@ -116,8 +123,13 @@ def record_date(h: Hit) -> tuple[str, str]:
             return ""
 
     if _is_abstraction(h):
-        # mtime IS synthesis time for a generated record, by definition.
-        d = _iso(h.mtime) if h.mtime else ""
+        # Prefer the in-content `generated:` date; mtime is only the fallback.
+        # The old comment here read "mtime IS synthesis time for a generated record,
+        # by definition" — true only while nobody ever edits the file, and on
+        # 2026-08-22 somebody did: eleven abstractions were corrected in place and
+        # every one reaged from 2026-07-11 to the edit day. Standing rule: a revision
+        # that is not a supersession must retain the record's existing date.
+        d = getattr(h, "doc_date", "") or (_iso(h.mtime) if h.mtime else "")
         return ("generated", d) if d else ("", "")
 
     # Delegate to staleness.claim_date — ONE implementation of claim-date

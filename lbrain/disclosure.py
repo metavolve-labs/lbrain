@@ -324,8 +324,28 @@ def resolve(
 # fabricate" cannot be revised by evidence; "Matrix B shows 3.8% → 95.8%" can.
 # An imperative is doctrine; the evidence FOR that imperative is context, which
 # is why a bullet welding the two together gets split rather than classified.
-_DOCTRINE_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.*doctrine.*)$", re.IGNORECASE)
+# AX-04: a heading merely CONTAINING "doctrine" is NOT enough to promote its
+# section to always-on. `## Vendor doctrine notes` would leak whatever mutable
+# claim followed it through independent/adversarial blinding — the exact
+# heading-name match the code's own boundary test ("could this be false
+# tomorrow?") warns against. A doctrine section must SIGNAL always-on/binding
+# intent, which both canonical headings do:
+#   "## Doctrine — always delivered, in every disclosure mode"   (our CORE.md)
+#   "## Binding doctrine — every persona, always on"             (Agent-X shared)
+# A bare "## Doctrine" heading (nothing but the word) still counts — that is a
+# deliberate canonical section, not an arbitrary one that happens to mention it.
+_DOCTRINE_ALWAYSON_RE = re.compile(
+    r"^\s{0,3}#{1,6}\s+(?=.*\bdoctrine\b)(?=.*\b(?:always|binding|every|standing)\b)",
+    re.IGNORECASE,
+)
+_DOCTRINE_BARE_RE = re.compile(r"^\s{0,3}#{1,6}\s+doctrine\s*[—:-]*\s*$", re.IGNORECASE)
 _ANY_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+")
+
+
+def _is_doctrine_heading(line: str) -> bool:
+    """A heading that opens an always-on doctrine section — by explicit always-on/
+    binding signal, or by being nothing but the bare word 'doctrine'."""
+    return bool(_DOCTRINE_ALWAYSON_RE.match(line) or _DOCTRINE_BARE_RE.match(line))
 
 
 def split_core(text: str) -> tuple[str, str]:
@@ -352,7 +372,7 @@ def split_core(text: str) -> tuple[str, str]:
     in_doctrine = False
     for line in (text or "").splitlines():
         if _ANY_HEADING_RE.match(line):
-            in_doctrine = bool(_DOCTRINE_HEADING_RE.match(line))
+            in_doctrine = _is_doctrine_heading(line)
             # The heading itself follows its section, so a delivered doctrine
             # block keeps the header that explains what it is.
             (doctrine if in_doctrine else context).append(line)

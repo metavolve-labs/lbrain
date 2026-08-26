@@ -162,6 +162,40 @@ def _echo_currency(c) -> None:
         click.secho(f"  ⚠ unreadable source: {u}", fg="yellow")
 
 
+def _build_provenance() -> dict:
+    """Where the RUNNING code actually came from — path, and if it resolves into a
+    git checkout, the commit and whether that checkout is dirty.
+
+    A "local-first" brain is often run from an editable install (`pip install -e`)
+    pointed straight at a development tree. When that tree is edited live, a running
+    CLI can read a half-written module — a torn read (CCO bug 2026-08-26: a query
+    saw `search.py` after a call was added but before its helper was saved). This
+    surfaces that risk so `doctor` can name it instead of a NameError doing it."""
+    import subprocess
+    from pathlib import Path as _P
+    import lbrain as _pkg
+
+    pkg_dir = _P(_pkg.__file__).resolve().parent
+    prov = {"version": __version__, "package_path": str(pkg_dir),
+            "editable_checkout": False, "commit": None, "dirty": None}
+    try:
+        root = subprocess.run(
+            ["git", "-C", str(pkg_dir), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5)
+        if root.returncode == 0:
+            prov["editable_checkout"] = True
+            prov["commit"] = subprocess.run(
+                ["git", "-C", str(pkg_dir), "rev-parse", "--short", "HEAD"],
+                capture_output=True, text=True, timeout=5).stdout.strip() or None
+            porcelain = subprocess.run(
+                ["git", "-C", str(pkg_dir), "status", "--porcelain"],
+                capture_output=True, text=True, timeout=5).stdout
+            prov["dirty"] = bool(porcelain.strip())
+    except Exception:
+        pass  # not a git checkout, or git absent — an installed wheel; leave defaults
+    return prov
+
+
 @main.command()
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def doctor(as_json: bool):
@@ -255,8 +289,11 @@ def doctor(as_json: bool):
     except Exception:
         setup_drift = []
 
+    provenance = _build_provenance()
+
     if as_json:
         click.echo(_json.dumps({
+            "build": provenance,
             "config_path": str(CONFIG_PATH), "config_exists": cfg_exists,
             "settings": rows, "inert_config_keys": inert,
             "stored_fingerprint": stored,
@@ -267,6 +304,16 @@ def doctor(as_json: bool):
             "index_currency": currency.as_dict() if currency else None,
         }, indent=2, default=str))
     else:
+        _b = provenance
+        _tag = f"{_b['version']}"
+        if _b["editable_checkout"]:
+            _tag += f" · editable {_b['commit'] or '?'}{' · DIRTY' if _b['dirty'] else ''}"
+        click.secho(f"build:   {_tag}   ({_b['package_path']})",
+                    fg=("yellow" if _b["dirty"] else "green"))
+        if _b["editable_checkout"] and _b["dirty"]:
+            click.secho("  ⚠ running from a DIRTY editable checkout — a live edit can be read "
+                        "half-written (torn read). Run operational brains from an installed "
+                        "build, and do engine dev in a worktree.", fg="yellow")
         click.secho(f"config:  {CONFIG_PATH}"
                     f"{'' if cfg_exists else '   ⚠ MISSING — every value below is a CODE DEFAULT'}",
                     fg=("green" if cfg_exists else "red"))

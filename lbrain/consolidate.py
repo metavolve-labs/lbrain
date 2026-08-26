@@ -167,6 +167,71 @@ def sanitize_wikilinks(text: str, source_paths: list[str]) -> tuple[str, int]:
     return re.sub(r"\[\[([^\]]+)\]\]", _check, text), removed
 
 
+def is_claude_model(model: str) -> bool:
+    """Claude models route to Vertex; anything else to the Gemini Developer API."""
+    return model.startswith("claude-")
+
+
+INSTRUCTION = (
+    "You are LBrain's cognitive consolidation engine. Synthesize the following memory fragments into a single, "
+    "dense, coherent abstraction. Focus on extracting the highest-signal principles, facts, or architecture decisions. "
+    "Filter out noise. Ensure you synthesize the information, do not just list it. "
+    "Ground every statement in the fragments — do not add facts that are not present in them. "
+    "Each fragment header carries its source date: anchor EVERY time-bound fact to it as a point-in-time observation "
+    "(e.g. 'as of 2026-05-22, ...'), never as current state — plans, statuses, deadlines, and open items are all time-bound. "
+    "Begin directly with a heading naming the topic — no preamble like 'Here is the synthesis'.\n"
+    "Crucially: Embed wikilinks back to the source documents referenced where appropriate, for example [[filename]] — "
+    "but ONLY for names that appear in the fragment Source paths above."
+)
+
+
+def synthesize_cluster_vertex(cluster_chunks: list[dict], *, model: str,
+                              project_id: str, region: str = "global",
+                              effort: str = "medium", max_tokens: int = 8192) -> str:
+    """Synthesize via Claude on Google Vertex AI.
+
+    Deliberately in-perimeter: Vertex authenticates with GCP ADC/service-account
+    credentials, so this path needs no Gemini Developer API key and is unaffected by
+    that surface's monthly spending cap — which exists as breach containment and must
+    not be raised to run a batch job.
+
+    Three model-specific constraints, each of which is a 400 or a silent defect if
+    ignored on Claude Opus 5:
+      * NO sampling parameters. ``temperature``/``top_p``/``top_k`` are rejected.
+      * Thinking is ON by default and shares the ``max_tokens`` budget with the
+        response, so the budget must cover both or output truncates mid-sentence.
+        ``effort`` is the cost lever, not a sampling knob.
+      * A response can come back ``stop_reason == "refusal"`` with empty content.
+        That is a normal HTTP 200, so ``content[0]`` must never be read blind.
+    """
+    from anthropic import AnthropicVertex
+
+    client = AnthropicVertex(project_id=project_id, region=region)
+    resp = client.messages.create(
+        model=model,
+        max_tokens=max_tokens,
+        system=INSTRUCTION,
+        output_config={"effort": effort},
+        messages=[{"role": "user", "content": _build_prompt_fragments(cluster_chunks)}],
+    )
+    if resp.stop_reason == "refusal":
+        cat = getattr(getattr(resp, "stop_details", None), "category", None)
+        raise RuntimeError(f"synthesis refused by safety classifier (category={cat})")
+    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    if not text:
+        raise RuntimeError(f"empty synthesis (stop_reason={resp.stop_reason})")
+    return text
+
+
+def _build_prompt_fragments(cluster_chunks: list[dict]) -> str:
+    """Just the fragments — the instruction rides in ``system`` on the Vertex path."""
+    texts = []
+    for i, c in enumerate(cluster_chunks):
+        date = c.get("date", "date unknown")
+        texts.append(f"--- Fragment {i+1} (Source: {c['rel_path']}; {date}) ---\n{c['text']}")
+    return "\n\n".join(texts)
+
+
 def synthesize_cluster(api_key: str, cluster_chunks: list[dict], model=DEFAULT_MODEL) -> str:
     texts = []
     for i, c in enumerate(cluster_chunks):
@@ -210,9 +275,20 @@ def run_consolidation(
     """Returns (generated, skipped_existing, total_clusters)."""
     import click
 
-    api_key = cfg.gemini_api_key or os.environ.get("GEMINI_API_KEY")
-    if not api_key and not dry_run:
-        raise RuntimeError("GEMINI_API_KEY is required for synthesis. Set it via lbrain init or environment.")
+    use_vertex = is_claude_model(model)
+    vertex_project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+    vertex_region = os.environ.get("ANTHROPIC_VERTEX_REGION", "global")
+    api_key = "" if use_vertex else (cfg.gemini_api_key or os.environ.get("GEMINI_API_KEY"))
+    if not dry_run:
+        if use_vertex and not vertex_project:
+            # Fail loud and empty rather than defaulting to a plausible project id —
+            # a default that wires an external side effect is a bug, not a convenience.
+            raise RuntimeError(
+                "ANTHROPIC_VERTEX_PROJECT_ID is required for Claude-on-Vertex synthesis. "
+                "Authenticate with `gcloud auth application-default login` (no API key needed)."
+            )
+        if not use_vertex and not api_key:
+            raise RuntimeError("GEMINI_API_KEY is required for synthesis. Set it via lbrain init or environment.")
 
     click.echo("  Fetching vectors (abstraction-derived chunks excluded)...")
     chunks = get_all_embedded_chunks(store)
@@ -241,7 +317,13 @@ def run_consolidation(
 
         click.echo(f"  Synthesizing cluster {i+1}/{len(clusters)} ({len(cluster['chunks'])} chunks) -> {file_path.name}")
         try:
-            summary = synthesize_cluster(api_key, cluster["chunks"], model=model)
+            if use_vertex:
+                summary = synthesize_cluster_vertex(
+                    cluster["chunks"], model=model,
+                    project_id=vertex_project, region=vertex_region,
+                )
+            else:
+                summary = synthesize_cluster(api_key, cluster["chunks"], model=model)
         except Exception as e:
             click.echo(f"  Failed to synthesize cluster {i+1}: {e}")
             continue
