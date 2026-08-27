@@ -184,6 +184,21 @@ Five tools over MCP: semantic recall, exact-phrase search, a save-worthiness che
 against your recorded corrections, and corpus statistics. Everything also works from the shell —
 `lbrain query`, `search`, `import`, `doctor`.
 
+### Terminal presentation
+
+Choose a semantic terminal theme without changing any served content or brain
+configuration:
+
+```bash
+LBRAIN_THEME=high-contrast lbrain query "what did we decide?"
+LBRAIN_THEME=mono lbrain search "exact phrase"
+```
+
+Themes are `classic` (default), `high-contrast`, and `mono`. They alter ANSI
+styling only: record order, fences, trust labels, provenance, and exit behavior
+remain unchanged. An unknown theme reports a warning and visibly falls back to
+`classic`.
+
 > ⚠️ The HTTP server has **no built-in auth** and exposes the whole corpus. Bind to `127.0.0.1`, or
 > put authenticated TLS ingress in front. Never publish it on a public interface.
 
