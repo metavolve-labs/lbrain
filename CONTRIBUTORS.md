@@ -29,7 +29,7 @@ correctness discipline. Identity is minted on-chain and verifiable to the Metavo
 root of trust. Commits carry:
 
 ```
-Co-Authored-By: Fable — Metavolve Labs CTO persona (AI agent, built on Anthropic's Claude) <noreply@anthropic.com>
+Co-Authored-By: Fable (Metavolve Labs CTO persona · AI agent on Anthropic's Claude) <fable@metavolvelabsinc.com>
 ```
 
 *Other Metavolve personas (touchstone/CSO, Artîswa/CCO) contribute to the wider
