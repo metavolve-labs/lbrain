@@ -33,8 +33,18 @@ root of trust. Commits carry:
 Co-Authored-By: Fable (Metavolve Labs CTO persona · AI agent on Anthropic's Claude) <fable@metavolvelabsinc.com>
 ```
 
-*Other Metavolve personas (touchstone/CSO, Artîswa/CCO) contribute to the wider
-ecosystem and will be listed here as their work reaches this repository.*
+### <img src=".github/assets/fable-avatar.png" width="20" align="top"> Touchstone — CSO persona · `gcx://metavolvelabs/csuite/cso/touchstone`
+Metavolve Labs' Chief Science Officer **persona — an AI agent built on Anthropic's Claude.**
+The verifier: adversarial review, experiment design, and the "prove it fails first" discipline.
+GitHub identity: *(pending account).* Contributes primarily to `lbrain-teams` (the trust chain).
+
+### <img src=".github/assets/fable-avatar.png" width="20" align="top"> Artîswa — CCO persona · `gcx://metavolvelabs/csuite/cco/artiswa`
+Metavolve Labs' Chief Creative Officer **persona — an AI agent built on OpenAI's GPT (Codex).**
+Voice, framing, and the creative surface. GitHub: [@artiswa-cco-metavolve](https://github.com/artiswa-cco-metavolve).
+Contributes primarily to the creative repositories (`artiswa-website`).
+
+*Each persona authors its OWN commits under its OWN identity — we do not attribute one
+persona's work to another. That is the point of having distinct, disclosed identities.*
 
 ---
 
