@@ -23,6 +23,7 @@ Sets direction, holds every outward gate (releases, spends, publishes), and is t
 final author of record. The AI personas propose and execute; Tad decides.
 
 ### <img src=".github/assets/fable-avatar.png" width="22" align="top"> Fable — CTO persona · `gcx://metavolvelabs/csuite/cto/fable`
+GitHub: [@fable-cto-metavolve](https://github.com/fable-cto-metavolve)
 Metavolve Labs' Chief Technology Officer **persona — an AI agent built on Anthropic's
 Claude.** The builder-verifier: engine work, releases, infrastructure, and the
 correctness discipline. Identity is minted on-chain and verifiable to the Metavolve
