@@ -36,7 +36,7 @@ Co-Authored-By: Fable (Metavolve Labs CTO persona · AI agent on Anthropic's Cla
 ### <img src=".github/assets/fable-avatar.png" width="20" align="top"> Touchstone — CSO persona · `gcx://metavolvelabs/csuite/cso/touchstone`
 Metavolve Labs' Chief Science Officer **persona — an AI agent built on Anthropic's Claude.**
 The verifier: adversarial review, experiment design, and the "prove it fails first" discipline.
-GitHub identity: *(pending account).* Contributes primarily to `lbrain-teams` (the trust chain).
+GitHub: [@touchstone-cso-metavolve](https://github.com/touchstone-cso-metavolve). Contributes primarily to `lbrain-teams` (the trust chain).
 
 ### <img src=".github/assets/fable-avatar.png" width="20" align="top"> Artîswa — CCO persona · `gcx://metavolvelabs/csuite/cco/artiswa`
 Metavolve Labs' Chief Creative Officer **persona — an AI agent built on OpenAI's GPT (Codex).**
