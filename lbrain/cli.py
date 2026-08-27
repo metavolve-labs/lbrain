@@ -17,6 +17,7 @@ from .index import CHUNKER_VERSION, chunker_fingerprint, discover, parse
 from . import index_currency
 from .lair_protocol import core_rules, detect_anti_pattern, should_commit_to_lair
 from .onboard import run_onboarding
+from .presentation import echo as present
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
 from .store import SqliteExtensionError, Store
@@ -1008,7 +1009,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
     if getattr(cfg, "amp_gating", True):
         ok, reason = amp.gate(query, getattr(cfg, "amp_min_chars", 12))
         if not ok:
-            click.secho(f"[AMP gate] no memory injected — {reason}.", fg="yellow")
+            present(f"[AMP gate] no memory injected — {reason}.", role="caution")
             return
     store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
     embedder = make_embedder(cfg)
@@ -1020,9 +1021,9 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, serve_mode)
         if warn:
-            click.secho(warn, fg="yellow", nl=False)
+            present(warn, role="caution", nl=False)
         if mode == "structured":
-            click.secho(f"--- structured serve ({dt_ms:.0f} ms retrieval) ---", fg="cyan")
+            present(f"--- structured serve ({dt_ms:.0f} ms retrieval) ---", role="frame")
             click.echo(render_response(cfg, hits, query))
             return
         kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
@@ -1041,20 +1042,18 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         )
         blind = blinding_notice(hits)   # prose must disclose the blinding too
         if blind:
-            click.secho(blind + "\n", fg="yellow")
+            present(blind + "\n", role="caution")
         if kept:
-            click.secho(amp.UNTRUSTED_NOTICE, fg="red")
+            present(amp.UNTRUSTED_NOTICE, role="boundary")
 
         if core:
-            click.secho(fence_block(core.strip()), fg="green")
+            present(fence_block(core.strip()), role="memory")
 
         label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
-        click.secho(f"--- {label} ({dt_ms:.0f} ms) ---\n", fg="cyan")
+        present(f"--- {label} ({dt_ms:.0f} ms) ---\n", role="frame")
         for i, h in enumerate(kept, 1):
             prefix = "★" if h.is_priority else " "
-            click.secho(
-                f"{prefix} [{i}] {sanitize_field(h.title, 120)}  ({h.score:.3f})", fg="yellow"
-            )
+            present(f"{prefix} [{i}] {sanitize_field(h.title, 120)}  ({h.score:.3f})", role="title")
             click.echo(f"   {sanitize_field(h.rel_path, 160)} :: chunk {h.chunk_idx}")
             if h.doc_type:
                 click.echo(f"   type={sanitize_field(h.doc_type, 32)}  v={h.vector_score:.2f}  kw={h.keyword_score:.2f}  boosts={h.boosts}")
@@ -1062,7 +1061,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
             click.echo(fence_block(text_preview) + "\n")
 
         if getattr(cfg, "amp_provenance", True):
-            click.secho(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)), fg="cyan")
+            present(amp.provenance(kept, len(hits), used, getattr(cfg, "amp_budget_chars", 0)), role="frame")
     finally:
         embedder.close()
         store.close()
@@ -1089,21 +1088,21 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, None)
         if warn:
-            click.secho(warn, fg="yellow", nl=False)
+            present(warn, role="caution", nl=False)
         if mode == "structured":
-            click.secho(f"--- structured serve ({dt_ms:.0f} ms) ---", fg="cyan")
+            present(f"--- structured serve ({dt_ms:.0f} ms) ---", role="frame")
             click.echo(render_response(cfg, hits, query, admissibility_on=False,
                                        include_core=False, include_provenance=False,
                                        hits_label="keyword hits"))
             return
         blind = blinding_notice(hits)
         if blind:
-            click.secho(blind + "\n", fg="yellow")
+            present(blind + "\n", role="caution")
         if hits:
-            click.secho(amp.UNTRUSTED_NOTICE, fg="red")
-        click.secho(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", fg="cyan")
+            present(amp.UNTRUSTED_NOTICE, role="boundary")
+        present(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", role="frame")
         for i, h in enumerate(hits, 1):
-            click.secho(f"  [{i}] {sanitize_field(h.title, 120)}", fg="yellow")
+            present(f"  [{i}] {sanitize_field(h.title, 120)}", role="title")
             click.echo(f"   {sanitize_field(h.rel_path, 160)} :: chunk {h.chunk_idx}")
             click.echo(fence_block(h.text.strip()[:240]) + "\n")
     finally:
