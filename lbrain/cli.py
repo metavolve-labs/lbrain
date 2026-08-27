@@ -1130,6 +1130,36 @@ def stats():
     click.echo(f"tier-2 archives:{s.get('archives', 0):>3}")
 
 
+@main.command()
+@click.option("--format", "fmt", type=click.Choice(["prometheus", "json"]),
+              default="prometheus", show_default=True, help="Output format.")
+@click.option("--no-currency", is_flag=True,
+              help="Store-only gauges; skip the source-currency + embedding-drift scan.")
+def metrics(fmt: str, no_currency: bool):
+    """Export brain health as scrapeable metrics (Prometheus text, or JSON).
+
+    Read-only. Store-only gauges always emit; the currency + embedding-drift
+    gauges add the configured sources — skip them with --no-currency for a fast,
+    source-free scrape. Pipe it to a node_exporter textfile collector, or curl it
+    from a sidecar: a local-first brain gets observability without running a server.
+    """
+    from . import telemetry
+
+    warn_if_unprovisioned()
+    cfg = Config.load()
+    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    try:
+        m = telemetry.collect_metrics(store, None if no_currency else cfg)
+    finally:
+        store.close()
+    if fmt == "json":
+        import json as _json
+
+        click.echo(_json.dumps({"version": __version__, "metrics": m}, indent=2))
+    else:
+        click.echo(telemetry.render_prometheus(m), nl=False)
+
+
 @main.command(name="commit-check")
 @click.argument("text", required=False)
 @click.option("--file", "from_file", type=click.Path(exists=True), help="Read text from file")

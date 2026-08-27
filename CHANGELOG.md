@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added — `lbrain metrics` (telemetry exporter)
+
+`lbrain metrics` exports brain health as scrapeable metrics — Prometheus text
+exposition format (default) or JSON. Turns the signals `doctor` inspects into a
+metrics surface (docs/chunks/embedded/coverage, wikilinks, index-currency,
+embedding-drift) so a local-first brain can be watched by ops tooling without
+running a server: pipe it to a node_exporter textfile collector, or curl it from
+a sidecar. Read-only; stdout stays machine-clean (warnings go to stderr);
+`--no-currency` for a fast source-free scrape.
+
+
 ## 0.1.7 — 2026-08-26
 
 ### Security / correctness — 8 engine landmines from an adversarial self-audit
