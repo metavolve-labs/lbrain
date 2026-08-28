@@ -42,28 +42,47 @@ def _body_supersedes(body: str) -> list[str]:
     Rejects quoted / indented / fenced lines (SUP-05). Captures both the wikilink
     form `**Supersedes:** [[X]]` and the bare-slug form `**Supersedes:** X` (L5),
     honouring the empty-guard (`nothing`/`none`/`-`)."""
+    import unicodedata
     out: list[str] = []
     in_fence = False
     for line in body.splitlines():
-        if _FENCE_RE.match(line):
+        line_norm = unicodedata.normalize("NFKC", line)
+        if _FENCE_RE.match(line_norm):
             in_fence = not in_fence
             continue
-        if in_fence or line[:1] in (" ", "\t", ">", "#"):
+        if in_fence or line_norm[:1] in (" ", "\t", ">", "#"):
             continue  # fenced, indented (code), quoted, or a heading — not a declaration
-        m = _SUPERSEDE_LINE_RE.match(line)
+        m = _SUPERSEDE_LINE_RE.match(line_norm)
         if not m:
             continue
         clause = m.group(1).strip().strip("*").strip()
         if clause.lower() in _SUPERSEDE_EMPTY:
             continue
         links = WIKILINK_RE.findall(clause)
-        out.extend(links or [clause])   # L5: bare slug when no wikilink present
+        raw_slugs = links or [clause]
+        for s in raw_slugs:
+            s_clean = s.strip().lower()
+            if s_clean not in _SUPERSEDE_EMPTY:
+                out.append(s)
     return out
 
 # "nothing" / "none" / "n/a" is an author saying explicitly that this document
 # replaces no other. Treating it as a value produced no edge by luck (no wikilink
 # to find); being explicit costs one check and documents the intent.
 _SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—"}
+
+
+def _sup_slugs(raw: str) -> list[str]:
+    """Wikilink targets in `raw` (or the bare clause), each empty-guarded on the
+    EXTRACTED value. C2-12: `[[nothing]]` extracts to 'nothing', which the
+    empty-guard must catch — the raw-clause guard let a wikilink-wrapped empty
+    target through ('[[nothing]]' != 'nothing') and minted a spurious edge."""
+    out: list[str] = []
+    for slug in (WIKILINK_RE.findall(raw) or [raw.strip()]):
+        s = slug.strip()
+        if s and s.lower() not in _SUPERSEDE_EMPTY:
+            out.append(s)
+    return out
 # OFF-13: load the tokenizer LAZILY, not at module scope. `get_encoding` fetches
 # the BPE vocabulary from a CDN on a cold `~/.tiktoken`; doing it at import made a
 # "local-first" engine unimportable offline. The fetch now happens on first
@@ -239,18 +258,27 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     # truth surfaces, while the originals stay indexed for provenance.
     supersedes: list[str] = []
     fm_sup = meta.get("supersedes")
-    if isinstance(fm_sup, str):
-        # SUP-14: the empty-guard applies on the frontmatter STRING path too —
-        # `supersedes: nothing` is an author saying "replaces nothing", not an
-        # edge named 'nothing'. Previously guarded only on the body path.
-        if fm_sup.strip().lower() not in _SUPERSEDE_EMPTY:
-            supersedes.extend(WIKILINK_RE.findall(fm_sup) or [fm_sup.strip()])
-    elif isinstance(fm_sup, list):
-        # SUP-14: and on the LIST path — `- nothing` in a list is not an edge.
-        for x in fm_sup:
-            xs = str(x).strip()
-            if xs.lower() not in _SUPERSEDE_EMPTY:
-                supersedes.extend(WIKILINK_RE.findall(xs) or [xs])
+
+    def _flatten_supersedes(val) -> list[str]:
+        if isinstance(val, list):
+            out = []
+            for x in val:
+                out.extend(_flatten_supersedes(x))
+            return out
+        elif isinstance(val, str):
+            return [val]
+        elif val is None:
+            return []
+        else:
+            return [str(val)]
+
+    for xs in _flatten_supersedes(fm_sup):
+        xs_strip = xs.strip()
+        if xs_strip.lower() not in _SUPERSEDE_EMPTY:
+            extracted = WIKILINK_RE.findall(xs_strip) or [xs_strip]
+            for s in extracted:
+                if s.strip().lower() not in _SUPERSEDE_EMPTY:
+                    supersedes.append(s)
     supersedes.extend(_body_supersedes(body))
     supersedes = sorted({s.strip() for s in supersedes if s and s.strip()})
     doc_type = ""

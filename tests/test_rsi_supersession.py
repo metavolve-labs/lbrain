@@ -51,3 +51,25 @@ def test_sup14_frontmatter_real_slug_still_works():   # NO-REGRESSION
 
 def test_sup14_frontmatter_list_empty_guard():
     assert _sup("---\nsupersedes:\n  - nothing\n  - real-one\n---\n# Doc\n") == ["real-one"]
+
+
+# ── C2-12 (cycle-2): Unicode whitespace indentation + wikilink empty-guard ──
+def test_c2_12_unicode_whitespace_indented_mints_no_edge():
+    # U+00A0 non-breaking space
+    assert _sup("# Doc\n\n\xa0Supersedes: [[X]]\n") == []
+    # U+2003 em space
+    assert _sup("# Doc\n\n\u2003Supersedes: [[X]]\n") == []
+
+
+def test_c2_12_body_wikilink_empty_guard_mints_no_edge():
+    assert _sup("# Doc\n\n**Supersedes:** [[nothing]]\n") == []
+    assert _sup("# Doc\n\n**Supersedes:** [[none]]\n") == []
+
+
+def test_c2_12_frontmatter_string_wikilink_empty_guard():
+    assert _sup("---\nsupersedes: [[nothing]]\n---\n# Doc\n") == []
+
+
+def test_c2_12_frontmatter_list_wikilink_empty_guard():
+    assert _sup("---\nsupersedes:\n  - [[nothing]]\n  - [[none]]\n  - [[real-one]]\n---\n# Doc\n") == ["real-one"]
+
