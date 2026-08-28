@@ -73,3 +73,32 @@ def test_c2_12_frontmatter_string_wikilink_empty_guard():
 def test_c2_12_frontmatter_list_wikilink_empty_guard():
     assert _sup("---\nsupersedes:\n  - [[nothing]]\n  - [[none]]\n  - [[real-one]]\n---\n# Doc\n") == ["real-one"]
 
+
+
+# --- C2-12 class-level closure AT THE parse() API (Touchstone's blind-verify point).
+#     The indent check must hold through the REAL API, not just when _body_supersedes
+#     is called directly — for EVERY indent (space/tab/nbsp/em-space), bold OR bare,
+#     with OR without frontmatter. A version where parse() strips leading whitespace
+#     would let all of these through and reject only `>` blockquotes. -------------
+import pytest
+
+_INDENTS = {"space": "    ", "tab": "\t", "nbsp": "\xa0", "emsp": " "}
+_FORMS = {"bold": "**Supersedes:** [[X]]", "bare": "Supersedes: [[X]]"}
+_FMPRE = {"noFM": "# D\n\n", "FM": "---\nt: 1\n---\n# D\n\n"}
+
+
+@pytest.mark.parametrize("fm", _FMPRE)
+@pytest.mark.parametrize("ind", _INDENTS)
+@pytest.mark.parametrize("form", _FORMS)
+def test_c2_12_indented_supersedes_mints_no_edge_through_parse(fm, ind, form):
+    text = _FMPRE[fm] + _INDENTS[ind] + _FORMS[form] + "\n"
+    assert _sup(text) == [], f"indented {ind}/{form}/{fm} minted an edge through parse()"
+
+
+def test_c2_12_column0_declaration_still_mints():        # NO-REGRESSION
+    assert _sup("# D\n\n**Supersedes:** [[X]]\n") == ["X"]
+    assert _sup("# D\n\nSupersedes: [[X]]\n") == ["X"]
+
+
+def test_c2_12_blockquote_still_rejected():              # NO-REGRESSION (SUP-05)
+    assert _sup("# D\n\n> **Supersedes:** [[X]]\n") == []
