@@ -334,8 +334,28 @@ def resolve(
 #   "## Binding doctrine — every persona, always on"             (Agent-X shared)
 # A bare "## Doctrine" heading (nothing but the word) still counts — that is a
 # deliberate canonical section, not an arbitrary one that happens to mention it.
+# C2-09 (cycle-2): the earlier lookahead conjunction — heading CONTAINS "doctrine"
+# AND CONTAINS one of always/binding/every/standing anywhere — still promoted
+# adversarial headings where doctrine is not the declared subject or the trigger
+# word negates or mutates: "## Standing doctrine for the vendor", "## Not always
+# doctrine", "## Project doctrine always changes" all leaked their section into the
+# always-on half under blinding. A real DECLARATION test instead of a name match:
+#   (a) doctrine (optionally "binding doctrine") is the LEADING SUBJECT of the
+#       heading — a word before it ("Standing", "Not", "Project", "Vendor") means
+#       the heading is about something else, not a doctrine declaration;
+#   (b) a declaring dash/colon follows; and
+#   (c) an always-on AFFIRMATION appears (always / binding / every / persona).
+# Everything else fails CLOSED to context — the recoverable error is a persona
+# noticing its doctrine is missing; the unrecoverable one is a blinded reviewer
+# handed the conclusion. The two canonical CORE headings both pass:
+#   "## Doctrine — always delivered, in every disclosure mode"
+#   "## Binding doctrine — every persona, always on"
 _DOCTRINE_ALWAYSON_RE = re.compile(
-    r"^\s{0,3}#{1,6}\s+(?=.*\bdoctrine\b)(?=.*\b(?:always|binding|every|standing)\b)",
+    r"^\s{0,3}#{1,6}\s+"
+    r"(?:binding\s+)?doctrine\b"                        # doctrine is the LEADING subject
+    r"\s*[—:-]+\s*"                                     # a declaring dash/colon
+    r"(?=.*\b(?:always|binding|every|persona)\b)"       # affirming always-on / binding / every-persona
+    r".*$",
     re.IGNORECASE,
 )
 _DOCTRINE_BARE_RE = re.compile(r"^\s{0,3}#{1,6}\s+doctrine\s*[—:-]*\s*$", re.IGNORECASE)
