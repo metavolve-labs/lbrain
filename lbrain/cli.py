@@ -787,12 +787,32 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     beliefs_seen = 0
     total_chunks = 0
 
+    # Anchor each requested path to the configured source root that CONTAINS it, so a
+    # faster subdir import (e.g. `lbrain import lairs/X-STRATEGY-GTM`) mints the SAME
+    # canonical rel_paths as a full-root import and UPDATES those docs — instead of
+    # phantom duplicates rooted at the subdir that shadow the originals. Verified
+    # 2026-08-27: a subdir import created 112 duplicate docs with truncated rel_paths;
+    # this recurred despite being a known "always import from roots" lesson, so the
+    # guard lives in the tool, not in operator discipline. A path NOT under any
+    # configured source is its own root (unchanged) — nothing legitimate is refused.
+    _cfg_roots = [Path(s).expanduser().resolve() for s in (cfg.sources or [])]
+
+    def _anchor(src: Path) -> Path:
+        containing = [r for r in _cfg_roots if r == src or r in src.parents]
+        return max(containing, key=lambda r: len(r.parts)) if containing else src
+
     for src in sources:
+        root = _anchor(src)
+        if root != src:
+            click.secho(
+                f"  ↪ anchoring rel-paths to configured source {root}\n"
+                f"    (not the sub-path {src}) so this refresh UPDATES the canonical "
+                f"docs instead of duplicating them.", fg="cyan")
         files = discover([src])
         click.echo(f"  scanning {src} → {len(files)} markdown files")
         with store.transaction():
             for path in files:
-                doc = parse(path, repo_root=src)
+                doc = parse(path, repo_root=root)
                 existing_hash = store.get_doc_hash(doc.rel_path)
                 # Supersession edges are resolved at search time, so keep them current
                 # for every doc — even ones whose chunks are unchanged (a Supersedes
