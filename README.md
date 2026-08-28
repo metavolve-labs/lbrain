@@ -180,6 +180,25 @@ claude mcp add lbrain -- lbrain mcp
 lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
 ```
 
+### Codex CLI — mount the right brain in every tool shell
+
+A bootstrap script cannot export `LBRAIN_HOME` into an already-running Codex process. Configure a
+named Codex profile instead:
+
+```bash
+LBRAIN_HOME=/path/to/brain lbrain setup codex-profile --profile my-brain
+codex --profile my-brain
+
+# Verify the environment reached a Codex-spawned subprocess:
+codex sandbox --profile my-brain -- lbrain whoami
+```
+
+The generated profile uses Codex's supported `shell_environment_policy.set` configuration. A named
+profile is deliberate: setting `LBRAIN_HOME` globally can cross-wire multiple agents or personas on
+the same machine. The selected brain directory must also be writable inside the Codex sandbox,
+because SQLite opens the database in WAL mode. If your normal home directory is read-only in the
+sandbox, provision the Codex-facing brain under a writable workspace and point the profile there.
+
 Five tools over MCP: semantic recall, exact-phrase search, a save-worthiness check, an action check
 against your recorded corrections, and corpus statistics. Everything also works from the shell —
 `lbrain query`, `search`, `import`, `doctor`.

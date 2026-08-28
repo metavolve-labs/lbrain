@@ -1244,6 +1244,53 @@ def setup_templates(target_dir: str):
                 "them in (see README.md there)", fg="yellow")
 
 
+@setup.command("codex-profile")
+@click.option("--profile", default="lbrain", show_default=True,
+              help="Named Codex profile to create.")
+@click.option("--codex-home", type=click.Path(file_okay=False), default="~/.codex",
+              show_default=True, help="Codex configuration directory.")
+@click.option("--brain-home", type=click.Path(file_okay=False), default=None,
+              help="Provisioned LBrain home. Defaults to the active LBRAIN_HOME.")
+@click.option("--persona", default=None,
+              help="Optional LBRAIN_PERSONA value to inject with LBRAIN_HOME.")
+def setup_codex_profile(profile: str, codex_home: str,
+                        brain_home: str | None, persona: str | None):
+    """Create an additive Codex profile that mounts one LBrain home.
+
+    Launch Codex with ``codex --profile PROFILE``. The named profile avoids
+    setting LBRAIN_HOME globally, which can cross-wire multiple agents or
+    personas sharing one machine.
+    """
+    from . import config
+    from .dialin import record_step, write_codex_profile
+
+    selected_home = (Path(brain_home).expanduser().resolve()
+                     if brain_home else config.CONFIG_DIR.resolve())
+    try:
+        path, created = write_codex_profile(
+            Path(codex_home), profile, selected_home, persona=persona
+        )
+    except (ValueError, FileExistsError) as e:
+        raise click.ClickException(str(e))
+
+    if created:
+        record_step(
+            "other", f"Codex profile {profile} → {selected_home}",
+            path=str(path), undo=f"rm {path}"
+        )
+        click.secho(f"created {path}", fg="green")
+    else:
+        click.echo(f"already configured — unchanged: {path}")
+    click.echo()
+    click.echo(f"  launch:  codex --profile {profile}")
+    click.echo(f"  verify:  codex sandbox --profile {profile} -- lbrain whoami")
+    click.echo()
+    click.secho(
+        "The selected brain home must be writable inside the Codex sandbox "
+        "because SQLite opens it in WAL mode.", fg="yellow"
+    )
+
+
 @setup.command("record")
 @click.argument("kind")
 @click.argument("desc")
