@@ -102,3 +102,24 @@ def test_c2_12_column0_declaration_still_mints():        # NO-REGRESSION
 
 def test_c2_12_blockquote_still_rejected():              # NO-REGRESSION (SUP-05)
     assert _sup("# D\n\n> **Supersedes:** [[X]]\n") == []
+
+
+# --- C2-12 CASE A (Touchstone re-verify a3d35a1): indented Supersedes as the
+#     LEADING/only body line. frontmatter's .content strips the leading line's
+#     whitespace before _body_supersedes sees it, so the NFKC indent check is dead
+#     code on that path. The earlier matrix was all case-B (prose above), which
+#     preserves the indent. This covers case A — RED on a3d35a1, GREEN after the
+#     raw-body fix. Reachable in our own corpus (RSI docs open with quoted examples).
+@pytest.mark.parametrize("fm", ["noFM", "FM"])
+@pytest.mark.parametrize("ind", ["space", "tab", "nbsp", "emsp"])
+@pytest.mark.parametrize("form", ["bold", "bare"])
+def test_c2_12_leading_indented_supersedes_mints_no_edge(fm, ind, form):
+    iw = {"space": "    ", "tab": "\t", "nbsp": "\xa0", "emsp": " "}[ind]
+    fx = {"bold": "**Supersedes:** [[old]]", "bare": "Supersedes: [[old]]"}[form]
+    pre = "---\nt: 1\n---\n" if fm == "FM" else ""     # indented line is FIRST body line, no prose above
+    assert _sup(pre + iw + fx + "\n") == [], f"leading-indented {ind}/{form}/{fm} minted an edge (case A)"
+
+
+def test_c2_12_leading_column0_supersedes_still_mints():   # NO-REGRESSION (case A control)
+    assert _sup("**Supersedes:** [[old]]\n") == ["old"]
+    assert _sup("---\nt: 1\n---\n**Supersedes:** [[old]]\n") == ["old"]

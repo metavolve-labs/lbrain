@@ -35,6 +35,21 @@ SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
 _SUPERSEDE_LINE_RE = re.compile(r"(?i)^\*{0,2}\s*supersedes\b[\s:*]*([^\n·|]*)")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
+# C2-12 (case A): the indent/quote/fence rejection in _body_supersedes must run on
+# the body with LEADING WHITESPACE PRESERVED. python-frontmatter's `.content`
+# strips the leading line's whitespace, so an indented `Supersedes:` that is the
+# FIRST body line arrived at _body_supersedes already de-indented — the NFKC check
+# was dead code on that path and the line minted an edge (verified through parse()
+# by CSO blind re-verify: RED == GREEN on a3d35a1). We strip ONLY the frontmatter
+# block from the raw source, never the body's own indentation.
+_FRONTMATTER_BLOCK_RE = re.compile(r"^(?:﻿)?---[ \t]*\r?\n.*?\r?\n---[ \t]*\r?\n", re.DOTALL)
+
+
+def _raw_body(text: str) -> str:
+    """The document body verbatim (frontmatter block removed, indentation intact)."""
+    m = _FRONTMATTER_BLOCK_RE.match(text)
+    return text[m.end():] if m else text
+
 
 def _body_supersedes(body: str) -> list[str]:
     """Slugs a doc declares it replaces, from its OWN column-0 body lines only.
@@ -279,7 +294,9 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
             for s in extracted:
                 if s.strip().lower() not in _SUPERSEDE_EMPTY:
                     supersedes.append(s)
-    supersedes.extend(_body_supersedes(body))
+    # C2-12 (case A): scan the RAW body — frontmatter's `.content` (`body`) strips
+    # a leading indented line, defeating the indent/quote/fence rejection.
+    supersedes.extend(_body_supersedes(_raw_body(text)))
     supersedes = sorted({s.strip() for s in supersedes if s and s.strip()})
     doc_type = ""
     if isinstance(meta.get("metadata"), dict):
