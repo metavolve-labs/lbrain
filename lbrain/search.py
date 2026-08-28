@@ -601,11 +601,16 @@ def keyword_only(
     # two retrieval paths (anomaly A-410). No RANKING change here: keyword search
     # stays rank-by-FTS-relevance and the penalty is not applied to the score;
     # this marks the record so the reader is told, which is the whole point.
-    superseded = {canonical_slug(x) for x in store.superseded_slugs()}
-    superseded.discard("")
-    if superseded:
+    # C2-08: resolve to SPECIFIC target paths (AX-06's `_resolve_superseded_paths`),
+    # the same as the ranked path — NOT a bare basename-slug set. The old
+    # `_basename_slug(rel_path) in superseded_slugs()` flagged every same-named doc
+    # across directories, so `teamB/status.md` was marked SUPERSEDED by teamA's edge;
+    # an ambiguous edge now buries nothing. Flag only (no score multiplier): keyword
+    # search stays rank-by-FTS-relevance; this marks the record so the reader is told.
+    superseded_paths = _resolve_superseded_paths(store)
+    if superseded_paths:
         for h in hits:
-            if _basename_slug(h.rel_path) in superseded:
+            if h.rel_path in superseded_paths:
                 h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
     # Draft isolation is disclosure control, so it applies here too — the keyword
     # path must not be a way around it. Marking only (rank=False): keyword search
