@@ -435,6 +435,23 @@ class Store:
         from .index import is_backup_path
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
+        # Scope the prune to docs UNDER the imported roots. A NARROW import
+        # (`lbrain import <subdir>`) walks only that subtree, so it must never
+        # prune docs from OTHER configured sources it never walked — those files
+        # are on disk and their docs are live. (CIO/keel brain, 2026-08-30: a
+        # narrow experiment-folder import pruned 38 _COLLAB inbox docs whose files
+        # were present the whole time.) `source_roots` was formerly ONLY the
+        # mount-gone guard above; it now also bounds WHAT is eligible to be pruned.
+        # When it is None (a deliberate whole-brain sweep) every doc stays in
+        # scope, exactly as before.
+        if source_roots:
+            _roots = [os.path.realpath(str(r)) for r in source_roots]
+
+            def _under_root(abs_path: str) -> bool:
+                rp = os.path.realpath(abs_path)
+                return any(rp == root or rp.startswith(root + os.sep) for root in _roots)
+
+            rows = [r for r in rows if _under_root(r["abs_path"])]
         # "No longer indexable" is not the same as "no longer on disk". A doc that
         # became EXCLUDED (a backup tree) still exists, so an existence-only prune
         # left it serving forever: discover() stopped finding it, import reported
