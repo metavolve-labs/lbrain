@@ -739,6 +739,66 @@ class Store:
             )
             self.db.execute("UPDATE chunks SET embedded = 1 WHERE chunk_id = ?", (cid,))
 
+    def reuse_embeddings_from(self, source_db_path, *, model: str, provider: str) -> tuple[int, int]:
+        """Copy embeddings by chunk_hash from a SOURCE brain into this (rebuilt) brain, for
+        chunks not yet embedded. A de-wholesale is a rebuild, and ~90% of kept chunks are
+        byte-identical, so their vectors already exist (CSO measured 89.3% on CCO, 2026-08-30)
+        — reusing them turns a ~25-min rebuild into ~3 min. ONNX embedding is linear-slow
+        (~0.29s/chunk), so the win is in embedding FEWER chunks, not faster ones.
+
+        Reuse ONLY when the source's embedding fingerprint (dim/model/provider) matches this
+        brain's: a chunk with the same text built under a different embedder lives in a
+        different vector space. Missing/mismatched → left un-embedded (embed fresh, don't
+        guess). Returns (reused, candidates)."""
+        import os
+        import sqlite3
+
+        src_path = str(source_db_path)
+        if not os.path.exists(src_path):
+            return 0, 0
+        src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+        src.row_factory = sqlite3.Row
+        try:
+            src.enable_load_extension(True)
+            sqlite_vec.load(src)
+            src.enable_load_extension(False)
+
+            def _m(key):
+                r = src.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+                return r["value"] if r else None
+
+            # Fingerprint guard — same vector space, or reuse nothing.
+            if (_m("embedding_model"), _m("embedding_provider"), str(_m("embedding_dim"))) != (
+                model, provider, str(self.embedding_dim)
+            ):
+                return 0, 0
+
+            targets = self.db.execute(
+                "SELECT chunk_id, chunk_hash FROM chunks WHERE embedded = 0"
+            ).fetchall()
+            cids: list[int] = []
+            blobs: list[bytes] = []
+            for t in targets:
+                srow = src.execute(
+                    "SELECT chunk_id FROM chunks WHERE chunk_hash = ? AND embedded = 1 LIMIT 1",
+                    (t["chunk_hash"],),
+                ).fetchone()
+                if not srow:
+                    continue
+                emb = src.execute(
+                    "SELECT embedding FROM vec_chunks WHERE rowid = ?", (srow["chunk_id"],)
+                ).fetchone()
+                if not emb or emb["embedding"] is None:
+                    continue
+                cids.append(t["chunk_id"])
+                blobs.append(bytes(emb["embedding"]))
+            if cids:
+                self.write_embeddings(cids, blobs)  # validates blob width + sets embedded=1
+                self.db.commit()
+            return len(cids), len(targets)
+        finally:
+            src.close()
+
     # ---------- counts / health ----------
 
     def stats(self) -> dict:

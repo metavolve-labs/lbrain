@@ -900,7 +900,10 @@ def selftest(as_json):
 @main.command()
 @click.option("--stale/--all", default=True, help="Only embed un-embedded chunks (default)")
 @click.option("--batch", default=96, type=int, help="Embedding batch size")
-def embed(stale: bool, batch: int):
+@click.option("--reuse-from", "reuse_from", default=None,
+              help="Rebuild fast-path: copy embeddings by chunk_hash from a source brain.db "
+                   "(same-fingerprint chunks are reused instead of re-embedded).")
+def embed(stale: bool, batch: int, reuse_from):
     """Generate embeddings for chunks (re-embeds stale or all)."""
     cfg = Config.load()
     # provider="local" runs on-device and needs no credential — the whole point of
@@ -946,6 +949,21 @@ def embed(stale: bool, batch: int):
             fg="yellow",
         )
         store.reset_vectors(cfg.embedding_dim)
+
+    # Rebuild fast-path (CSO 2026-08-30): copy same-fingerprint embeddings by chunk_hash
+    # from a source brain so a de-wholesale rebuild re-embeds only the genuinely-new chunks
+    # (~89% reuse measured → ~25 min → ~3 min). Runs before stale selection so those chunks
+    # drop out of `pending`. Fingerprint-guarded inside; a mismatch reuses nothing.
+    if reuse_from:
+        reused, cand = store.reuse_embeddings_from(reuse_from, model=model, provider=provider)
+        if reused:
+            click.secho(
+                f"  reused {reused}/{cand} embeddings by chunk_hash from {reuse_from} "
+                f"— {cand - reused} need fresh embedding", fg="cyan")
+        else:
+            click.secho(
+                f"  ⚠ reuse-from matched 0 embeddings (fingerprint mismatch or no shared "
+                f"chunk_hash) — embedding all {cand} fresh", fg="yellow")
 
     if stale:
         pending = store.stale_chunks()
