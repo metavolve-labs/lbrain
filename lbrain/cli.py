@@ -811,6 +811,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                     else:
                         unchanged_docs += 1
                     store.replace_supersessions(doc)
+                    store.replace_claim_spans(doc)
                     # Belief state lives ENTIRELY in frontmatter, so a promotion
                     # changes no chunk and would land in exactly this branch. If
                     # the projection were only refreshed on a body edit, a
@@ -825,6 +826,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                     store.delete_doc_chunks(doc.rel_path)
                 store.upsert_doc(doc)
                 store.replace_supersessions(doc)
+                store.replace_claim_spans(doc)
                 store.replace_wikilinks(doc)
                 beliefs_seen += _project_belief(store, doc)
                 chunks = chunk_doc(

@@ -130,6 +130,7 @@ class Doc:
     metadata: dict
     wikilinks: list[str] = field(default_factory=list)
     supersedes: list[str] = field(default_factory=list)  # slugs this doc replaces
+    claims: list = field(default_factory=list)  # claim-span lifecycle records (dual-view)
     doc_hash: str = ""
     mtime: float = 0.0
     is_priority: bool = False
@@ -369,6 +370,27 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         part.startswith("000-PRIORITY") for part in re.split(r"[\\/]", rel)
     )
 
+    # Claim-span dual-view (DR panel 2026-08-30): a `claims:` frontmatter list retires
+    # specific claims INSIDE a living document. Each {text, status, valid_to}. current_only
+    # retrieval drops any CHUNK whose text contains a closed claim's text — so a fresh
+    # file's stale span is retired without retiring the whole file (the grain mismatch).
+    # Text-matching, not char offsets, so an edit that shifts positions can't silently
+    # mis-target (the offset-recompute fragility the panel flagged).
+    claims = []
+    _raw_claims = meta.get("claims")
+    if isinstance(_raw_claims, list):
+        for _c in _raw_claims:
+            if not isinstance(_c, dict):
+                continue
+            _t = str(_c.get("text", "")).strip()
+            if not _t:
+                continue
+            claims.append({
+                "text": _t,
+                "status": str(_c.get("status", "current")).strip().lower(),
+                "valid_to": _norm_date(_c.get("valid_to")) if _c.get("valid_to") else "",
+            })
+
     doc_hash = hashlib.sha1(body.encode("utf-8")).hexdigest()
     return Doc(
         path=path,
@@ -378,6 +400,7 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         metadata=meta,
         wikilinks=wikilinks,
         supersedes=supersedes,
+        claims=claims,
         doc_hash=doc_hash,
         mtime=path.stat().st_mtime,
         is_priority=is_priority,

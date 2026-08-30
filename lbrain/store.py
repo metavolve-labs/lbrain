@@ -75,6 +75,19 @@ CREATE TABLE IF NOT EXISTS supersessions (
     FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
 
+-- Claim-span dual-view (DR panel 2026-08-30). A PROJECTION of a doc's `claims:`
+-- frontmatter: specific claims inside a living document, each with a lifecycle.
+-- current_only retrieval excludes any chunk whose text contains a CLOSED claim's
+-- text (status != current, or valid_to has passed). Source of truth is the file;
+-- delete + re-import and the rows cascade away.
+CREATE TABLE IF NOT EXISTS claim_spans (
+    src_path   TEXT NOT NULL,
+    claim_text TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'current',
+    valid_to   TEXT,
+    FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
+);
+
 -- Per-agent beliefs (lbrain/beliefs.py). A belief IS a markdown doc — this table
 -- is a PROJECTION of its frontmatter, kept queryable so retrieval can filter on
 -- author and lifecycle without re-parsing files. Source of truth stays the file,
@@ -494,6 +507,38 @@ class Store:
                 "INSERT OR IGNORE INTO supersessions (src_path, tgt_slug) VALUES (?, ?)",
                 (doc.rel_path, tgt),
             )
+
+    def replace_claim_spans(self, doc: Doc) -> None:
+        """Project a doc's `claims:` frontmatter into claim_spans. Idempotent per doc
+        (mirrors replace_supersessions) so it stays correct on re-import and clears
+        rows when a claim is removed from the file."""
+        self.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (doc.rel_path,))
+        for c in getattr(doc, "claims", []) or []:
+            if not c.get("text"):
+                continue
+            self.db.execute(
+                "INSERT INTO claim_spans (src_path, claim_text, status, valid_to) "
+                "VALUES (?, ?, ?, ?)",
+                (doc.rel_path, c["text"], (c.get("status") or "current"),
+                 (c.get("valid_to") or None)),
+            )
+
+    def closed_claims(self, today: str | None = None) -> dict[str, list[str]]:
+        """Per-doc claim texts that are CLOSED for present-time retrieval — status is
+        not 'current', OR valid_to has passed. current_only drops any chunk whose text
+        contains one of these. Open (current, unexpired) claims return nothing, so they
+        never touch retrieval."""
+        import datetime as _dt
+        today = today or _dt.date.today().isoformat()
+        out: dict[str, list[str]] = {}
+        for r in self.db.execute(
+            "SELECT src_path, claim_text, status, valid_to FROM claim_spans"
+        ):
+            status = (r["status"] or "current").lower()
+            vt = r["valid_to"]
+            if (status != "current" or (vt is not None and str(vt) < today)) and r["claim_text"]:
+                out.setdefault(r["src_path"], []).append(r["claim_text"])
+        return out
 
     def superseded_slugs(self) -> set[str]:
         """Slugs some other doc explicitly supersedes — buried at retrieval so the

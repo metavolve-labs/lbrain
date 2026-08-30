@@ -521,6 +521,14 @@ def search(
                     if h.rel_path in superseded_paths:
                         h.score *= pen
                         h.boosts["superseded"] = pen
+        if current_only and out:
+            # Claim-span exclusion (grain mismatch): drop chunks whose text contains a
+            # CLOSED claim, even in an otherwise-current doc — a fresh file can carry a
+            # stale span (a March paragraph, an uncorrected table cell).
+            closed = store.closed_claims()
+            if closed:
+                out = [h for h in out
+                       if not any(t in h.text for t in closed.get(h.rel_path, ()))]
 
     # 6. Recency (call-when-needed) — bounded mtime freshness for recency-sensitive
     #    queries. READ-ONLY (no salience writes, no feedback loop), priority docs exempt.
@@ -629,6 +637,13 @@ def keyword_only(
             for h in hits:
                 if h.rel_path in superseded_paths:
                     h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
+    if current_only and hits:
+        # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
+        # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.
+        closed = store.closed_claims()
+        if closed:
+            hits = [h for h in hits
+                    if not any(t in h.text for t in closed.get(h.rel_path, ()))]
     # Draft isolation is disclosure control, so it applies here too — the keyword
     # path must not be a way around it. Marking only (rank=False): keyword search
     # stays rank-by-FTS-relevance, exactly as it does for supersession above.
