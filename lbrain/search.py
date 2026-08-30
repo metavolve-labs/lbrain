@@ -330,6 +330,7 @@ def search(
     recency: bool = False,
     persona: str | None = None,
     envelope=None,
+    current_only: bool = False,
 ) -> list[Hit]:
     """Hybrid: vector top-N + BM25 top-N → RRF merge → always-on boosts → top-k.
 
@@ -506,11 +507,20 @@ def search(
         # the same-directory target; a still-ambiguous edge buries nothing.
         superseded_paths = _resolve_superseded_paths(store)
         if superseded_paths:
-            pen = getattr(cfg, "supersede_penalty", 0.25)
-            for h in out:
-                if h.rel_path in superseded_paths:
-                    h.score *= pen
-                    h.boosts["superseded"] = pen
+            if current_only:
+                # Dual-view eligibility (DR panel, 2026-08-30): default-current retrieval
+                # EXCLUDES superseded records rather than serving them naked below the fold.
+                # A flag the ranker ignores is not a flag — when the retired value and its
+                # correction are both in-context, generation serves the stale one 15-40% of
+                # the time (MemStrata 2606.26511; Madam-RAG 2504.13079). History/as-of
+                # retrieval (current_only=False, the default) still returns them.
+                out = [h for h in out if h.rel_path not in superseded_paths]
+            else:
+                pen = getattr(cfg, "supersede_penalty", 0.25)
+                for h in out:
+                    if h.rel_path in superseded_paths:
+                        h.score *= pen
+                        h.boosts["superseded"] = pen
 
     # 6. Recency (call-when-needed) — bounded mtime freshness for recency-sensitive
     #    queries. READ-ONLY (no salience writes, no feedback loop), priority docs exempt.
@@ -550,7 +560,8 @@ def search(
 
 
 def keyword_only(
-    store: Store, query: str, k: int = 10, persona: str | None = None, envelope=None
+    store: Store, query: str, k: int = 10, persona: str | None = None, envelope=None,
+    current_only: bool = False,
 ) -> list[Hit]:
     """Pure FTS5 keyword search. No embedding required.
 
@@ -609,9 +620,15 @@ def keyword_only(
     # search stays rank-by-FTS-relevance; this marks the record so the reader is told.
     superseded_paths = _resolve_superseded_paths(store)
     if superseded_paths:
-        for h in hits:
-            if h.rel_path in superseded_paths:
-                h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
+        if current_only:
+            # Dual-view eligibility (DR panel 2026-08-30): exclude superseded on the
+            # keyword path too, matching the ranked path. History/as-of retrieval uses
+            # current_only=False (the default), which keeps + flags them.
+            hits = [h for h in hits if h.rel_path not in superseded_paths]
+        else:
+            for h in hits:
+                if h.rel_path in superseded_paths:
+                    h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
     # Draft isolation is disclosure control, so it applies here too — the keyword
     # path must not be a way around it. Marking only (rank=False): keyword search
     # stays rank-by-FTS-relevance, exactly as it does for supersession above.
