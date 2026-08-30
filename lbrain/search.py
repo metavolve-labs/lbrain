@@ -528,7 +528,8 @@ def search(
             closed = store.closed_claims()
             if closed:
                 out = [h for h in out
-                       if not any(t in h.text for t in closed.get(h.rel_path, ()))]
+                       if not any(t.lower() in h.text.lower()
+                                  for t in closed.get(h.rel_path, ()))]
 
     # 6. Recency (call-when-needed) — bounded mtime freshness for recency-sensitive
     #    queries. READ-ONLY (no salience writes, no feedback loop), priority docs exempt.
@@ -643,7 +644,8 @@ def keyword_only(
         closed = store.closed_claims()
         if closed:
             hits = [h for h in hits
-                    if not any(t in h.text for t in closed.get(h.rel_path, ()))]
+                    if not any(t.lower() in h.text.lower()
+                               for t in closed.get(h.rel_path, ()))]
     # Draft isolation is disclosure control, so it applies here too — the keyword
     # path must not be a way around it. Marking only (rank=False): keyword search
     # stays rank-by-FTS-relevance, exactly as it does for supersession above.
@@ -651,6 +653,58 @@ def keyword_only(
     hits = apply_belief_visibility(store, hits, persona, rank=False)
     hits, withheld = apply_disclosure(store, hits, envelope)
     return HitList.of(hits[:k], withheld=withheld, envelope=envelope)
+
+
+def _under_prefix(rel_path: str, prefixes) -> bool:
+    """True iff rel_path is AT or UNDER one of the allowed manifest prefixes."""
+    for p in prefixes:
+        p = str(p).rstrip("/")
+        if rel_path == p or rel_path.startswith(p + "/"):
+            return True
+    return False
+
+
+def enclave_query(
+    store: Store,
+    query: str,
+    *,
+    allowed_prefixes,
+    k: int = 10,
+    current_only: bool = True,
+    cite_only_out_of_scope: bool = False,
+    persona: str | None = None,
+    envelope=None,
+) -> list[Hit]:
+    """The integrator enclave's query path — capability-scoped retrieval, NO LLM.
+
+    Returns only chunks whose rel_path is UNDER one of ``allowed_prefixes`` (the caller's
+    manifest scope). This is the query-time fail-closed predicate the DR panel (2026-08-30)
+    prescribed as defense-in-depth ATOP import-time manifests: a scoped caller cannot pull
+    out-of-manifest content through a union index, and prompt-injecting one seat cannot turn
+    the union view into a confused deputy that leaks another compartment (Q5; CaMeL
+    2503.18813, OWASP LLM06). ``current_only`` default-excludes closed records (dual-view).
+
+    With ``cite_only_out_of_scope`` the out-of-scope hits are returned with their BYTES
+    stripped (text/title blanked, ``boosts['cite_only']=1.0``) so the enclave can report
+    'a conflicting record exists at <path>' by reference — text flows only for in-scope
+    chunks. This is the capability discipline that lets Fable keep integrator RECALL without
+    an agent holding the union index in its context.
+    """
+    from dataclasses import replace as _replace
+
+    prefixes = tuple(p for p in (allowed_prefixes or ()) if p)
+    hits = keyword_only(
+        store, query, k=max(k * 5, 25), persona=persona, envelope=envelope,
+        current_only=current_only,
+    )
+    scoped: list[Hit] = []
+    for h in hits:
+        if _under_prefix(h.rel_path, prefixes):
+            scoped.append(h)
+        elif cite_only_out_of_scope:
+            scoped.append(_replace(h, text="", title="",
+                                   boosts={**h.boosts, "cite_only": 1.0}))
+    return scoped[:k]
 
 
 def _fts_query(q: str) -> str:
