@@ -123,3 +123,35 @@ def test_c2_12_leading_indented_supersedes_mints_no_edge(fm, ind, form):
 def test_c2_12_leading_column0_supersedes_still_mints():   # NO-REGRESSION (case A control)
     assert _sup("**Supersedes:** [[old]]\n") == ["old"]
     assert _sup("---\nt: 1\n---\n**Supersedes:** [[old]]\n") == ["old"]
+
+
+# ── SUP-15 (2026-08-31): disclaimer lines + prose fragments mint no edge; bare
+#    clauses must be slug-shaped (CSO measurement: 16 rows / ~6 resolving) ──
+def test_sup15_supersedes_nothing_with_trailing_prose_mints_no_edge():
+    # The measured worst case: "**Supersedes nothing** — `X.md` ..." minted the
+    # prose fragment as a tgt_slug.
+    assert _sup("# Doc\n\n**Supersedes nothing** — `HACKER_NEWS_STRATEGY.md` explains why.\n") == []
+
+def test_sup15_disclaimer_first_word_settles_the_line():
+    assert _sup("# Doc\n\nSupersedes nothing but updates [[real-slug]] in passing.\n") == []
+
+def test_sup15_bare_prose_clause_mints_no_edge():
+    assert _sup("# Doc\n\n**Supersedes:** the July plan\n") == []
+
+def test_sup15_emdash_terminates_clause_slug_still_minted():
+    assert _sup("# Doc\n\n**Supersedes:** old-plan-v1 — see the lair for context\n") == ["old-plan-v1"]
+
+def test_sup15_endash_terminates_clause():
+    assert _sup("# Doc\n\n**Supersedes:** old-plan-v1 – rationale follows\n") == ["old-plan-v1"]
+
+def test_sup15_frontmatter_prose_value_mints_no_edge():
+    assert _sup("---\nsupersedes: the old strategy from July\n---\n# Doc\n") == []
+
+def test_sup15_wikilink_after_real_declaration_still_works():   # NO-REGRESSION
+    assert _sup("# Doc\n\n**Supersedes:** [[X]] — replaced after the audit\n") == ["X"]
+
+def test_sup15_bare_filename_slug_still_works():   # NO-REGRESSION (L5)
+    assert _sup("# Doc\n\n**Supersedes:** HACKER_NEWS_STRATEGY.md\n") == ["HACKER_NEWS_STRATEGY.md"]
+
+def test_sup15_frontmatter_real_slug_still_works():   # NO-REGRESSION (SUP-14)
+    assert _sup("---\nsupersedes: real-slug-v2.md\n---\n# Doc\n") == ["real-slug-v2.md"]

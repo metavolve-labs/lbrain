@@ -24,7 +24,7 @@ HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 # de-ranked by the redirect stub that points AT it. A supersession pointing the
 # wrong way is worse than a missing one: it buries the live record and promotes
 # the dead one.
-SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
+SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|—–]*)")
 
 # SUP-05: a supersession declaration is a real edge only when it is the author's
 # OWN column-0 statement — not a line QUOTED (`>`), INDENTED (code), or FENCED
@@ -32,8 +32,17 @@ SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
 # review quoting the Anomaly Register's own Supersedes line minted an edge that
 # de-ranked the live register. The regex cannot see fences, so the scan is
 # line-aware: it tracks fence state and rejects non-column-0 lines.
-_SUPERSEDE_LINE_RE = re.compile(r"(?i)^\*{0,2}\s*supersedes\b[\s:*]*([^\n·|]*)")
+_SUPERSEDE_LINE_RE = re.compile(r"(?i)^\*{0,2}\s*supersedes\b[\s:*]*([^\n·|—–]*)")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+# SUP-15 (CSO 2026-08-31 measurement: main brain 16 rows / ~6 resolving): a bare
+# (non-wikilink) clause is an edge only when it is SHAPED like a resolvable slug —
+# one token, slug charset. Prose fragments ("nothing — `X.md` explains why", "the
+# July plan") minted rows whose tgt_slug can never match a document, so flagged
+# coverage silently fell below the every-record bar. The em/en-dash clause stop
+# above is half of the fix; this shape gate is the other half. A slug containing
+# an em/en-dash is the accepted (exotic) casualty.
+_SLUG_SHAPE_RE = re.compile(r"^[\w.\-/]+$")
 
 # C2-12 (case A): the indent/quote/fence rejection in _body_supersedes must run on
 # the body with LEADING WHITESPACE PRESERVED. python-frontmatter's `.content`
@@ -73,7 +82,14 @@ def _body_supersedes(body: str) -> list[str]:
         clause = m.group(1).strip().strip("*").strip()
         if clause.lower() in _SUPERSEDE_EMPTY:
             continue
+        # SUP-15: "Supersedes nothing but updates [[X]]" is a DISCLAIMER — the
+        # author's first word settles it, whatever follows on the line.
+        first = clause.split()[0].strip("*").rstrip(":,.").lower() if clause else ""
+        if first in _SUPERSEDE_EMPTY:
+            continue
         links = WIKILINK_RE.findall(clause)
+        if not links and not _SLUG_SHAPE_RE.match(clause):
+            continue  # SUP-15: bare clause that isn't slug-shaped — prose, not an edge
         raw_slugs = links or [clause]
         for s in raw_slugs:
             s_clean = s.strip().lower()
@@ -84,7 +100,7 @@ def _body_supersedes(body: str) -> list[str]:
 # "nothing" / "none" / "n/a" is an author saying explicitly that this document
 # replaces no other. Treating it as a value produced no edge by luck (no wikilink
 # to find); being explicit costs one check and documents the intent.
-_SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—"}
+_SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—", "–"}
 
 
 def _sup_slugs(raw: str) -> list[str]:
@@ -291,7 +307,13 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     for xs in _flatten_supersedes(fm_sup):
         xs_strip = xs.strip()
         if xs_strip.lower() not in _SUPERSEDE_EMPTY:
-            extracted = WIKILINK_RE.findall(xs_strip) or [xs_strip]
+            extracted = WIKILINK_RE.findall(xs_strip)
+            if not extracted:
+                # SUP-15: frontmatter bare value must be slug-shaped too — a prose
+                # sentence in `supersedes:` mints a row no resolver can match.
+                if not _SLUG_SHAPE_RE.match(xs_strip):
+                    continue
+                extracted = [xs_strip]
             for s in extracted:
                 if s.strip().lower() not in _SUPERSEDE_EMPTY:
                     supersedes.append(s)
