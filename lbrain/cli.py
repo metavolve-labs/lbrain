@@ -2197,6 +2197,83 @@ def belief_retract(slug, reason):
         store.close()
 
 
+@main.group()
+def epoch():
+    """Atomic epochs — build → validate → swap as the only write path.
+
+    Design: ATOMIC-EPOCHS-DESIGN-2026-08-31.md v1.4. Opt-in per home; a home with
+    no epochs/CURRENT behaves exactly as before."""
+
+
+@epoch.command("build")
+@click.option("--full", is_flag=True, help="Fresh build (default is delta from the current epoch).")
+@click.option("--confirm-source-removed", multiple=True,
+              help="Assert that this source root was REMOVED on purpose — without it, a "
+                   "vanished or hollow root refuses promotion (mass-absence is not deletion).")
+@click.option("--keep", default=3, show_default=True, help="Prior epochs to retain.")
+@click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
+def epoch_build_cmd(full, confirm_source_removed, keep, max_bytes):
+    """Build a candidate, run gate v2, publish atomically."""
+    from .epoch import BuilderBusy, EpochError
+    from .epoch_build import build
+
+    cfg = Config.load()
+    try:
+        report = build(CONFIG_DIR, cfg, delta=not full,
+                       confirm_source_removed=confirm_source_removed,
+                       keep=keep, max_bytes=max_bytes)
+    except BuilderBusy as e:
+        click.secho(f"✗ {e}", fg="yellow")
+        sys.exit(3)
+    except EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
+    click.secho(
+        f"✓ epoch {report['epoch_id']} PUBLISHED — docs: {report['docs']}, "
+        f"scan {report['scan_start']} → {report['scan_end']}"
+        + (f", pruned: {len(report['pruned'])}" if report.get("pruned") else ""),
+        fg="green")
+    if report.get("durability_caveat"):
+        click.secho(f"  ⚠ {report['durability_caveat']}", fg="yellow")
+
+
+@epoch.command("status")
+def epoch_status_cmd():
+    """Current epoch, retained epochs, and the freshness watermark."""
+    import sqlite3 as _sq
+
+    from .epoch import current_epoch_id, epoch_db, leased_epochs, list_epochs
+
+    cur = current_epoch_id(CONFIG_DIR)
+    if cur is None:
+        click.echo("legacy layout — no epoch has been published for this home")
+        return
+    click.echo(f"CURRENT: {cur}")
+    con = _sq.connect(str(epoch_db(CONFIG_DIR, cur)))
+    try:
+        meta = dict(con.execute(
+            "SELECT key, value FROM meta WHERE key IN "
+            "('watermark_scan_start','watermark_scan_end','epoch_id')"))
+    finally:
+        con.close()
+    click.echo(f"  index current as of: {meta.get('watermark_scan_end', 'unknown')}")
+    leased = leased_epochs(CONFIG_DIR)
+    for e in list_epochs(CONFIG_DIR):
+        marks = ("*" if e == cur else " ") + ("L" if e in leased else " ")
+        click.echo(f"  {marks} {e}")
+
+
+@epoch.command("prune")
+@click.option("--keep", default=3, show_default=True)
+@click.option("--max-bytes", default=None, type=int)
+def epoch_prune_cmd(keep, max_bytes):
+    """Remove old epochs (never CURRENT, leased, or .failed forensics)."""
+    from .epoch import prune
+
+    removed = prune(CONFIG_DIR, keep=keep, max_bytes=max_bytes)
+    click.echo(f"pruned: {len(removed)}" + (f" — {', '.join(removed)}" if removed else ""))
+
+
 # The `python -m lbrain.cli` entry point. MUST stay the last statement in this
 # file: it used to sit mid-module (line 943 at d58b45f), so main() was dispatched
 # before the rest of the file had been executed and EVERY command defined below it
