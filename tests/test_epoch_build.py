@@ -110,11 +110,11 @@ def test_interrupted_build_leaves_the_live_brain_untouched(tmp_path, monkeypatch
     _real = epoch_build._run_cli
     crashed = {"done": False}
 
-    def die_once(args, staging_home, lbrain_bin):
+    def die_once(args, staging_home, lbrain_bin, **kw):
         if args[0] == "embed" and not crashed["done"]:
             crashed["done"] = True
             raise epoch_build.EpochError("simulated crash mid-embed")
-        return _real(args, staging_home, lbrain_bin)
+        return _real(args, staging_home, lbrain_bin, **kw)
 
     monkeypatch.setattr(epoch_build, "_run_cli", die_once)
     with pytest.raises(epoch_build.EpochError):
@@ -180,3 +180,70 @@ def test_wrong_dimension_is_refused(tmp_path):
     failures = epoch_build.validate_candidate(
         home / "brain.db", embedding_dim=1536, sources=srcs, prior_inv={}, confirmed_removed=set())
     assert any("dim" in f for f in failures), failures
+
+
+# ---------- CSO RED/GREEN round 1 — build-side REDs ----------
+
+def test_r1_heartbeat_runs_DURING_a_long_stage(tmp_path):
+    """R1: a real embed runs minutes; the lock must stay fresh mid-stage, not
+    only between stages."""
+    home = tmp_path / "h"
+    (home / "epochs").mkdir(parents=True)
+    lock = epoch.BuilderLock(home).acquire()
+    import json as _json
+    hb0 = _json.loads(lock.meta.read_text())["heartbeat"]
+    epoch_build._run_cli(["2"], home, "sleep", lock=lock, hb_interval=0.3)
+    hb1 = _json.loads(lock.meta.read_text())["heartbeat"]
+    assert hb1 > hb0, "no heartbeat happened during the stage"
+    lock.release()
+
+
+def test_r1b_seizure_mid_stage_aborts_the_running_build(tmp_path):
+    """A builder whose lock was seized must abort its stage, not keep building."""
+    home = tmp_path / "h"
+    (home / "epochs").mkdir(parents=True)
+    lock = epoch.BuilderLock(home).acquire()
+    # simulate the usurper: rewrite meta with a different nonce
+    import json as _json
+    m = _json.loads(lock.meta.read_text())
+    m["nonce"] = "someone-else"
+    lock.meta.write_text(_json.dumps(m))
+    with pytest.raises(epoch.LockLost):
+        epoch_build._run_cli(["5"], home, "sleep", lock=lock, hb_interval=0.2)
+
+
+def test_r3_scrambled_fts_bindings_are_refused(tmp_path):
+    """R3: same texts under the WRONG docs must fail the probe — 'something
+    returned' is a heartbeat, not a check."""
+    home, srcs = _mk_home(tmp_path)
+    _seed_legacy(home)
+    db = home / "brain.db"
+    con = epoch_build._connect_vec(db)
+    try:
+        con.execute("UPDATE fts_chunks SET rel_path = 'scrambled/wrong.md'")
+        con.commit()
+    finally:
+        con.close()
+    failures = epoch_build.validate_candidate(
+        db, embedding_dim=DIM, sources=srcs, prior_inv={}, confirmed_removed=set())
+    assert any("bindings suspect" in f for f in failures), failures
+
+
+def test_r4_tail_zeroed_vector_is_caught(tmp_path):
+    """R4: the realistic embed-failure shape is tail-shaped; a prefix sample is
+    blind to it. Full scan must catch a single zeroed LAST row."""
+    home, srcs = _mk_home(tmp_path)
+    _seed_legacy(home)
+    db = home / "brain.db"
+    con = epoch_build._connect_vec(db)
+    try:
+        last = con.execute("SELECT MAX(rowid) FROM vec_chunks").fetchone()[0]
+        con.execute("DELETE FROM vec_chunks WHERE rowid = ?", (last,))
+        con.execute("INSERT INTO vec_chunks (rowid, embedding) VALUES (?, ?)",
+                    (last, struct.pack(f"{DIM}f", *([0.0] * DIM))))
+        con.commit()
+    finally:
+        con.close()
+    failures = epoch_build.validate_candidate(
+        db, embedding_dim=DIM, sources=srcs, prior_inv={}, confirmed_removed=set())
+    assert any("zero norm" in f for f in failures), failures

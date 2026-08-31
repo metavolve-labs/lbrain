@@ -2268,9 +2268,13 @@ def epoch_status_cmd():
 @click.option("--max-bytes", default=None, type=int)
 def epoch_prune_cmd(keep, max_bytes):
     """Remove old epochs (never CURRENT, leased, or .failed forensics)."""
-    from .epoch import prune
+    from .epoch import BuilderBusy, prune
 
-    removed = prune(CONFIG_DIR, keep=keep, max_bytes=max_bytes)
+    try:
+        removed = prune(CONFIG_DIR, keep=keep, max_bytes=max_bytes)
+    except BuilderBusy as e:
+        click.secho(f"✗ prune refused: {e} (a build is live — rmtree never races it)", fg="yellow")
+        sys.exit(3)
     click.echo(f"pruned: {len(removed)}" + (f" — {', '.join(removed)}" if removed else ""))
 
 

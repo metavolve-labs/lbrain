@@ -14,10 +14,12 @@ import pytest
 from lbrain import epoch
 
 
-def _mk_epoch(home, eid, size=0):
+def _mk_epoch(home, eid, size=0, vetted=True):
     d = epoch.epoch_dir(home, eid)
     d.mkdir(parents=True)
     (d / "brain.db").write_bytes(b"x" * size)
+    if vetted:  # R2: publish requires the gate's vetted-marker
+        (d / "build-manifest.json").write_text("{}", encoding="utf-8")
     return d
 
 
@@ -165,3 +167,52 @@ def test_lease_release_cleans_up(tmp_path):
     assert epoch.leased_epochs(tmp_path) == {"E1"}
     epoch.lease_release(tmp_path, "E1")
     assert epoch.leased_epochs(tmp_path) == set()
+
+
+# ---------- CSO RED/GREEN round 1 (2026-08-31T23:25Z) — one test per confirmed RED ----------
+
+def test_r2_publish_refuses_an_unvetted_epoch(tmp_path):
+    """R2: existence is not vetting — a torn kill-mid-VACUUM dir (or a hand-built
+    one on the manual-rollback path) must never reach CURRENT."""
+    _mk_epoch(tmp_path, "TORN", size=1, vetted=False)
+    with pytest.raises(epoch.EpochError, match="never gate-vetted"):
+        epoch.publish(tmp_path, "TORN")
+
+
+def test_r1b_deposed_builder_aborts_and_never_stomps_the_usurper(tmp_path):
+    a = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()
+    time.sleep(0.1)
+    b = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()  # seizes stale lock
+    with pytest.raises(epoch.LockLost):
+        a.heartbeat()          # the victim learns, loudly
+    assert not a.held
+    assert b._owns()           # the usurper's lease was NOT stomped
+    a.release()                # victim release is a no-op on a lock it lost
+    assert b._owns()
+    b.release()
+
+
+def test_r8_building_dirs_are_not_epochs(tmp_path):
+    _mk_epoch(tmp_path, "E1", size=1)
+    d = epoch.epochs_root(tmp_path) / ("E9" + epoch.BUILDING_SUFFIX)
+    d.mkdir(parents=True)
+    (d / "brain.db").write_bytes(b"partial")
+    assert epoch.list_epochs(tmp_path) == ["E1"]
+
+
+def test_r8_prune_sweeps_orphaned_building_debris(tmp_path):
+    _mk_epoch(tmp_path, "E1", size=1)
+    epoch.publish(tmp_path, "E1")
+    d = epoch.epochs_root(tmp_path) / ("E0" + epoch.BUILDING_SUFFIX)
+    d.mkdir(parents=True)
+    (d / "brain.db").write_bytes(b"kill -9 debris")
+    epoch.prune(tmp_path, keep=3)
+    assert not d.exists()  # lock-held sweep: provably no live builder owns it
+
+
+def test_r8_prune_refuses_while_a_builder_is_live(tmp_path):
+    _mk_epoch(tmp_path, "E1", size=1)
+    a = epoch.BuilderLock(tmp_path).acquire()
+    with pytest.raises(epoch.BuilderBusy):
+        epoch.prune(tmp_path, keep=3)  # rmtree never races a live build
+    a.release()

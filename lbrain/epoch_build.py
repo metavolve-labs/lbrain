@@ -123,14 +123,34 @@ def _source_digest(docs: dict[str, str]) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-def _run_cli(args: list[str], staging_home: Path, lbrain_bin: str) -> str:
+def _run_cli(args: list[str], staging_home: Path, lbrain_bin: str,
+             lock=None, hb_interval: float = 10.0) -> str:
+    """Run a pipeline stage in the staging home, HEARTBEATING the builder lock
+    while it runs (CSO R1: a real embed runs minutes; heartbeating only between
+    stages let a live builder go stale mid-stage and be seized). A LockLost from
+    the heartbeat propagates and aborts the build — the R1b-correct outcome."""
     env = dict(os.environ)
     env["LBRAIN_HOME"] = str(staging_home)
-    p = subprocess.run([lbrain_bin, *args], env=env, capture_output=True, text=True)
-    if p.returncode != 0:
-        tail = (p.stdout + "\n" + p.stderr)[-2000:]
-        raise EpochError(f"`lbrain {' '.join(args)}` failed in staging (rc {p.returncode}):\n{tail}")
-    return p.stdout
+    proc = subprocess.Popen([lbrain_bin, *args], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last_hb = time.monotonic()
+    try:
+        while True:
+            try:
+                out, err = proc.communicate(timeout=1.0)
+                break
+            except subprocess.TimeoutExpired:
+                if lock is not None and time.monotonic() - last_hb >= hb_interval:
+                    lock.heartbeat()  # LockLost aborts — never build without the lock
+                    last_hb = time.monotonic()
+    except BaseException:
+        proc.kill()
+        proc.communicate()
+        raise
+    if proc.returncode != 0:
+        tail = (out + "\n" + err)[-2000:]
+        raise EpochError(f"`lbrain {' '.join(args)}` failed in staging (rc {proc.returncode}):\n{tail}")
+    return out
 
 
 def _purge_source(db_path: Path, src_root: str, embedding_dim: int) -> int:
@@ -206,20 +226,23 @@ def validate_candidate(
                     "--confirm-source-removed to assert intent")
 
         # -- vector sanity (Grok G3: the right number of zeros) --
+        # FULL scan, not first-32 (CSO R4: the realistic embed-failure shape is
+        # TAIL-shaped — rows insert in order and failures hit the end; a prefix
+        # sample is blind to exactly the incident it exists to catch). At our
+        # scale the full pass is cheap; correctness beats a millisecond.
         if vecs:
             stored_dim = None
-            sample = con.execute("SELECT rowid, embedding FROM vec_chunks LIMIT 32").fetchall()
-            bad_norm = nan = 0
+            bad_norm = nan = scanned = 0
             first = None
-            for r in sample:
+            for r in con.execute("SELECT rowid, embedding FROM vec_chunks"):
                 blob = r["embedding"]
                 n = len(blob) // 4
                 stored_dim = stored_dim or n
                 v = struct.unpack(f"{n}f", blob)
-                norm = math.sqrt(sum(x * x for x in v))
+                scanned += 1
                 if any(x != x for x in v):
                     nan += 1
-                if norm < 1e-6:
+                if math.sqrt(sum(x * x for x in v)) < 1e-6:
                     bad_norm += 1
                 if first is None:
                     first = (r["rowid"], blob)
@@ -227,9 +250,9 @@ def validate_candidate(
             if not dim_ok:
                 failures.append(f"vector dim {stored_dim} != configured {embedding_dim}")
             if nan:
-                failures.append(f"{nan}/{len(sample)} sampled vectors contain NaN")
+                failures.append(f"{nan}/{scanned} vectors contain NaN")
             if bad_norm:
-                failures.append(f"{bad_norm}/{len(sample)} sampled vectors have ~zero norm")
+                failures.append(f"{bad_norm}/{scanned} vectors have ~zero norm")
             # self-match: the space must answer about itself with distance ≈ 0
             if first is not None and dim_ok and not bad_norm:
                 rowid, blob = first
@@ -254,11 +277,16 @@ def validate_candidate(
             row = con.execute("SELECT rel_path, text FROM chunks LIMIT 1").fetchone()
             token = next((w for w in re.findall(r"[A-Za-z]{4,}", row["text"] or "")), None)
             if token:
-                got = con.execute(
-                    "SELECT rel_path FROM fts_chunks WHERE fts_chunks MATCH ? LIMIT 5",
-                    (f'"{token}"',)).fetchall()
-                if not got:
-                    failures.append(f"fts token probe {token!r} returned nothing")
+                got = {r["rel_path"] for r in con.execute(
+                    "SELECT rel_path FROM fts_chunks WHERE fts_chunks MATCH ? LIMIT 25",
+                    (f'"{token}"',))}
+                # CSO R3: "something returned" passes scrambled text↔doc bindings.
+                # The probe asserts the DOC we took the token from is among the hits
+                # (panel rule: golden queries with ASSERTED ids, not heartbeats).
+                if row["rel_path"] not in got:
+                    failures.append(
+                        f"fts token probe {token!r} did not return its own doc "
+                        f"{row['rel_path']!r} (got {sorted(got)[:3]}) — bindings suspect")
     finally:
         con.close()
     return failures
@@ -317,7 +345,7 @@ def build(
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
             (staging / "config.toml").write_text(raw, encoding="utf-8")
 
-            _run_cli(["import", "--prune"], staging, lbrain_bin)
+            _run_cli(["import", "--prune"], staging, lbrain_bin, lock=lock)
             lock.heartbeat()
             # A CONFIRMED-removed root's docs are purged deliberately here — prune's
             # own mount-gone guard (correctly) refuses to drop them, so intent has
@@ -325,9 +353,9 @@ def build(
             for src in confirmed:
                 _purge_source(staging_db, src, cfg.embedding_dim)
             if prior_db is not None:
-                _run_cli(["embed", "--reuse-from", str(prior_db)], staging, lbrain_bin)
+                _run_cli(["embed", "--reuse-from", str(prior_db)], staging, lbrain_bin, lock=lock)
             else:
-                _run_cli(["embed", "--stale"], staging, lbrain_bin)
+                _run_cli(["embed", "--stale"], staging, lbrain_bin, lock=lock)
             lock.heartbeat()
             scan_end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
@@ -394,9 +422,11 @@ def build(
             report.update({"published": True, "docs": sum(len(d) for d in new_inv.values()),
                            "durability_caveat": caveat, "scan_start": scan_start,
                            "scan_end": scan_end})
+            # prune runs INSIDE the lock (CSO R8): rmtree must never race a live
+            # build's staging, and lock-held is what makes .building orphan-sweep safe.
+            from .epoch import prune
+            report["pruned"] = prune(home, keep=keep, max_bytes=max_bytes, lock=lock)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    from .epoch import prune
-    report["pruned"] = prune(home, keep=keep, max_bytes=max_bytes)
     return report

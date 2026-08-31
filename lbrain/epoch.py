@@ -28,6 +28,7 @@ CURRENT_NAME = "CURRENT"
 LOCK_DIRNAME = ".builder.lock.d"
 LEASES_DIRNAME = ".leases"
 FAILED_SUFFIX = ".failed"
+BUILDING_SUFFIX = ".building"
 
 # Heartbeat lease (design v1.2 #6 + vendor3): staleness is decided by heartbeat AGE,
 # never by PID liveness — PID polling deadlocks after a reboot hands the saved PID to
@@ -42,6 +43,14 @@ class EpochError(RuntimeError):
 
 class BuilderBusy(EpochError):
     """Another builder holds the lock and its heartbeat is fresh."""
+
+
+class LockLost(EpochError):
+    """This builder's lock was seized (stale takeover) — the build MUST abort.
+
+    CSO R1b: without ownership verification, a deposed builder's next heartbeat
+    silently recreated meta inside the usurper's lock dir — two builders each
+    believing they held it, the victim feeding the usurper's staleness clock."""
 
 
 # ---------- layout ----------
@@ -144,6 +153,14 @@ def publish(home: Path, epoch_id: str, *, retries: int = 5, backoff: float = 0.2
     root = epochs_root(home)
     if not epoch_db(home, epoch_id).exists():
         raise EpochError(f"refusing to publish {epoch_id!r}: {epoch_db(home, epoch_id)} missing")
+    # CSO R2: existence is not vetting. build-manifest.json is written ONLY after
+    # the post-vacuum integrity re-check, so it is the vetted-marker — without it,
+    # publish() would happily point CURRENT at a torn kill-mid-VACUUM partial, and
+    # manual rollback is exactly the emergency where an operator would do that.
+    if not (epoch_dir(home, epoch_id) / "build-manifest.json").exists():
+        raise EpochError(
+            f"refusing to publish {epoch_id!r}: no build-manifest.json — this epoch "
+            "was never gate-vetted (a torn or hand-built dir must not reach CURRENT)")
     root.mkdir(parents=True, exist_ok=True)
     tmp = root / (CURRENT_NAME + ".tmp")
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -187,16 +204,30 @@ class BuilderLock:
         self.meta = self.dir / "builder.json"
         self.stale_after = stale_after
         self.held = False
+        # Ownership nonce (CSO R1b): every heartbeat verifies THIS builder still
+        # owns the lock before writing; a deposed builder aborts instead of
+        # stomping the usurper's lease.
+        self.nonce = os.urandom(16).hex()
 
     def _write_meta(self) -> None:
         body = json.dumps({
             "host": socket.gethostname(),
             "pid": os.getpid(),
+            "nonce": self.nonce,
             "heartbeat": time.time(),
         })
         tmp = self.dir / "builder.json.tmp"
         tmp.write_text(body, encoding="utf-8")
         os.replace(str(tmp), str(self.meta))
+
+    def _owns(self) -> bool:
+        try:
+            m = json.loads(self.meta.read_text(encoding="utf-8"))
+            return m.get("nonce") == self.nonce
+        except OSError:
+            return False
+        except Exception:
+            return False
 
     def _meta_age(self) -> float | None:
         try:
@@ -235,15 +266,24 @@ class BuilderLock:
         raise BuilderBusy("could not acquire the builder lock")
 
     def heartbeat(self) -> None:
-        if self.held:
-            self._write_meta()
+        if not self.held:
+            return
+        if not self._owns():
+            self.held = False
+            raise LockLost(
+                "builder lock was seized by another process (stale takeover) — "
+                "aborting this build; the usurper's lease is not ours to touch")
+        self._write_meta()
 
     def release(self) -> None:
         if not self.held:
             return
         try:
-            self.meta.unlink(missing_ok=True)
-            self.dir.rmdir()
+            if self._owns():  # R1b: never delete a lock we no longer own
+                self.meta.unlink(missing_ok=True)
+                self.dir.rmdir()
+        except OSError:
+            pass
         finally:
             self.held = False
 
@@ -292,8 +332,9 @@ def list_epochs(home: Path) -> list[str]:
         return []
     out = []
     for d in root.iterdir():
-        if not d.is_dir() or d.name.startswith(".") or d.name.endswith(FAILED_SUFFIX):
-            continue
+        if (not d.is_dir() or d.name.startswith(".") or d.name.endswith(FAILED_SUFFIX)
+                or d.name.endswith(BUILDING_SUFFIX)):
+            continue  # CSO R8: a kill -9'd .building dir is not a publishable epoch
         out.append(d.name)
     return sorted(out)
 
@@ -302,7 +343,8 @@ def _dir_bytes(path: Path) -> int:
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
 
 
-def prune(home: Path, *, keep: int = 3, max_bytes: int | None = None) -> list[str]:
+def prune(home: Path, *, keep: int = 3, max_bytes: int | None = None,
+          lock: "BuilderLock | None" = None) -> list[str]:
     """Remove old epochs beyond `keep` (and beyond `max_bytes` total — Grok #5: N=3
     of large vector DBs is the first quota incident; cap BYTES, not just count).
 
@@ -310,7 +352,34 @@ def prune(home: Path, *, keep: int = 3, max_bytes: int | None = None) -> list[st
     IndexDeletionPolicy lesson), .failed forensics. A deletion failure (DrvFs
     sharing violation) is logged loudly and SKIPPED — never retried in a loop that
     blocks rebuilds for the lifetime of the longest reader (Grok G2).
+
+    CSO R8: prune runs UNDER the builder lock — pass a held lock, or one is
+    acquired (and BuilderBusy refuses the prune while a build is live, instead of
+    racing rmtree against a live build's staging). Holding the lock also makes
+    orphaned `.building` dirs provably dead, so they are swept here — the one
+    place their removal is safe by construction.
     """
+    own_lock = None
+    if lock is None:
+        own_lock = BuilderLock(home).acquire()
+    try:
+        return _prune_locked(home, keep=keep, max_bytes=max_bytes)
+    finally:
+        if own_lock is not None:
+            own_lock.release()
+
+
+def _prune_locked(home: Path, *, keep: int, max_bytes: int | None) -> list[str]:
+    # lock held ⇒ no live builder ⇒ every .building dir is an orphan (kill -9 debris)
+    root = epochs_root(home)
+    if root.is_dir():
+        for d in root.iterdir():
+            if d.is_dir() and d.name.endswith(BUILDING_SUFFIX):
+                try:
+                    shutil.rmtree(d)
+                    print(f"[lbrain] swept orphaned build staging: {d.name}")
+                except OSError as err:
+                    print(f"[lbrain] WARNING: orphan sweep of {d.name} failed ({err}) — skipped")
     current = current_epoch_id(home)
     leased = leased_epochs(home)
     epochs = list_epochs(home)
