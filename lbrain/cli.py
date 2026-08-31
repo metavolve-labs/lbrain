@@ -793,7 +793,11 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
         with store.transaction():
             for path in files:
                 doc = parse(path, repo_root=src)
-                existing_hash = store.get_doc_hash(doc.rel_path)
+                # MS-01: resolve row identity by FILE — a cross-source rel_path
+                # collision (e.g. three plates each with a root `_INDEX.md`)
+                # must not thrash one row on every import.
+                doc.rel_path, existing_hash = store.resolve_rel_path(
+                    doc.rel_path, str(doc.path), Path(src).name)
                 # Supersession edges are resolved at search time, so keep them current
                 # for every doc — even ones whose chunks are unchanged (a Supersedes
                 # marker can be added/removed without re-chunking). With foreign_keys=ON

@@ -328,6 +328,50 @@ class Store:
         ).fetchone()
         return row["doc_hash"] if row else None
 
+    def resolve_rel_path(self, rel_path: str, abs_path: str, src_name: str) -> tuple[str, str | None]:
+        """Cross-source rel_path collision guard (MS-01, 2026-08-31).
+
+        Row identity is the FILE, not the bare key: rel_path is PRIMARY KEY but
+        is computed relative to whichever source root offered the file, so two
+        roots can each offer a root-level `_INDEX.md`. Keyed on rel_path alone,
+        those files thrash a single row — chunks and vectors rewritten on every
+        import, `doctor` permanently CHANGED on the losers (measured on the CCO
+        brain: 3 plates × `_INDEX.md`, "updated" forever, never converging).
+
+        Resolution order:
+        - a row already holding this abs_path keeps its key, disambiguated or
+          not — stable across re-imports;
+        - a bare key held by a DIFFERENT file still on disk forces
+          `<src_name>/<rel_path>` (both files are alive; neither may take the
+          other's row), with a stable path-hash suffix as the last resort when
+          even the source names collide;
+        - a key held by a file that is GONE is taken over, preserving the
+          moved-source behavior that predates this guard.
+
+        Returns (effective_rel_path, existing_doc_hash_or_None).
+        """
+        row = self.db.execute(
+            "SELECT rel_path, doc_hash FROM docs WHERE abs_path = ?", (abs_path,)
+        ).fetchone()
+        if row:
+            return row["rel_path"], row["doc_hash"]
+        eff = rel_path
+        other = self.db.execute(
+            "SELECT abs_path, doc_hash FROM docs WHERE rel_path = ?", (eff,)
+        ).fetchone()
+        if other and other["abs_path"] != abs_path and os.path.exists(other["abs_path"]):
+            eff = f"{src_name}/{rel_path}"
+            other = self.db.execute(
+                "SELECT abs_path, doc_hash FROM docs WHERE rel_path = ?", (eff,)
+            ).fetchone()
+            if other and other["abs_path"] != abs_path and os.path.exists(other["abs_path"]):
+                import hashlib
+                eff = f"{src_name}-{hashlib.sha1(abs_path.encode()).hexdigest()[:8]}/{rel_path}"
+                other = self.db.execute(
+                    "SELECT abs_path, doc_hash FROM docs WHERE rel_path = ?", (eff,)
+                ).fetchone()
+        return eff, (other["doc_hash"] if other else None)
+
     def doc_metadata_differs(self, doc: Doc) -> bool:
         """True if the stored row disagrees with this Doc's FRONTMATTER-derived
         fields, even though the body hash matches.

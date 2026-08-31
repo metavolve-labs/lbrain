@@ -161,8 +161,12 @@ def survey(store, sources) -> Survey:
                 s.unreadable.append(f"{path}: {e}")
                 continue
             s.on_disk += 1
+            # MS-01: same file-identity resolution as `import` — the survey must
+            # compare each file against ITS row, not against whichever same-named
+            # file from another root last held the bare key.
+            doc.rel_path, existing = store.resolve_rel_path(
+                doc.rel_path, str(doc.path), src.name)
             seen.add(doc.rel_path)
-            existing = store.get_doc_hash(doc.rel_path)
             if existing is None:
                 s.unindexed.append(doc.rel_path)
             elif existing != doc.doc_hash:
