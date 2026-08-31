@@ -350,9 +350,19 @@ class Store:
 
         Returns (effective_rel_path, existing_doc_hash_or_None).
         """
+        # DD-01: prefer the row whose key MATCHES the freshly-computed rel_path,
+        # and order the fallback — on a brain with historical duplicate-abs_path
+        # twins, a bare fetchone() picks a row nondeterministically, which could
+        # latch the scan onto the stale twin and starve the canonical row.
         row = self.db.execute(
-            "SELECT rel_path, doc_hash FROM docs WHERE abs_path = ?", (abs_path,)
+            "SELECT rel_path, doc_hash FROM docs WHERE abs_path = ? AND rel_path = ?",
+            (abs_path, rel_path),
         ).fetchone()
+        if row is None:
+            row = self.db.execute(
+                "SELECT rel_path, doc_hash FROM docs WHERE abs_path = ? ORDER BY rel_path",
+                (abs_path,),
+            ).fetchone()
         if row:
             return row["rel_path"], row["doc_hash"]
         eff = rel_path
@@ -464,6 +474,52 @@ class Store:
             self.db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (cid,))
         self.db.execute("DELETE FROM fts_chunks WHERE rel_path = ?", (rel_path,))
         self.db.execute("DELETE FROM chunks WHERE rel_path = ?", (rel_path,))
+
+    def dedupe_identity(self, seen_rel_paths) -> list[tuple[str, str]]:
+        """DD-01 (2026-08-31): collapse duplicate-abs_path doc rows onto the key
+        the current scan actually computed.
+
+        MS-01 made the FILE the row identity going forward, but historical
+        subdir imports left twin rows — same abs_path, different rel_path
+        (measured on the main brain: 196 groups). A stale twin is unreachable
+        by any root scan (its rel_path is never recomputed), never pruned (the
+        file exists), and keeps serving stale chunks plus pre-SUP-15
+        supersession rows that no re-mint can reach.
+
+        Canonical = a row whose rel_path is in ``seen_rel_paths`` (the keys the
+        just-finished import scan produced). Groups where NO row was seen are
+        left untouched — the file lives outside the scanned roots, and guessing
+        which twin is canonical would be a new defect, not a cleanup. If more
+        than one row of a group was seen, both stay: that means two configured
+        roots overlap, which is a config question, not a dedup.
+
+        Returns [(removed_rel_path, kept_rel_path), ...].
+        """
+        removed: list[tuple[str, str]] = []
+        seen = set(seen_rel_paths or ())
+        if not seen:
+            return removed
+        groups: dict[str, list[str]] = {}
+        for r in self.db.execute(
+            "SELECT abs_path, rel_path FROM docs WHERE abs_path IN "
+            "(SELECT abs_path FROM docs GROUP BY abs_path HAVING COUNT(*) > 1)"
+        ):
+            groups.setdefault(r["abs_path"], []).append(r["rel_path"])
+        for abs_path, rels in sorted(groups.items()):
+            kept = sorted(r for r in rels if r in seen)
+            if not kept:
+                continue
+            keep = kept[0]
+            for rel in sorted(rels):
+                if rel in kept:
+                    continue
+                self.delete_doc_chunks(rel)
+                self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+                self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
+                self.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (rel,))
+                self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+                removed.append((rel, keep))
+        return removed
 
     def prune_missing(
         self,

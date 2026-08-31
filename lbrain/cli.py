@@ -784,6 +784,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     updated_docs = 0
     unchanged_docs = 0
     meta_refreshed = 0   # frontmatter changed, body did not (A-401)
+    seen_rels: set[str] = set()   # keys this scan computed — feeds DD-01 dedupe
     beliefs_seen = 0
     total_chunks = 0
 
@@ -798,6 +799,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                 # must not thrash one row on every import.
                 doc.rel_path, existing_hash = store.resolve_rel_path(
                     doc.rel_path, str(doc.path), Path(src).name)
+                seen_rels.add(doc.rel_path)
                 # Supersession edges are resolved at search time, so keep them current
                 # for every doc — even ones whose chunks are unchanged (a Supersedes
                 # marker can be added/removed without re-chunking). With foreign_keys=ON
@@ -842,6 +844,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                 store.insert_chunks(chunks)
                 total_chunks += len(chunks)
 
+    # DD-01: collapse historical duplicate-abs_path twins onto the keys this
+    # scan computed. Runs on every import (not only --prune): the twins serve
+    # stale content NOW, and the pass is a no-op on a healthy brain.
+    with store.transaction():
+        deduped = store.dedupe_identity(seen_rels)
+
     pruned: list[str] = []
     if prune:
         try:
@@ -871,9 +879,14 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
         f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
         + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else "")
-        + (f", beliefs: {beliefs_seen}" if beliefs_seen else ""),
+        + (f", beliefs: {beliefs_seen}" if beliefs_seen else "")
+        + (f", identity-dupes collapsed: {len(deduped)}" if deduped else ""),
         fg="green",
     )
+    for rel, keep in deduped[:10]:
+        click.echo(f"    dup-identity collapsed: {rel}  →  {keep}")
+    if len(deduped) > 10:
+        click.echo(f"    … +{len(deduped) - 10} more")
     if pruned:
         for rel in pruned[:10]:
             click.echo(f"    pruned (gone or no longer indexable): {rel}")
