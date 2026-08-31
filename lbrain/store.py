@@ -773,25 +773,30 @@ class Store:
             ):
                 return 0, 0
 
+            # Bulk-load the source's (chunk_hash -> embedding) map in ONE sequential join
+            # scan. Per-row random reads over a /mnt/c (Windows-mount) source brain cross the
+            # WSL boundary on every read and hang in D-state I/O (CSO measured 45 min); the
+            # single scan is sequential and fast (his staged-local run: 156 s). First
+            # embedding per hash wins — identical text ⇒ identical vector, so dupes are equal.
+            src_map: dict[str, bytes] = {}
+            for r in src.execute(
+                "SELECT c.chunk_hash AS h, v.embedding AS emb "
+                "FROM chunks c JOIN vec_chunks v ON v.rowid = c.chunk_id "
+                "WHERE c.embedded = 1"
+            ):
+                if r["emb"] is not None and r["h"] not in src_map:
+                    src_map[r["h"]] = bytes(r["emb"])
+
             targets = self.db.execute(
                 "SELECT chunk_id, chunk_hash FROM chunks WHERE embedded = 0"
             ).fetchall()
             cids: list[int] = []
             blobs: list[bytes] = []
             for t in targets:
-                srow = src.execute(
-                    "SELECT chunk_id FROM chunks WHERE chunk_hash = ? AND embedded = 1 LIMIT 1",
-                    (t["chunk_hash"],),
-                ).fetchone()
-                if not srow:
-                    continue
-                emb = src.execute(
-                    "SELECT embedding FROM vec_chunks WHERE rowid = ?", (srow["chunk_id"],)
-                ).fetchone()
-                if not emb or emb["embedding"] is None:
-                    continue
-                cids.append(t["chunk_id"])
-                blobs.append(bytes(emb["embedding"]))
+                blob = src_map.get(t["chunk_hash"])
+                if blob is not None:
+                    cids.append(t["chunk_id"])
+                    blobs.append(blob)
             if cids:
                 self.write_embeddings(cids, blobs)  # validates blob width + sets embedded=1
                 self.db.commit()
