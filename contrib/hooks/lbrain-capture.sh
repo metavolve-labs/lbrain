@@ -27,6 +27,22 @@ TRANSCRIPT=$(printf '%s\n' "$INFO" | sed -n 1p)
 SESSION=$(printf '%s\n' "$INFO" | sed -n 2p)
 [ -z "$SESSION" ] && SESSION="${GROK_SESSION_ID:-}"
 
+# SEAT-HARNESS GUARD — BEFORE transcript discovery, so the refusal is UNCONDITIONAL
+# (AMBER-V2-2: a refusal logged only when discovery succeeds is fail-loud on the
+# happy path only). Presence-aware tests (RED-V2-1): ${VAR+set} — set-but-EMPTY is
+# what a broken launcher expansion produces (GROK_HOOK_EVENT=$UNSET); that is a seat
+# harness and must reach the refusal branch, never the Claude org-brain default.
+# Home-var decision: empty-string LBRAIN_HOME/GROK_LBRAIN_HOME counts as ABSENT (an
+# empty home is not a home) → refuse. Refusal log lives OUTSIDE any brain home.
+if [ "${GROK_HOOK_EVENT+set}" = set ] || [ "${GROK_SESSION_ID+set}" = set ]; then
+  if [ -z "${LBRAIN_HOME:-}" ] && [ -z "${GROK_LBRAIN_HOME:-}" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) REFUSED capture: seat-harness hook with no LBRAIN_HOME/GROK_LBRAIN_HOME — org-brain fallback disabled; session=${SESSION:-unknown} transcript=${TRANSCRIPT:-undiscovered}" \
+      >>"$HOME/.lbrain-capture-refusals.log" 2>/dev/null
+    exit 0
+  fi
+  export LBRAIN_HOME="${LBRAIN_HOME:-$GROK_LBRAIN_HOME}"
+fi
+
 # Grok's payload NAMES a transcript_path, but it points at the RPC event log — an
 # existing file with zero extractable turns (A-546 producer class, measured
 # 2026-09-01: updates.jsonl 4181 rows / 0 turns; chat_history.jsonl 106 / 76).
@@ -60,20 +76,8 @@ fi
 [ -z "$TRANSCRIPT" ] && exit 0
 [ -f "$TRANSCRIPT" ] || exit 0
 
-# Under a Grok harness the hook env may not carry LBRAIN_HOME; deployments set
-# GROK_LBRAIN_HOME in the launcher (never hardcode a box-specific path here).
-# A seat-harness hook with NO explicit home must REFUSE, not fall back to the
-# org brain: capture landing in ~/.lbrain looks like memory working while the
-# seat brain starves — presence of a rich brain is not fitness of this brain.
-# Refusal is logged OUTSIDE any brain home and exits 0 (never break a compact).
-if [ -n "${GROK_HOOK_EVENT:-}" ] || [ -n "${GROK_SESSION_ID:-}" ]; then
-  if [ -z "${LBRAIN_HOME:-}" ] && [ -z "${GROK_LBRAIN_HOME:-}" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) REFUSED capture: seat-harness hook with no LBRAIN_HOME/GROK_LBRAIN_HOME — org-brain fallback disabled; session=${SESSION:-unknown} transcript=$TRANSCRIPT" \
-      >>"$HOME/.lbrain-capture-refusals.log" 2>/dev/null
-    exit 0
-  fi
-  export LBRAIN_HOME="${LBRAIN_HOME:-$GROK_LBRAIN_HOME}"
-fi
+# Seat-harness home resolution happened in the guard block above (before transcript
+# discovery). Reaching here on a seat harness means an explicit home is exported.
 LOG="${LBRAIN_HOME:-$HOME/.lbrain}/capture.log"
 LBRAIN_BIN="${LBRAIN_BIN:-lbrain}"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
