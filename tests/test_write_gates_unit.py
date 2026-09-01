@@ -150,3 +150,52 @@ def test_cli_import_refuses_rc2_on_incoherent_home(tmp_path):
     )
     assert proc.returncode == 2, proc.stdout + proc.stderr
     assert "the home you name" in (proc.stdout + proc.stderr)
+
+
+# --- RED-W-BYPASS-1 regression: the archive sub-CLI funnels through the gates --
+
+def _cli_env(tmp_path, home):
+    import os
+    import site
+    env = dict(os.environ, LBRAIN_HOME=str(home), HOME=str(tmp_path))
+    env.pop("LBRAIN_SEAT", None)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in [site.getusersitepackages(), env.get("PYTHONPATH", "")] if p
+    )
+    return env
+
+
+def test_archive_shred_refuses_foreign_db_and_materializes_nothing(tmp_path):
+    """CSO's behavioral proof, replayed: shred against a foreign db_path was
+    rc=0 and MATERIALIZED a brain.db at the foreign path. Now: rc=2, refusal
+    names both paths, and nothing is created anywhere."""
+    pytest.importorskip("cryptography")
+    home = tmp_path / "copyhome"
+    home.mkdir()
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (home / "config.toml").write_text(f'db_path = "{foreign / "brain.db"}"\n')
+    proc = subprocess.run(
+        [sys.executable, "-m", "lbrain.cli", "shred", "--txid", "deadbeef", "--yes", "--soft"],
+        env=_cli_env(tmp_path, home), capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "the home you name" in (proc.stdout + proc.stderr)
+    assert not (foreign / "brain.db").exists()
+    assert not (home / "brain.db").exists()
+
+
+def test_archive_read_refuses_to_create(tmp_path):
+    """A read (archives list) on a legacy home with no db must refuse, not
+    materialize — non-immutable Store() creates on open."""
+    pytest.importorskip("cryptography")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\n')
+    proc = subprocess.run(
+        [sys.executable, "-m", "lbrain.cli", "archives"],
+        env=_cli_env(tmp_path, home), capture_output=True, text=True, timeout=120,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "refusing to create" in (proc.stdout + proc.stderr)
+    assert not (home / "brain.db").exists()

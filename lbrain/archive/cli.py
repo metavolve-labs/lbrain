@@ -23,6 +23,40 @@ from .crypto import CryptoError
 from .storage import ArchiveStore
 
 
+def _open(cfg, *, write: bool = False):
+    """Funnel every archive store open through the engine chokepoint.
+
+    RED-W-BYPASS-1 (CSO 2026-09-01): direct ``Store(cfg.db_path)`` construction
+    here bypassed the W1/W2 write gates AND the epoch write refusal — a foreign
+    ``db_path`` in a copied config let ``shred`` run rc=0 against another brain,
+    and any open MATERIALIZED a brain.db at the foreign path (non-immutable
+    ``Store()`` creates). Writers now take the same gated path as every other
+    CLI writer; reads go through ``open_store`` (immutable on epoch homes) and
+    REFUSE to create — a read must never materialize a database.
+
+    Honest consequence: on an epoch-managed home the Tier-2 archive writers now
+    refuse (build→validate→swap is the only write path) until archive gets its
+    epoch-compatible staging (item-6 lane, CSO §9 condition 2).
+    """
+    from ..epoch import EpochError, open_store
+    from ..write_gates import WriteGateError
+
+    if not write and not Path(cfg.db_path).exists():
+        from ..epoch import current_epoch_id
+
+        if current_epoch_id(Path(CONFIG_DIR)) is None:
+            click.secho(f"✗ no brain at {cfg.db_path} — nothing to read, refusing to create one", fg="red")
+            sys.exit(1)
+    try:
+        return open_store(cfg, for_write=write)
+    except WriteGateError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
+    except EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
+
+
 def _resolve_passphrase(confirm: bool = False) -> str:
     """Archive passphrase from ~/.lbrain/env, else prompt (and offer to persist it)."""
     pp = archive_passphrase()
@@ -71,7 +105,7 @@ def archive(source, from_file, title, namespace, snapshot_model):
     passphrase = _resolve_passphrase(confirm=True)
 
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _open(cfg, write=True)
     embedder = None
     # "local" needs no key and must never be gated behind an ambient hosted one
     # (red-team 2026-07-28 #11/#13: the same idiom routed provider=local into
@@ -138,7 +172,7 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
 
     label = title or session_id or Path(from_file).stem
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _open(cfg, write=True)
     embedder = None
     # "local" needs no key and must never be gated behind an ambient hosted one
     # (red-team 2026-07-28 #11/#13: the same idiom routed provider=local into
@@ -185,7 +219,7 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
 def recall(query, k, namespace):
     """Deep-recall: semantic search over archived-session snapshots (the read surface)."""
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _open(cfg)
     embedder = make_embedder(cfg)
     try:
         q_vec = embedder.embed_one(query)
@@ -214,7 +248,7 @@ def retrieve(txid, out):
     """Deep-recall by txid: fetch the full encrypted record and decrypt it (byte-identical)."""
     passphrase = _resolve_passphrase(confirm=False)
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _open(cfg)
     try:
         data = Archiver(cfg, store).retrieve(txid, passphrase)
     except (CryptoError, FileNotFoundError) as e:
@@ -259,7 +293,7 @@ def shred(txid, yes, soft):
         click.echo("  Aborted.")
         return
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _open(cfg, write=True)
     had_key = Archiver(cfg, store).shred(txid, purge_snapshot=not soft)
     store.close()
     detail = "key destroyed" + ("" if soft else " + local snapshot purged")
@@ -310,7 +344,7 @@ def archive_status():
 def archives_cmd(namespace, verify):
     """List Tier-2 archived records."""
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _open(cfg)
     rows = ArchiveStore(store.db, store.embedding_dim).list_archives(namespace=namespace)
     store.close()
     if not rows:
