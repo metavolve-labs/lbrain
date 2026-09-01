@@ -39,10 +39,10 @@ def _mk_home(tmp_path):
 
 
 def _seed_and_build(home, src):
-    env = dict(os.environ, LBRAIN_HOME=str(home))
-    for args in (["import"], ["embed", "--stale"]):
-        p = subprocess.run(["lbrain", *args], env=env, capture_output=True, text=True)
-        assert p.returncode == 0, p.stdout + p.stderr
+    # Real import always; real embed warm, deterministic vectors cold — see
+    # tests/_coldembed.py for the CI cold contract.
+    from _coldembed import seed_brain
+    seed_brain(home, DIM)
     cfg = SimpleNamespace(sources=[src], embedding_dim=DIM, db_path=home / "brain.db")
     return epoch_build.build(home, cfg), cfg
 

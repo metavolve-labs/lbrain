@@ -175,3 +175,29 @@ def guard_real_install():
         f"{home}: {changed}\n"
         "Test isolation has a hole — fix tests/conftest.py, not the symptom."
     )
+
+
+# --- cold-CI embed shim (see tests/_coldembed.py for the contract) -----------
+# Autouse so every test file's epoch builds work cold: staging `embed` stages
+# inside epoch_build.build fill deterministic vectors instead of invoking the
+# absent fastembed stack. Warm (fastembed present), this is a no-op and the
+# real pipeline runs.
+@pytest.fixture(autouse=True)
+def _cold_embed_shim(monkeypatch):
+    from _coldembed import HAVE_LOCAL_EMBED, fill_vectors_cold
+
+    if HAVE_LOCAL_EMBED:
+        yield
+        return
+    from lbrain import epoch_build
+
+    real = epoch_build._run_cli
+
+    def run(args, staging_home, lbrain_bin, **kw):
+        if args and args[0] == "embed":
+            fill_vectors_cold(Path(staging_home) / "brain.db")
+            return ""
+        return real(args, staging_home, lbrain_bin, **kw)
+
+    monkeypatch.setattr(epoch_build, "_run_cli", run)
+    yield

@@ -52,10 +52,10 @@ def _mk_home(tmp_path, n_docs=2, n_sources=1):
 
 
 def _seed(home):
-    env = dict(os.environ, LBRAIN_HOME=str(home))
-    for args in (["import"], ["embed", "--stale"]):
-        p = subprocess.run(["lbrain", *args], env=env, capture_output=True, text=True)
-        assert p.returncode == 0, p.stdout + p.stderr
+    # Real import always; real embed warm, deterministic vectors cold — see
+    # tests/_coldembed.py for the CI cold contract.
+    from _coldembed import seed_brain
+    seed_brain(home, DIM)
 
 
 def _cfg(home, srcs):

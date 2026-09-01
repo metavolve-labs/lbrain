@@ -16,6 +16,7 @@ that forced it.
 from __future__ import annotations
 
 import errno
+import itertools
 import json
 import os
 import shutil
@@ -69,9 +70,17 @@ def epoch_db(home: Path, epoch_id: str) -> Path:
     return epoch_dir(home, epoch_id) / "brain.db"
 
 
+_epoch_seq = itertools.count(1)
+
+
 def new_epoch_id(now: float | None = None) -> str:
+    # ts+pid alone COLLIDED when two builds ran in the same second of the same
+    # process ("output file already exists" at VACUUM INTO) — exposed 2026-09-01
+    # by the cold-CI shim making builds sub-second, masked before only because a
+    # real embed takes minutes. The per-process sequence closes it; zero-padded
+    # so lexical order within a second stays chronological.
     ts = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now if now is not None else time.time()))
-    return f"{ts}-{os.getpid()}"
+    return f"{ts}-{os.getpid()}-{next(_epoch_seq):04d}"
 
 
 def failed_dir(home: Path, epoch_id: str) -> Path:
