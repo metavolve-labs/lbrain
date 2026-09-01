@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lbrain"
-version = "0.1.9"
+version = "0.1.9.post1"
 description = "LBrain by Metavolve Labs — AI-native engineering memory with the Lair Protocol."
 requires-python = ">=3.10"
 authors = [{name = "Metavolve Labs, Inc."}]

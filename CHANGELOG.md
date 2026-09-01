@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.9.post1 — 2026-09-01
+
+One-line correction: 0.1.9's artifact self-reported `__version__ == "0.1.8"`
+(`lbrain/__init__.py` carried a second, unbumped version declaration — caught
+by the CSO's fresh-venv artifact verify within minutes of release). Content is
+byte-identical to 0.1.9 plus the version literal and a release gate
+(`tests/test_version_single_truth.py`) that fails on any future drift between
+`pyproject.toml` and `lbrain.__version__`.
+
 ## 0.1.9 — 2026-09-01
 
 The reset-era release: four engine defect classes closed with adversarial
