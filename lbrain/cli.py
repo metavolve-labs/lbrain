@@ -375,6 +375,37 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        # ── core-memory health ──
+        # The always-served layer had NO freshness check by design — so doctor
+        # provides one. 2026-09-01: a CORE that still said "you are at L0
+        # read-only" through three recorded promotions muted a seat's authority
+        # and voice on EVERY query. A stale CORE is a personality/authority bug,
+        # not documentation debt; and an over-budget CORE silently loses its
+        # TAIL from every serve (A-421).
+        _cm_path = str(getattr(cfg, "core_memory_path", "") or "")
+        _cm_budget = int(getattr(cfg, "core_memory_chars", 0) or 0)
+        if _cm_path:
+            _cm = Path(_cm_path).expanduser()
+            if not _cm.exists():
+                click.secho(f"  ✗ core memory MISSING: {_cm} — configured to serve "
+                            "always, serving nothing", fg="red")
+            else:
+                _n = len(_cm.read_text(encoding="utf-8", errors="replace"))
+                _age_d = (time.time() - _cm.stat().st_mtime) / 86400
+                if _cm_budget and _n > _cm_budget:
+                    click.secho(
+                        f"  ✗ core memory TRUNCATING: {_n} chars > budget {_cm_budget} — "
+                        "the TAIL is cut from every single serve (A-421). Raise "
+                        "core_memory_chars, or trim the file.", fg="red")
+                else:
+                    click.echo(f"  core memory: {_n} chars / budget {_cm_budget} · "
+                               f"last edited {_age_d:.0f}d ago")
+                if _age_d > 14:
+                    click.secho(
+                        f"  ⚠ core memory unedited for {_age_d:.0f} days — it is served on "
+                        "EVERY query and nothing supersedes it. Review it against the "
+                        "seat's live ledgers (permissions, status words, facts); a stale "
+                        "CORE overrides fresher records by sheer repetition.", fg="yellow")
         # ── epoch surface (increment 4) ──
         from .epoch import current_epoch_id as _cur, epoch_db as _edb, epochs_root as _eroot
         _eid = _cur(CONFIG_DIR)

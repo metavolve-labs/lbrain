@@ -196,3 +196,22 @@ def test_inc4_doctor_prints_epoch_and_watermark(tmp_path):
     env = dict(os.environ, LBRAIN_HOME=str(home))
     p = subprocess.run(["lbrain", "doctor"], env=env, capture_output=True, text=True)
     assert "index current as of" in p.stdout and "epoch:" in p.stdout
+
+
+def test_doctor_core_memory_health_reports_truncation_and_staleness(tmp_path):
+    """CORE monitoring (Tad, 2026-09-01): the always-served layer had no
+    freshness check — a CORE saying 'L0 read-only' through three promotions
+    muted a seat on every query. doctor now reports truncation (A-421) and
+    review-staleness."""
+    home, src = _mk_home(tmp_path)
+    core = home / "CORE.md"
+    core.write_text("X" * 500)
+    os.utime(core, (1, 1))  # ancient mtime → staleness warning
+    with open(home / "config.toml", "a") as f:
+        f.write(f'core_memory_path = "{core}"\ncore_memory_chars = 100\n')
+    _seed_and_build(home, src)
+    env = dict(os.environ, LBRAIN_HOME=str(home))
+    p = subprocess.run(["lbrain", "doctor"], env=env, capture_output=True, text=True)
+    out = p.stdout + p.stderr
+    assert "core memory TRUNCATING" in out       # 500 chars > 100 budget
+    assert "unedited for" in out                  # served always, reviewed never
