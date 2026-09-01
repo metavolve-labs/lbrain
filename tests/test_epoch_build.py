@@ -6,6 +6,7 @@ exactly as production does. Each test is a RED target from the combined gauntlet
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import sqlite3
@@ -20,6 +21,54 @@ from lbrain import epoch, epoch_build
 
 DIM = 384
 MODEL = "BAAI/bge-small-en-v1.5"
+
+# CI contract (ci.yml): "No network, no API key, no model download — the suite
+# must pass cold." `lbrain embed` needs the [local] extra (fastembed + a model
+# fetch), which cold CI deliberately does not install — every matrix job failed
+# for two days on exactly this (2026-09-01). Epoch build gates on the PRESENCE
+# and sanity of vectors (dim, norm floor, self-match), not their provenance, and
+# raw vec_chunks writes are already this file's pattern for adversarial rows.
+# So: with fastembed available the REAL pipeline runs (local boxes, warm CI);
+# cold, deterministic unit vectors stand in — fidelity reduced only where the
+# contract forbids the real thing.
+# LBRAIN_TEST_FORCE_COLD=1 exercises the cold path on a warm box (RED/GREEN
+# for the shim itself — a miss-path that has never fired has never been tested).
+HAVE_LOCAL_EMBED = (importlib.util.find_spec("fastembed") is not None
+                    and os.environ.get("LBRAIN_TEST_FORCE_COLD") != "1")
+
+
+def _fill_vectors_cold(db_path):
+    con = epoch_build._connect_vec(Path(db_path))
+    try:
+        ids = [r[0] for r in con.execute(
+            "SELECT chunk_id FROM chunks WHERE chunk_id NOT IN (SELECT rowid FROM vec_chunks)")]
+        for cid in ids:
+            vec = [((cid * 31 + i * 7) % 97 + 1.0) for i in range(DIM)]
+            n = sum(v * v for v in vec) ** 0.5
+            con.execute("INSERT INTO vec_chunks (rowid, embedding) VALUES (?, ?)",
+                        (cid, struct.pack(f"{DIM}f", *(v / n for v in vec))))
+        con.commit()
+    finally:
+        con.close()
+
+
+@pytest.fixture(autouse=True)
+def _cold_embed_shim(monkeypatch):
+    """Cold CI only: staging `embed` stages inside epoch_build.build fill
+    deterministic vectors instead of invoking the absent fastembed stack."""
+    if HAVE_LOCAL_EMBED:
+        yield
+        return
+    real = epoch_build._run_cli
+
+    def run(args, staging_home, lbrain_bin, **kw):
+        if args and args[0] == "embed":
+            _fill_vectors_cold(Path(staging_home) / "brain.db")
+            return ""
+        return real(args, staging_home, lbrain_bin, **kw)
+
+    monkeypatch.setattr(epoch_build, "_run_cli", run)
+    yield
 
 
 def _mk_home(tmp_path, n_sources=1):
@@ -52,9 +101,12 @@ def _cfg(home, srcs):
 
 def _seed_legacy(home):
     env = dict(os.environ, LBRAIN_HOME=str(home))
-    for args in (["import"], ["embed", "--stale"]):
+    steps = [["import"], ["embed", "--stale"]] if HAVE_LOCAL_EMBED else [["import"]]
+    for args in steps:
         p = subprocess.run(["lbrain", *args], env=env, capture_output=True, text=True)
         assert p.returncode == 0, p.stdout + p.stderr
+    if not HAVE_LOCAL_EMBED:
+        _fill_vectors_cold(home / "brain.db")
 
 
 def _sha(p: Path) -> str:
