@@ -62,8 +62,17 @@ fi
 
 # Under a Grok harness the hook env may not carry LBRAIN_HOME; deployments set
 # GROK_LBRAIN_HOME in the launcher (never hardcode a box-specific path here).
+# A seat-harness hook with NO explicit home must REFUSE, not fall back to the
+# org brain: capture landing in ~/.lbrain looks like memory working while the
+# seat brain starves — presence of a rich brain is not fitness of this brain.
+# Refusal is logged OUTSIDE any brain home and exits 0 (never break a compact).
 if [ -n "${GROK_HOOK_EVENT:-}" ] || [ -n "${GROK_SESSION_ID:-}" ]; then
-  export LBRAIN_HOME="${LBRAIN_HOME:-${GROK_LBRAIN_HOME:-$HOME/.lbrain}}"
+  if [ -z "${LBRAIN_HOME:-}" ] && [ -z "${GROK_LBRAIN_HOME:-}" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) REFUSED capture: seat-harness hook with no LBRAIN_HOME/GROK_LBRAIN_HOME — org-brain fallback disabled; session=${SESSION:-unknown} transcript=$TRANSCRIPT" \
+      >>"$HOME/.lbrain-capture-refusals.log" 2>/dev/null
+    exit 0
+  fi
+  export LBRAIN_HOME="${LBRAIN_HOME:-$GROK_LBRAIN_HOME}"
 fi
 LOG="${LBRAIN_HOME:-$HOME/.lbrain}/capture.log"
 LBRAIN_BIN="${LBRAIN_BIN:-lbrain}"
