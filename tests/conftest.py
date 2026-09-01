@@ -41,10 +41,15 @@ def isolate_lbrain_home(tmp_path, monkeypatch):
     # repoint loop a silent no-op that looks like it ran.
     real = _real_home().resolve()
 
-    home = tmp_path / "lbrain-home"
-    home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("LBRAIN_HOME", str(home))
-
+    # Import the path-binding modules BEFORE touching the environment, for the
+    # same reason `real` is captured first: config.py binds CONFIG_DIR from
+    # LBRAIN_HOME at import time. If the first-ever import happens after the
+    # setenv below (any test file that doesn't import lbrain.config at
+    # collection time), CONFIG_DIR binds to THIS test's temp home — a path the
+    # repoint loop never touches (not under `real`) and monkeypatch never
+    # recorded — so every later test in the session silently shares the first
+    # test's home. Found 2026-09-01 by the CSO write-gate fixtures: one test's
+    # epochs/CURRENT leaked into the whole file.
     import lbrain.config as config
 
     mods = [config]
@@ -54,6 +59,10 @@ def isolate_lbrain_home(tmp_path, monkeypatch):
         mods.append(cli)
     except Exception:  # pragma: no cover - cli deps are optional in some envs
         pass
+
+    home = tmp_path / "lbrain-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("LBRAIN_HOME", str(home))
 
     # Repoint EVERY module-level Path that lies under the real install, discovered
     # rather than enumerated.
