@@ -127,3 +127,72 @@ def test_dead_pid_lease_is_cleaned_not_pinning_forever(tmp_path):
     (d / f"{_s.gethostname()}-999999").write_text("0")  # dead pid
     assert epoch.leased_epochs(home) == set()
     assert not d.exists()
+
+
+# ---------- increment 4 (CSO AMBER-1 / AMBER-2) ----------
+
+def test_amber1_reader_lands_on_new_current_when_epoch_doomed_mid_open(tmp_path, monkeypatch):
+    """TOCTOU: the epoch is pruned between CURRENT-read and open — the reader
+    detects, releases, and retries onto the NEW CURRENT. Deterministic loser."""
+    home, src = _mk_home(tmp_path)
+    r1, cfg = _seed_and_build(home, src)
+    (Path(src) / "c.md").write_text("# C\n\nlater\n")
+    r2 = epoch_build.build(home, cfg)  # E2 = CURRENT; E1 retained
+    _bind_home(monkeypatch, home)
+    # simulate: reader resolved E1 (stale read), E1 vanishes before its open lands
+    real_lease = epoch.lease_acquire
+    def doom_then_lease(h, eid):
+        p = real_lease(h, eid)
+        if eid == r1["epoch_id"]:
+            import shutil as _sh
+            _sh.rmtree(epoch.epoch_dir(h, eid), ignore_errors=True)
+        return p
+    monkeypatch.setattr(epoch, "lease_acquire", doom_then_lease)
+    monkeypatch.setattr(epoch, "current_epoch_id",
+                        _StaleOnce(home, r1["epoch_id"]))
+    st = epoch.open_store(cfg)
+    try:
+        assert st.epoch_id == r2["epoch_id"]  # landed on the survivor
+    finally:
+        st.close()
+
+
+class _StaleOnce:
+    """First call returns the stale (doomed) epoch id; later calls tell the truth."""
+    def __init__(self, home, stale_eid):
+        self.home, self.stale, self.called = home, stale_eid, False
+    def __call__(self, home):
+        if not self.called:
+            self.called = True
+            return self.stale
+        p = epoch.epochs_root(self.home) / "CURRENT"
+        return p.read_text(encoding="utf-8").strip()
+
+
+def test_amber2_belief_gate_refuses_with_curated_message(tmp_path):
+    home, src = _mk_home(tmp_path)
+    _seed_and_build(home, src)
+    env = dict(os.environ, LBRAIN_HOME=str(home))
+    p = subprocess.run(["lbrain", "belief", "gate", "nonexistent-slug"],
+                       env=env, capture_output=True, text=True)
+    assert p.returncode == 1
+    assert "only write path" in (p.stdout + p.stderr)
+    assert "Traceback" not in (p.stdout + p.stderr)  # curated, not a stack dump
+
+
+def test_amber2_consolidate_refuses_with_curated_message(tmp_path):
+    home, src = _mk_home(tmp_path)
+    _seed_and_build(home, src)
+    env = dict(os.environ, LBRAIN_HOME=str(home))
+    p = subprocess.run(["lbrain", "consolidate", "--dry-run"],
+                       env=env, capture_output=True, text=True)
+    assert p.returncode == 1
+    assert "only write path" in (p.stdout + p.stderr)
+
+
+def test_inc4_doctor_prints_epoch_and_watermark(tmp_path):
+    home, src = _mk_home(tmp_path)
+    _seed_and_build(home, src)
+    env = dict(os.environ, LBRAIN_HOME=str(home))
+    p = subprocess.run(["lbrain", "doctor"], env=env, capture_output=True, text=True)
+    assert "index current as of" in p.stdout and "epoch:" in p.stdout

@@ -394,21 +394,48 @@ def open_store(cfg, *, for_write: bool = False):
             "this home is epoch-managed (epochs/CURRENT exists) — direct writes are "
             "disabled. Run `lbrain epoch build` instead: build → validate → swap is "
             "the only write path into an epoch-managed brain.")
-    db = epoch_db(home, eid)
-    if not db.exists():
-        raise EpochError(
-            f"CURRENT names epoch {eid!r} but {db} does not exist — refusing to fall "
-            "back silently; restore a prior epoch or remove the pointer deliberately")
-    lease_acquire(home, eid)
-    store = Store(db, embedding_dim=cfg.embedding_dim, immutable=True)
+    # AMBER-1 (CSO inc-3 verdict): resolve→lease is a TOCTOU window, and his P2
+    # probe proved DrvFs will NOT save us — rmtree succeeds under an open handle,
+    # so a reader entering an epoch just as prune dooms it would zombie-serve a
+    # deleted index for its whole session. Two-sided narrowing (his design, both
+    # sides): the reader RE-VERIFIES the db exists after lease+open and retries
+    # once on miss; prune re-reads leases immediately before each rmtree. Not a
+    # lock — sub-ms detection with a deterministic loser, hazard-#11-honest.
+    for attempt in range(2):
+        db = epoch_db(home, eid)
+        if not db.exists():
+            raise EpochError(
+                f"CURRENT names epoch {eid!r} but {db} does not exist — refusing to "
+                "fall back silently; restore a prior epoch or remove the pointer deliberately")
+        lease_acquire(home, eid)
+        import sqlite3 as _sq
+        try:
+            store = Store(db, embedding_dim=cfg.embedding_dim, immutable=True)
+            doomed = not db.exists()  # DrvFs shape: open succeeds on a deleted file
+        except _sq.OperationalError:
+            store = None
+            doomed = True             # ext4 shape: the open itself fails
+        if doomed:  # deterministic loser: release, re-resolve, retry once
+            if store is not None:
+                store.close()
+            lease_release(home, eid)
+            new_eid = current_epoch_id(home)
+            if attempt == 0 and new_eid and new_eid != eid:
+                eid = new_eid
+                continue
+            raise EpochError(
+                f"epoch {eid!r} was pruned during open and no newer CURRENT exists — "
+                "retry the operation")
+        break
     store.epoch_id = eid
     _orig_close = store.close
+    _eid = eid
 
     def _close_with_lease():
         try:
             _orig_close()
         finally:
-            lease_release(home, eid)
+            lease_release(home, _eid)
 
     store.close = _close_with_lease
     return store
@@ -487,10 +514,17 @@ def _prune_locked(home: Path, *, keep: int, max_bytes: int | None) -> list[str]:
             survivors.remove(e)
     removed: list[str] = []
     for e in doomed:
+        # AMBER-1, prune side: re-read leases IMMEDIATELY before each rmtree — a
+        # reader's lease may have landed since the sweep started, and on DrvFs
+        # the filesystem will happily delete under an open handle (P2, measured).
+        if e in leased_epochs(home):
+            print(f"[lbrain] prune: epoch {e} gained a reader lease mid-prune — spared")
+            continue
         try:
             shutil.rmtree(epoch_dir(home, e))
             removed.append(e)
         except OSError as err:
             print(f"[lbrain] WARNING: prune of epoch {e} failed ({err}) — skipped, "
-                  "not retried; a reader or a Windows-side process may hold it open")
+                  "not retried; NOTE: on DrvFs deletion can SUCCEED under an open "
+                  "handle, so this fallback is not a backstop — the lease is the wall")
     return removed

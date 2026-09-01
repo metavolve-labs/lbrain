@@ -375,6 +375,34 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        # ── epoch surface (increment 4) ──
+        from .epoch import current_epoch_id as _cur, epoch_db as _edb, epochs_root as _eroot
+        _eid = _cur(CONFIG_DIR)
+        if _eid:
+            import sqlite3 as _sq
+            try:
+                _c = _sq.connect(f"file:{_edb(CONFIG_DIR, _eid)}?immutable=1", uri=True)
+                _wm = dict(_c.execute(
+                    "SELECT key, value FROM meta WHERE key IN "
+                    "('watermark_scan_end','watermark_scan_start')"))
+                _c.close()
+            except Exception:
+                _wm = {}
+            click.echo(f"  epoch: {_eid} — index current as of "
+                       f"{_wm.get('watermark_scan_end', 'unknown')} (content-digest watermark, never mtime)")
+            if str(CONFIG_DIR).startswith("/mnt/"):
+                click.secho(
+                    "  ⚠ epoch home on DrvFs: pointer swaps are atomic for readers but NOT "
+                    "provably crash-durable here — directory fsync is unreliable on the 9p "
+                    "bridge, and a successful fsync proves nothing (cache=mmap is client "
+                    "writeback). Authoritative homes belong on ext4; treat this one as a "
+                    "rebuildable replica.", fg="yellow")
+            _cur_file = _eroot(CONFIG_DIR) / "CURRENT"
+            if _cur_file.exists() and not os.access(_cur_file, os.W_OK):
+                click.secho(
+                    "  ⚠ epochs/CURRENT is not writable (read-only attribute?) — the next "
+                    "publish will fail at the pointer swap; clear the attribute first.",
+                    fg="yellow")
         _echo_currency(currency)
         if setup_drift:
             click.echo()
@@ -1636,7 +1664,10 @@ def consolidate(threshold: float, model: str, limit: int, dry_run: bool):
     """
     from .consolidate import ABSTRACTIONS_DIR, DEFAULT_MODEL, run_consolidation
     cfg = Config.load()
-    store = open_store(cfg)
+    store = _writer_store(
+        cfg, "consolidate",
+        extra="(consolidate would also write abstraction .md files with no index entry "
+              "until the next build — they self-heal at build time, but say so is the rule)")
     try:
         generated, skipped, total = run_consolidation(
             cfg, store,
@@ -2020,6 +2051,21 @@ def _open_store(cfg):
     return open_store(cfg)
 
 
+def _writer_store(cfg, cmd: str, extra: str = ""):
+    """Open for WRITE with the curated epoch refusal (CSO AMBER-2: a raw
+    'readonly database' traceback is safe but rude; refuse up front, in words)."""
+    from .epoch import EpochError as _EpochError
+    try:
+        return open_store(cfg, for_write=True)
+    except _EpochError:
+        click.secho(
+            f"✗ `{cmd}` writes to the brain, and this home is epoch-managed — "
+            "build→validate→swap is the only write path. Make the change in the "
+            "SOURCE files and run `lbrain epoch build`." + (f" {extra}" if extra else ""),
+            fg="red")
+        sys.exit(1)
+
+
 @main.group()
 def belief():
     """Per-agent beliefs: draft in private, promote through a gate, retract without deleting."""
@@ -2113,7 +2159,7 @@ def belief_gate(slug):
     from . import beliefs as _b
 
     cfg = Config.load()
-    store = _open_store(cfg)
+    store = _writer_store(cfg, "belief gate")
     try:
         view = _b.StoreCorpusView(store)
         b = view.beliefs.get(slug)
@@ -2144,7 +2190,7 @@ def belief_promote(slug):
     from . import beliefs as _b
 
     cfg = Config.load()
-    store = _open_store(cfg)
+    store = _writer_store(cfg, "belief promote")
     try:
         view = _b.StoreCorpusView(store)
         b = view.beliefs.get(slug)
@@ -2184,7 +2230,7 @@ def belief_retract(slug, reason):
     from . import beliefs as _b
 
     cfg = Config.load()
-    store = _open_store(cfg)
+    store = _writer_store(cfg, "belief retract")
     try:
         view = _b.StoreCorpusView(store)
         b = view.beliefs.get(slug)
