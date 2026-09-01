@@ -247,3 +247,20 @@ def test_r4_tail_zeroed_vector_is_caught(tmp_path):
     failures = epoch_build.validate_candidate(
         db, embedding_dim=DIM, sources=srcs, prior_inv={}, confirmed_removed=set())
     assert any("zero norm" in f for f in failures), failures
+
+
+def test_orphan_vectors_are_swept_not_tolerated(tmp_path):
+    """First production build was refused over 14 chunk-less vectors the legacy
+    brain had carried invisibly. The build sweeps and REPORTS them; the gate's
+    embedded==chunks bar stays strict."""
+    home, srcs = _mk_home(tmp_path)
+    _seed_legacy(home)
+    con = epoch_build._connect_vec(home / "brain.db")
+    try:
+        con.execute("INSERT INTO vec_chunks (rowid, embedding) VALUES (999999, ?)",
+                    (struct.pack(f"{DIM}f", *([0.5] * DIM)),))
+        con.commit()
+    finally:
+        con.close()
+    r = epoch_build.build(home, _cfg(home, srcs))
+    assert r["published"] and r["orphan_vectors_swept"] == 1

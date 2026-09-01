@@ -357,6 +357,26 @@ def build(
             else:
                 _run_cli(["embed", "--stale"], staging, lbrain_bin, lock=lock)
             lock.heartbeat()
+            # Orphan derived-state sweep: the FIRST production build was refused by
+            # the gate over 14 vectors with no chunk — historical debris the live
+            # main brain had carried invisibly (an old delete path missed vec
+            # rows). A candidate must be a pure function of (sources, config), so
+            # orphans are swept here, counted, and reported — never tolerated by
+            # loosening the gate.
+            oc = _connect_vec(staging_db)
+            try:
+                orphans = oc.execute(
+                    "SELECT COUNT(*) FROM vec_chunks WHERE rowid NOT IN "
+                    "(SELECT rowid FROM chunks)").fetchone()[0]
+                if orphans:
+                    oc.execute("DELETE FROM vec_chunks WHERE rowid NOT IN "
+                               "(SELECT rowid FROM chunks)")
+                    oc.commit()
+                    print(f"[lbrain] epoch build: swept {orphans} orphan vector(s) "
+                          "(no owning chunk — inherited debris)")
+                report["orphan_vectors_swept"] = orphans
+            finally:
+                oc.close()
             scan_end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
             failures = validate_candidate(
@@ -393,14 +413,24 @@ def build(
             finally:
                 con.close()
 
-            # post-vacuum re-check: VACUUM INTO interrupted = corrupt, so prove it
+            # post-vacuum re-check: VACUUM INTO interrupted = corrupt, so prove it.
+            # Compare the published file against the CANDIDATE's own counts — the
+            # first main-brain pilot build failed here because this line compared
+            # against the source-mapped inventory instead, and a real brain holds
+            # docs (abstractions, historical roots) outside source prefixes.
+            scon = sqlite3.connect(str(staging_db))
+            try:
+                staging_docs = scon.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+            finally:
+                scon.close()
             vcon = sqlite3.connect(str(dest))
             try:
                 if vcon.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise EpochError(f"published file failed integrity_check: {dest}")
-                if vcon.execute("SELECT COUNT(*) FROM docs").fetchone()[0] != sum(
-                        len(d) for d in new_inv.values()):
-                    raise EpochError(f"published doc count diverged from candidate: {dest}")
+                published_docs = vcon.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+                if published_docs != staging_docs:
+                    raise EpochError(
+                        f"published doc count {published_docs} != candidate {staging_docs}: {dest}")
             finally:
                 vcon.close()
 
