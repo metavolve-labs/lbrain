@@ -787,8 +787,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     # v1.4). Staging homes have no epochs/CURRENT, so `lbrain epoch build`'s own
     # subprocess import is unaffected by this guard.
     from .epoch import EpochError as _EpochError
+    from .write_gates import WriteGateError as _WGError
     try:
         store = open_store(cfg, for_write=True)
+    except _WGError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
     except _EpochError as e:
         click.secho(f"✗ {e}", fg="red")
         sys.exit(1)
@@ -1005,8 +1009,12 @@ def embed(stale: bool, batch: int, reuse_from):
 
     # Epoch-managed home ⇒ embedding writes go through `lbrain epoch build` only.
     from .epoch import EpochError as _EpochError
+    from .write_gates import WriteGateError as _WGError
     try:
         store = open_store(cfg, for_write=True)
+    except _WGError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
     except _EpochError as e:
         click.secho(f"✗ {e}", fg="red")
         sys.exit(1)
@@ -2086,8 +2094,12 @@ def _writer_store(cfg, cmd: str, extra: str = ""):
     """Open for WRITE with the curated epoch refusal (CSO AMBER-2: a raw
     'readonly database' traceback is safe but rude; refuse up front, in words)."""
     from .epoch import EpochError as _EpochError
+    from .write_gates import WriteGateError as _WGError
     try:
         return open_store(cfg, for_write=True)
+    except _WGError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
     except _EpochError:
         click.secho(
             f"✗ `{cmd}` writes to the brain, and this home is epoch-managed — "

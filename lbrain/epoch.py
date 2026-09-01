@@ -386,6 +386,13 @@ def open_store(cfg, *, for_write: bool = False):
     from .store import Store
 
     home = Path(CONFIG_DIR)
+    if for_write:
+        # W1/W2 write gates (CSO spec 2026-09-01): dereference the write target
+        # BEFORE any store opens — home coherence, then seat identity. Runs for
+        # legacy AND epoch homes (an epoch home refuses below anyway, but a
+        # misdirected config deserves the more diagnostic refusal first).
+        from .write_gates import check_write_target
+        check_write_target(cfg, home)
     eid = current_epoch_id(home)
     if eid is None:
         return Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
