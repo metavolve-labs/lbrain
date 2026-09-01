@@ -184,6 +184,13 @@ def publish(home: Path, epoch_id: str, *, retries: int = 5, backoff: float = 0.2
     return _fsync_dir_tolerant(root)
 
 
+def _boot_id() -> str:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError:
+        return ""
+
+
 # ---------- the builder lock ----------
 
 class BuilderLock:
@@ -213,6 +220,7 @@ class BuilderLock:
         body = json.dumps({
             "host": socket.gethostname(),
             "pid": os.getpid(),
+            "boot_id": _boot_id(),  # CSO round-3 rider: pid+boot disambiguates reboots
             "nonce": self.nonce,
             "heartbeat": time.time(),
         })
@@ -318,10 +326,92 @@ def lease_release(home: Path, epoch_id: str) -> None:
 
 
 def leased_epochs(home: Path) -> set[str]:
+    """Epochs with at least one LIVE lease. A lease whose (same-host) pid is dead
+    is cleaned here — a crashed reader must not pin an epoch forever. Cross-host
+    leases are believed as-is (we cannot probe a foreign pid; over-retention is
+    the safe direction). PID-reuse risk also lands on the safe side: worst case
+    an epoch is retained longer than needed, never deleted early."""
     root = epochs_root(home) / LEASES_DIRNAME
     if not root.is_dir():
         return set()
-    return {d.name for d in root.iterdir() if d.is_dir() and any(d.iterdir())}
+    me = socket.gethostname()
+    out: set[str] = set()
+    for d in root.iterdir():
+        if not d.is_dir():
+            continue
+        live = False
+        for f in list(d.iterdir()):
+            host, _, pid_s = f.name.rpartition("-")
+            if host == me and pid_s.isdigit():
+                try:
+                    os.kill(int(pid_s), 0)
+                except ProcessLookupError:
+                    try:
+                        f.unlink()
+                    except OSError:
+                        pass
+                    continue
+                except PermissionError:
+                    pass  # exists, not ours to signal — alive
+            live = True
+        if live:
+            out.add(d.name)
+        else:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+    return out
+
+
+def open_store(cfg, *, for_write: bool = False):
+    """THE reader/writer entry point for every CLI command and MCP tool call.
+
+    Resolves the effective database (epoch CURRENT, or the legacy db_path when no
+    epoch was ever published) and opens it correctly for the home's era:
+
+    - Legacy home → the plain writable Store, byte-for-byte the old behavior.
+    - Epoch-managed home, read → IMMUTABLE open (no -wal/-shm, no last-closer
+      checkpoint — the DrvFs zombie-reader fix) plus a reader LEASE so prune can
+      never delete the epoch underneath; the lease releases on close().
+    - Epoch-managed home, for_write=True → REFUSES. Build-validate-swap is the
+      only write path; that is the entire design.
+
+    CSO D2 (per-query re-resolve) is satisfied structurally: every CLI command is
+    its own process and the MCP server constructs its Store per tool call, so
+    each invocation passes through this resolution and picks up a new CURRENT
+    without any daemon restart.
+    """
+    from .config import CONFIG_DIR
+    from .store import Store
+
+    home = Path(CONFIG_DIR)
+    eid = current_epoch_id(home)
+    if eid is None:
+        return Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    if for_write:
+        raise EpochError(
+            "this home is epoch-managed (epochs/CURRENT exists) — direct writes are "
+            "disabled. Run `lbrain epoch build` instead: build → validate → swap is "
+            "the only write path into an epoch-managed brain.")
+    db = epoch_db(home, eid)
+    if not db.exists():
+        raise EpochError(
+            f"CURRENT names epoch {eid!r} but {db} does not exist — refusing to fall "
+            "back silently; restore a prior epoch or remove the pointer deliberately")
+    lease_acquire(home, eid)
+    store = Store(db, embedding_dim=cfg.embedding_dim, immutable=True)
+    store.epoch_id = eid
+    _orig_close = store.close
+
+    def _close_with_lease():
+        try:
+            _orig_close()
+        finally:
+            lease_release(home, eid)
+
+    store.close = _close_with_lease
+    return store
 
 
 def list_epochs(home: Path) -> list[str]:

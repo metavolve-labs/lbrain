@@ -133,7 +133,28 @@ CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
 
 
 class Store:
-    def __init__(self, db_path: Path, embedding_dim: int = 1536):
+    def __init__(self, db_path: Path, embedding_dim: int = 1536, immutable: bool = False):
+        # Epoch-era read path (design v1.4 + vendor3): a PUBLISHED epoch is
+        # read-only by construction, so open it `immutable=1` — SQLite then never
+        # creates -wal/-shm and never attempts the last-closer exclusive-lock
+        # checkpoint, which is the DrvFs zombie-reader hang class. Immutable mode
+        # skips every write-side setup below; the schema is already there.
+        if immutable:
+            self.db_path = db_path
+            self.embedding_dim = embedding_dim
+            self.immutable = True
+            self.db = sqlite3.connect(
+                f"file:{db_path}?immutable=1", uri=True)
+            if not hasattr(self.db, "enable_load_extension"):
+                raise SqliteExtensionError(
+                    "This Python was built without SQLite loadable-extension support "
+                    "(see the writable-open error text for platform fixes).")
+            self.db.enable_load_extension(True)
+            sqlite_vec.load(self.db)
+            self.db.enable_load_extension(False)
+            self.db.row_factory = sqlite3.Row
+            return
+        self.immutable = False
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # brain.db holds every chunk of the corpus in CLEARTEXT. Under the common
         # umask 022, mkdir gave 0755 and sqlite3.connect() gave 0644 — world-

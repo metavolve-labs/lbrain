@@ -20,6 +20,7 @@ from .onboard import run_onboarding
 from .presentation import echo as present
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
+from .epoch import open_store
 from .store import SqliteExtensionError, Store
 
 
@@ -253,7 +254,7 @@ def doctor(as_json: bool):
     drift = None
     stats = {}
     try:
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         stored = {k: store.get_meta(k) for k in
                   ("embedding_provider", "embedding_model", "embedding_dim")}
         model = cfg.embedding_model
@@ -529,7 +530,7 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
     if not existing_config:
         cfg.serve_mode = "structured"
     cfg.write()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     stats = store.stats()
     store.close()
     active_key = ("(none needed — on-device)" if provider == "local"
@@ -723,12 +724,19 @@ def _project_belief(store, doc) -> int:
 def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: bool):
     """Walk source directories and ingest markdown into the brain."""
     cfg = Config.load()
+    # Epoch-managed home ⇒ build-validate-swap is the ONLY write path (design
+    # v1.4). Staging homes have no epochs/CURRENT, so `lbrain epoch build`'s own
+    # subprocess import is unaffected by this guard.
+    from .epoch import EpochError as _EpochError
+    try:
+        store = open_store(cfg, for_write=True)
+    except _EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
     sources = [Path(p).expanduser().resolve() for p in paths] if paths else cfg.sources
     if not sources:
         click.secho("✗ No sources configured. Run `lbrain init --source <dir>`.", fg="red")
         sys.exit(1)
-
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
 
     # A chunker upgrade must reach the DATA, not just the code. Import short-circuits
     # on the body hash, so shipping new chunk boundaries left every existing corpus on
@@ -936,7 +944,13 @@ def embed(stale: bool, batch: int, reuse_from):
         )
         sys.exit(1)
 
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    # Epoch-managed home ⇒ embedding writes go through `lbrain epoch build` only.
+    from .epoch import EpochError as _EpochError
+    try:
+        store = open_store(cfg, for_write=True)
+    except _EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
     embedder = make_embedder(cfg)
 
     # Guard against silently corrupting the vector space when the embedding config
@@ -1048,7 +1062,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         if not ok:
             present(f"[AMP gate] no memory injected — {reason}.", role="caution")
             return
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     embedder = make_embedder(cfg)
     try:
         t0 = time.monotonic()
@@ -1117,7 +1131,7 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
     warn_if_unprovisioned()
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         t0 = time.monotonic()
         hits = keyword_only(store, query, k=k, persona=persona,
@@ -1154,8 +1168,14 @@ def stats():
     """Show brain statistics."""
     warn_if_unprovisioned()  # `lbrain stats` is where A-425 was observed
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     s = store.stats()
+    watermark = epoch_line = ""
+    if getattr(store, "immutable", False):
+        row = dict(store.db.execute(
+            "SELECT key, value FROM meta WHERE key IN ('epoch_id','watermark_scan_end')"))
+        epoch_line = row.get("epoch_id", getattr(store, "epoch_id", ""))
+        watermark = row.get("watermark_scan_end", "")
     store.close()
     click.echo(f"docs:           {s['docs']}")
     click.echo(f"chunks:         {s['chunks']}")
@@ -1164,6 +1184,11 @@ def stats():
     click.echo(f"priority docs:  {s['priority_docs']}")
     click.echo(f"wikilinks:      {s['wikilinks']}")
     click.echo(f"tier-2 archives:{s.get('archives', 0):>3}")
+    if epoch_line:
+        # The freshness watermark, printed on the tin (design v1.4 §4): content-
+        # digest-derived at build time, never an mtime.
+        click.echo(f"epoch:          {epoch_line}")
+        click.echo(f"  → index current as of: {watermark or 'unknown'}")
 
 
 @main.command()
@@ -1183,7 +1208,7 @@ def metrics(fmt: str, no_currency: bool):
 
     warn_if_unprovisioned()
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         m = telemetry.collect_metrics(store, None if no_currency else cfg)
     finally:
@@ -1222,7 +1247,7 @@ def check_action(action_text: str, k: int):
     """Cross-check a proposed action against saved feedback rules (anti-pattern detector)."""
     cfg = Config.load()
     warn_if_unprovisioned()  # "no conflicts" from an EMPTY brain is a green light
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     embedder = make_embedder(cfg)
     # Same omission as the MCP twin: this was the one retrieval path with no
     # envelope, so a standing permission scope did not apply to the tool called
@@ -1530,7 +1555,7 @@ def suggest(text, from_file, as_json):
            "action": None, "target": None}
     if s.should_commit:
         cfg = Config.load()
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         hits = []
         try:
             hits = search(cfg, store, make_embedder(cfg), text, k=3)
@@ -1611,7 +1636,7 @@ def consolidate(threshold: float, model: str, limit: int, dry_run: bool):
     """
     from .consolidate import ABSTRACTIONS_DIR, DEFAULT_MODEL, run_consolidation
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         generated, skipped, total = run_consolidation(
             cfg, store,
@@ -1758,7 +1783,7 @@ def whoami(as_json: bool):
     cfg = Config.load()
     stats = {}
     try:
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         stats = store.stats()
         store.close()
     except Exception:
@@ -1992,7 +2017,7 @@ def _rewrite_frontmatter(path: Path, updates: dict) -> None:
 
 
 def _open_store(cfg):
-    return Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    return open_store(cfg)
 
 
 @main.group()
