@@ -22,14 +22,22 @@ def register(mcp) -> None:
             k: Number of records to surface (default 5).
             namespace: Optional silo filter (e.g. 'private').
         """
+        from pathlib import Path
+
         from .. import amp
-        from ..config import Config
+        from ..config import CONFIG_DIR, Config
         from ..embed import make_embedder
-        from ..store import Store
+        from ..epoch import current_epoch_id, open_store
         from .storage import ArchiveStore
 
         cfg = Config.load()
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        # RED-W-BYPASS-1 (CSO 2026-09-01): a direct non-immutable Store() open
+        # MATERIALIZED a brain.db at a foreign db_path on a mere read. Route
+        # through the engine read path (immutable on epoch homes) and refuse to
+        # create on a legacy home whose db is absent.
+        if current_epoch_id(Path(CONFIG_DIR)) is None and not Path(cfg.db_path).exists():
+            return f"No local archive index (no brain at {cfg.db_path}) — refusing to create one on a read."
+        store = open_store(cfg)
         embedder = make_embedder(cfg)
         try:
             astore = ArchiveStore(store.db, store.embedding_dim)

@@ -273,8 +273,6 @@ def _lookup_full(
     # A record may be minted as fulltext + sidecar under one name; prefer the
     # payload, not the metadata.
     nodes = [e["node"] for e in edges]
-    if not nodes:
-        raise ResolveError(f"{name} is not registered on this gateway")
 
     # One gcx:// name legitimately covers two transactions: the payload and a
     # JSON metadata sidecar. Select on SEMANTICS, not on a naming convention —
@@ -303,6 +301,15 @@ def _lookup_full(
             return node["id"], tags, auth_id
         node_id, tags = _lookup_by_id(target, graphql=graphql, timeout=timeout)
         return node_id, tags, auth_id
+
+    # GCX-02 (2026-08-31, first production authority record): the empty-candidates
+    # refusal used to fire BEFORE the authority consult, so a pointer record could
+    # redirect among existing GCX-Name claimants but could not make a bare name
+    # resolvable at all. A seat ROOT (gcx://…/csuite/cio/keel) deliberately has no
+    # GCX-Name transaction of its own — the operator's pointer record IS its
+    # resolvability. With no authority record, behaviour is unchanged: refuse.
+    if not nodes:
+        raise ResolveError(f"{name} is not registered on this gateway")
 
     if len(chosen) > 1:
         ids = ", ".join(n["id"] for n, _ in chosen[:5])

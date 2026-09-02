@@ -72,6 +72,42 @@ _BODY_TRANS = str.maketrans({
     "⧼": "⟨", "⧽": "⟩",
 })
 
+
+def _fold_confusable_dots(s: str) -> str:
+    """C2-10: neutralize the confusable dot/separator class by PROPERTY, not a
+    code-point hand-list (which will always miss one — cycle-2 found dozens of
+    surviving Po/Sk confusables plus two LETTER-category dots).
+
+    A non-ASCII character is folded to '-' when it is:
+      * category Po (other punctuation: middle dots, bullets, primes, daggers,
+        para-separators, full stops) or Sk (modifier symbols: modifier colons/
+        dots) — the whole small-punctuation/separator class; or
+      * a LETTER that renders as a dot, identified by its Unicode name ending in
+        "DOT" (U+A78F LATIN LETTER SINOLOGICAL DOT) or containing "ARAEA" (U+318D
+        / U+119E hangul araea). `endswith("DOT")` deliberately does NOT match
+        "…DOTLESS I" (U+0131) or "…WITH DOT ABOVE", so real letters are untouched.
+
+    Ordinary letters, digits, whitespace, ASCII punctuation, dashes, quotation
+    marks, arrows and other non-dot symbols pass through unchanged — the fold
+    targets the separator-confusable class, not scripts.
+    """
+    out = []
+    for ch in s:
+        if ord(ch) < 128:
+            out.append(ch)
+            continue
+        cat = unicodedata.category(ch)
+        if cat in ("Po", "Sk"):
+            out.append("-")
+            continue
+        if cat[0] == "L":
+            name = unicodedata.name(ch, "")
+            if name.endswith("DOT") or "ARAEA" in name:
+                out.append("-")
+                continue
+        out.append(ch)
+    return "".join(out)
+
 # doc_type is corpus-derived (arbitrary YAML frontmatter) — whitelist the enum.
 DOC_TYPES = {"user", "feedback", "project", "reference", "abstraction", "belief"}
 
@@ -87,6 +123,7 @@ def sanitize_field(s: str, max_len: int = 120) -> str:
     s = _LINE_SEPS.sub(" ", s)
     s = _CTRL.sub("", s)
     s = s.translate(_FIELD_TRANS)
+    s = _fold_confusable_dots(s)   # C2-10: property-based catch-all, not a hand-list
     s = re.sub(r"\s+", " ", s).strip()
     if len(s) > max_len:
         s = s[:max_len].rstrip() + "…"

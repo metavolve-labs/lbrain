@@ -1,15 +1,62 @@
 # Changelog
 
-## Unreleased
+## 0.1.9.post1 — 2026-09-01
+
+One-line correction: 0.1.9's artifact self-reported `__version__ == "0.1.8"`
+(`lbrain/__init__.py` carried a second, unbumped version declaration — caught
+by the CSO's fresh-venv artifact verify within minutes of release). Content is
+byte-identical to 0.1.9 plus the version literal and a release gate
+(`tests/test_version_single_truth.py`) that fails on any future drift between
+`pyproject.toml` and `lbrain.__version__`.
+
+## 0.1.9 — 2026-09-01
+
+The reset-era release: four engine defect classes closed with adversarial
+verification, and atomic epochs — build→validate→swap as the only write path —
+ships opt-in. Every change below was independently RED/GREEN-verified by a
+second seat before release (two-gate), and the epoch design survived a
+three-vendor external adversarial panel plus an in-house falsifier before a
+line of code was written.
+
+### Added — atomic epochs (opt-in; increments 1–3)
+
+A brain home that publishes an epoch gets: candidate builds in staging (local
+scratch on slow filesystems), a validation gate that refuses zero-vector /
+wrong-dimension / scrambled-binding / mass-absence candidates (deletion
+manifests judge the FILESYSTEM, and an unmounted drive is never read as
+deletion), publication as a checkpointed single file via VACUUM INTO, an
+atomic CURRENT pointer with a full fsync durability chain, mkdir+heartbeat
+builder locks with ownership nonces, immutable reader opens with reference-
+counted leases (prune can never delete an epoch under a reader), and a
+content-digest freshness watermark ("index current as of…") — never mtime.
+`lbrain epoch build|status|prune`. Direct `import`/`embed` refuse on an
+epoch-managed home. Legacy homes are byte-for-byte unchanged.
+
+### Fixed — four defect classes (each with regression + adversarial fixtures)
+
+- **SUP-15** — supersession edges now require a resolvable slug; disclaimer
+  lines and prose fragments no longer mint rows no resolver can match
+  (measured pre-fix: 16 rows, 2 resolving).
+- **MS-01** — multi-source rel_path collisions no longer thrash one row per
+  same-named root file on every import (row identity is the file, not the
+  bare key; `doctor` and `import` finally converge).
+- **DD-01** — historical duplicate-identity rows are collapsed on import
+  (196 groups measured in production → 0), never guessing on unscanned roots.
+- **GCX-02** — a gcx:// operator authority record can now make a bare name
+  resolvable (seat roots deliberately carry no GCX-Name transaction of their
+  own; found by the first production registrar bind).
+
+### Added — dual-view supersession, integrator enclave, rebuild fast-path
+
+`current_only` retrieval + claim-span grain (a fresh file's stale span retires
+without retiring the file); capability-scoped `enclave_query` (no-LLM
+integrator); `lbrain embed --reuse-from` (chunk-hash vector reuse; measured
+156s vs ~25min) with a bulk-load fix for slow-filesystem sources.
 
 ### Added — `lbrain metrics` (telemetry exporter)
 
-`lbrain metrics` exports brain health as scrapeable metrics — Prometheus text
-exposition format (default) or JSON. Turns the signals `doctor` inspects into a
-metrics surface (docs/chunks/embedded/coverage, wikilinks, index-currency,
-embedding-drift) so a local-first brain can be watched by ops tooling without
-running a server: pipe it to a node_exporter textfile collector, or curl it from
-a sidecar. Read-only; stdout stays machine-clean (warnings go to stderr);
+Prometheus text (default) or JSON: docs/chunks/embedded/coverage, wikilinks,
+index-currency, embedding-drift. Read-only; machine-clean stdout;
 `--no-currency` for a fast source-free scrape.
 
 

@@ -24,7 +24,7 @@ HEADER_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 # de-ranked by the redirect stub that points AT it. A supersession pointing the
 # wrong way is worse than a missing one: it buries the live record and promotes
 # the dead one.
-SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
+SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|—–]*)")
 
 # SUP-05: a supersession declaration is a real edge only when it is the author's
 # OWN column-0 statement — not a line QUOTED (`>`), INDENTED (code), or FENCED
@@ -32,8 +32,32 @@ SUPERSEDE_RE = re.compile(r"(?im)^[#>\s]*\**\s*supersedes\b[\s:*]*([^\n·|]*)")
 # review quoting the Anomaly Register's own Supersedes line minted an edge that
 # de-ranked the live register. The regex cannot see fences, so the scan is
 # line-aware: it tracks fence state and rejects non-column-0 lines.
-_SUPERSEDE_LINE_RE = re.compile(r"(?i)^\*{0,2}\s*supersedes\b[\s:*]*([^\n·|]*)")
+_SUPERSEDE_LINE_RE = re.compile(r"(?i)^\*{0,2}\s*supersedes\b[\s:*]*([^\n·|—–]*)")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
+
+# SUP-15 (CSO 2026-08-31 measurement: main brain 16 rows / ~6 resolving): a bare
+# (non-wikilink) clause is an edge only when it is SHAPED like a resolvable slug —
+# one token, slug charset. Prose fragments ("nothing — `X.md` explains why", "the
+# July plan") minted rows whose tgt_slug can never match a document, so flagged
+# coverage silently fell below the every-record bar. The em/en-dash clause stop
+# above is half of the fix; this shape gate is the other half. A slug containing
+# an em/en-dash is the accepted (exotic) casualty.
+_SLUG_SHAPE_RE = re.compile(r"^[\w.\-/]+$")
+
+# C2-12 (case A): the indent/quote/fence rejection in _body_supersedes must run on
+# the body with LEADING WHITESPACE PRESERVED. python-frontmatter's `.content`
+# strips the leading line's whitespace, so an indented `Supersedes:` that is the
+# FIRST body line arrived at _body_supersedes already de-indented — the NFKC check
+# was dead code on that path and the line minted an edge (verified through parse()
+# by CSO blind re-verify: RED == GREEN on a3d35a1). We strip ONLY the frontmatter
+# block from the raw source, never the body's own indentation.
+_FRONTMATTER_BLOCK_RE = re.compile(r"^(?:﻿)?---[ \t]*\r?\n.*?\r?\n---[ \t]*\r?\n", re.DOTALL)
+
+
+def _raw_body(text: str) -> str:
+    """The document body verbatim (frontmatter block removed, indentation intact)."""
+    m = _FRONTMATTER_BLOCK_RE.match(text)
+    return text[m.end():] if m else text
 
 
 def _body_supersedes(body: str) -> list[str]:
@@ -42,28 +66,54 @@ def _body_supersedes(body: str) -> list[str]:
     Rejects quoted / indented / fenced lines (SUP-05). Captures both the wikilink
     form `**Supersedes:** [[X]]` and the bare-slug form `**Supersedes:** X` (L5),
     honouring the empty-guard (`nothing`/`none`/`-`)."""
+    import unicodedata
     out: list[str] = []
     in_fence = False
     for line in body.splitlines():
-        if _FENCE_RE.match(line):
+        line_norm = unicodedata.normalize("NFKC", line)
+        if _FENCE_RE.match(line_norm):
             in_fence = not in_fence
             continue
-        if in_fence or line[:1] in (" ", "\t", ">", "#"):
+        if in_fence or line_norm[:1] in (" ", "\t", ">", "#"):
             continue  # fenced, indented (code), quoted, or a heading — not a declaration
-        m = _SUPERSEDE_LINE_RE.match(line)
+        m = _SUPERSEDE_LINE_RE.match(line_norm)
         if not m:
             continue
         clause = m.group(1).strip().strip("*").strip()
         if clause.lower() in _SUPERSEDE_EMPTY:
             continue
+        # SUP-15: "Supersedes nothing but updates [[X]]" is a DISCLAIMER — the
+        # author's first word settles it, whatever follows on the line.
+        first = clause.split()[0].strip("*").rstrip(":,.").lower() if clause else ""
+        if first in _SUPERSEDE_EMPTY:
+            continue
         links = WIKILINK_RE.findall(clause)
-        out.extend(links or [clause])   # L5: bare slug when no wikilink present
+        if not links and not _SLUG_SHAPE_RE.match(clause):
+            continue  # SUP-15: bare clause that isn't slug-shaped — prose, not an edge
+        raw_slugs = links or [clause]
+        for s in raw_slugs:
+            s_clean = s.strip().lower()
+            if s_clean not in _SUPERSEDE_EMPTY:
+                out.append(s)
     return out
 
 # "nothing" / "none" / "n/a" is an author saying explicitly that this document
 # replaces no other. Treating it as a value produced no edge by luck (no wikilink
 # to find); being explicit costs one check and documents the intent.
-_SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—"}
+_SUPERSEDE_EMPTY = {"", "nothing", "none", "n/a", "na", "-", "—", "–"}
+
+
+def _sup_slugs(raw: str) -> list[str]:
+    """Wikilink targets in `raw` (or the bare clause), each empty-guarded on the
+    EXTRACTED value. C2-12: `[[nothing]]` extracts to 'nothing', which the
+    empty-guard must catch — the raw-clause guard let a wikilink-wrapped empty
+    target through ('[[nothing]]' != 'nothing') and minted a spurious edge."""
+    out: list[str] = []
+    for slug in (WIKILINK_RE.findall(raw) or [raw.strip()]):
+        s = slug.strip()
+        if s and s.lower() not in _SUPERSEDE_EMPTY:
+            out.append(s)
+    return out
 # OFF-13: load the tokenizer LAZILY, not at module scope. `get_encoding` fetches
 # the BPE vocabulary from a CDN on a cold `~/.tiktoken`; doing it at import made a
 # "local-first" engine unimportable offline. The fetch now happens on first
@@ -96,6 +146,7 @@ class Doc:
     metadata: dict
     wikilinks: list[str] = field(default_factory=list)
     supersedes: list[str] = field(default_factory=list)  # slugs this doc replaces
+    claims: list = field(default_factory=list)  # claim-span lifecycle records (dual-view)
     doc_hash: str = ""
     mtime: float = 0.0
     is_priority: bool = False
@@ -239,19 +290,36 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     # truth surfaces, while the originals stay indexed for provenance.
     supersedes: list[str] = []
     fm_sup = meta.get("supersedes")
-    if isinstance(fm_sup, str):
-        # SUP-14: the empty-guard applies on the frontmatter STRING path too —
-        # `supersedes: nothing` is an author saying "replaces nothing", not an
-        # edge named 'nothing'. Previously guarded only on the body path.
-        if fm_sup.strip().lower() not in _SUPERSEDE_EMPTY:
-            supersedes.extend(WIKILINK_RE.findall(fm_sup) or [fm_sup.strip()])
-    elif isinstance(fm_sup, list):
-        # SUP-14: and on the LIST path — `- nothing` in a list is not an edge.
-        for x in fm_sup:
-            xs = str(x).strip()
-            if xs.lower() not in _SUPERSEDE_EMPTY:
-                supersedes.extend(WIKILINK_RE.findall(xs) or [xs])
-    supersedes.extend(_body_supersedes(body))
+
+    def _flatten_supersedes(val) -> list[str]:
+        if isinstance(val, list):
+            out = []
+            for x in val:
+                out.extend(_flatten_supersedes(x))
+            return out
+        elif isinstance(val, str):
+            return [val]
+        elif val is None:
+            return []
+        else:
+            return [str(val)]
+
+    for xs in _flatten_supersedes(fm_sup):
+        xs_strip = xs.strip()
+        if xs_strip.lower() not in _SUPERSEDE_EMPTY:
+            extracted = WIKILINK_RE.findall(xs_strip)
+            if not extracted:
+                # SUP-15: frontmatter bare value must be slug-shaped too — a prose
+                # sentence in `supersedes:` mints a row no resolver can match.
+                if not _SLUG_SHAPE_RE.match(xs_strip):
+                    continue
+                extracted = [xs_strip]
+            for s in extracted:
+                if s.strip().lower() not in _SUPERSEDE_EMPTY:
+                    supersedes.append(s)
+    # C2-12 (case A): scan the RAW body — frontmatter's `.content` (`body`) strips
+    # a leading indented line, defeating the indent/quote/fence rejection.
+    supersedes.extend(_body_supersedes(_raw_body(text)))
     supersedes = sorted({s.strip() for s in supersedes if s and s.strip()})
     doc_type = ""
     if isinstance(meta.get("metadata"), dict):
@@ -324,6 +392,27 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         part.startswith("000-PRIORITY") for part in re.split(r"[\\/]", rel)
     )
 
+    # Claim-span dual-view (DR panel 2026-08-30): a `claims:` frontmatter list retires
+    # specific claims INSIDE a living document. Each {text, status, valid_to}. current_only
+    # retrieval drops any CHUNK whose text contains a closed claim's text — so a fresh
+    # file's stale span is retired without retiring the whole file (the grain mismatch).
+    # Text-matching, not char offsets, so an edit that shifts positions can't silently
+    # mis-target (the offset-recompute fragility the panel flagged).
+    claims = []
+    _raw_claims = meta.get("claims")
+    if isinstance(_raw_claims, list):
+        for _c in _raw_claims:
+            if not isinstance(_c, dict):
+                continue
+            _t = str(_c.get("text", "")).strip()
+            if not _t:
+                continue
+            claims.append({
+                "text": _t,
+                "status": str(_c.get("status", "current")).strip().lower(),
+                "valid_to": _norm_date(_c.get("valid_to")) if _c.get("valid_to") else "",
+            })
+
     doc_hash = hashlib.sha1(body.encode("utf-8")).hexdigest()
     return Doc(
         path=path,
@@ -333,6 +422,7 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         metadata=meta,
         wikilinks=wikilinks,
         supersedes=supersedes,
+        claims=claims,
         doc_hash=doc_hash,
         mtime=path.stat().st_mtime,
         is_priority=is_priority,

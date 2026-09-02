@@ -39,6 +39,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the RELEASE-REQUIRES gate below runs merge-base
+          # --is-ancestor, which is meaningless on a depth-1 clone.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -68,12 +72,53 @@ jobs:
           fi
           echo "  not yet on PyPI (HTTP $CODE) — ok to publish"
 
-          git fetch --tags --quiet
+          # --force: when this workflow is dispatched ON the tag (the intended
+          # path since AMBER-REL-2), checkout has already materialized the tag
+          # ref locally and a plain --tags fetch refuses to clobber it — dying
+          # under `set -e` with no message (observed run 33593710375).
+          git fetch --tags --force --quiet
           if ! git rev-parse "v$PKG" >/dev/null 2>&1; then
             echo "::error::no git tag v$PKG. Tag the commit you are publishing so the artifact maps to it."
             exit 1
           fi
           echo "  tag v$PKG exists and points at $(git rev-parse --short "v$PKG")"
+
+      - name: Refuse a release that does not CONTAIN its named fixes
+        # Born 2026-09-02 (the 0.1.9.x lesson): the version being published must
+        # be a descendant of every SHA in RELEASE-REQUIRES. Publishing main while
+        # release-blocking work sits on a branch stops being possible.
+        run: |
+          TAG="v$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
+          # AMBER-REL-2 (CSO 2026-09-02): build builds HEAD of the dispatched ref,
+          # so the tag containing the fixes proves nothing unless HEAD IS the tag —
+          # otherwise artifacts don't match the commit their version names (the
+          # 0.1.1 untraceability in modern dress). Dispatch ON the tag.
+          if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::HEAD ($(git rev-parse --short HEAD)) is not $TAG ($(git rev-parse --short "$TAG^{commit}")) — dispatch this workflow on the tag itself."
+            exit 1
+          fi
+          # The tag annotation must NAME a CSO verdict (RELEASING.md step 4-5):
+          # scripts/release-preflight.sh refuses without one, and this makes the
+          # workflow able to see that the preflight's gate was actually crossed.
+          if ! git tag -l --format='%(contents)' "$TAG" | grep -qi "CSO verdict"; then
+            echo "::error::tag $TAG's message does not name a CSO verdict — run scripts/release-preflight.sh (RELEASING.md); its CLEAR output dictates the tag message."
+            exit 1
+          fi
+          echo "  tag message names a CSO verdict — preflight gate crossed"
+          FAIL=0; VERIFIED=0
+          # `; echo` immunizes against a future unterminated last line (CSO note 2).
+          while read -r sha label; do
+            case "$sha" in ''|'#'*) continue;; esac
+            if git merge-base --is-ancestor "$sha" "$TAG" 2>/dev/null; then
+              echo "  ✓ $TAG contains $sha ($label)"; VERIFIED=$((VERIFIED+1))
+            else
+              echo "::error::$TAG does NOT contain required fix $sha ($label) — this release would ship without its own guarantees."
+              FAIL=1
+            fi
+          done < <(cat RELEASE-REQUIRES; echo)
+          # An empty manifest passes but must READ as zero, not as coverage (CSO note 1).
+          echo "  RELEASE-REQUIRES fixes verified: $VERIFIED"
+          exit "$FAIL"
 
       - run: pip install build twine
       - run: python -m build
@@ -90,6 +135,29 @@ jobs:
           print(len([n for n in zipfile.ZipFile(w).namelist() if n.startswith('lbrain/framework/')]))")
           echo "lbrain/framework entries: $COUNT"
           [ "$COUNT" -ge 6 ] || { echo "::error::wheel is missing lbrain.framework — rebuild"; exit 1; }
+
+      - name: The artifact must AGREE WITH ITSELF about its version
+        # Third occurrence closed here (0.1.5→0.1.4, 0.1.9→0.1.8, 0.1.10→0.1.9.post1,
+        # mac-CSO STOP 2026-09-02T0518Z): pyproject and lbrain/__init__.__version__ are
+        # two declarations, and only pyproject was on the release path's critical path.
+        # The pytest drift gate fired RED in CI and the publish path never reads CI.
+        # This runs ON THE BYTES BEING UPLOADED — no source tree, no pytest, and a
+        # dispatch cannot route around it.
+        run: |
+          python - <<'PY'
+          import glob, re, sys, zipfile
+          w = sorted(glob.glob("dist/*.whl"))[-1]
+          z = zipfile.ZipFile(w)
+          meta_v = re.search(r"-([^-]+)-py", w.split("/")[-1]).group(1)
+          init = z.read("lbrain/__init__.py").decode()
+          m = re.search(r'__version__\s*=\s*"([^"]+)"', init)
+          self_v = m.group(1) if m else "(missing)"
+          print(f"dist metadata: {meta_v}   lbrain.__version__: {self_v}")
+          if self_v != meta_v:
+              print(f"::error::the artifact misreports itself: metadata {meta_v} but "
+                    f"__version__ {self_v}. This wheel must not be published.")
+              sys.exit(1)
+          PY
 
       - uses: actions/upload-artifact@v4
         with:

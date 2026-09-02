@@ -26,6 +26,7 @@ from .lair_protocol import (
 )
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode
+from .epoch import open_store
 from .store import Store
 
 mcp = FastMCP("lbrain")
@@ -173,7 +174,7 @@ def lair_query(query: str, k: int = 8, doc_type: str | None = None, priority_onl
         ok, reason = amp.gate(query, getattr(cfg, "amp_min_chars", 12))
         if not ok:
             return unprovisioned + f"[AMP gate] no memory injected — {reason}."
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     embedder, only_banner = _embedder_or_banner(cfg, unprovisioned)
     if only_banner:
         store.close()
@@ -229,7 +230,7 @@ def lair_search(query: str, k: int = 10) -> str:
     """
     cfg = Config.load()
     unprovisioned = unprovisioned_banner()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         hits = keyword_only(store, query, k=k, persona=PERSONA or None,
                             envelope=_envelope(cfg))
@@ -301,7 +302,7 @@ def lair_check_action(action_text: str) -> str:
     # private record and this tool returned its verbatim text — with no blinding
     # notice, because there was no `withheld` to render one from.
     unprovisioned = unprovisioned_banner()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     embedder, only_banner = _embedder_or_banner(cfg, unprovisioned)
     if only_banner:
         store.close()
@@ -427,7 +428,7 @@ def lair_whoami() -> str:
     cfg = Config.load()
     stats = {}
     try:
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         stats = store.stats()
         store.close()
     except Exception:
@@ -453,7 +454,7 @@ def lair_stats() -> str:
     # not-indexed but was blind to the worse third case, no-brain-at-all, and
     # reported a confident `docs: 0` for it (A-425, MCP path, 2026-08-01).
     unprovisioned = unprovisioned_banner()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         s = store.stats()
         cov = s["embedded"] / max(s["chunks"], 1) * 100

@@ -330,6 +330,7 @@ def search(
     recency: bool = False,
     persona: str | None = None,
     envelope=None,
+    current_only: bool = False,
 ) -> list[Hit]:
     """Hybrid: vector top-N + BM25 top-N → RRF merge → always-on boosts → top-k.
 
@@ -506,11 +507,29 @@ def search(
         # the same-directory target; a still-ambiguous edge buries nothing.
         superseded_paths = _resolve_superseded_paths(store)
         if superseded_paths:
-            pen = getattr(cfg, "supersede_penalty", 0.25)
-            for h in out:
-                if h.rel_path in superseded_paths:
-                    h.score *= pen
-                    h.boosts["superseded"] = pen
+            if current_only:
+                # Dual-view eligibility (DR panel, 2026-08-30): default-current retrieval
+                # EXCLUDES superseded records rather than serving them naked below the fold.
+                # A flag the ranker ignores is not a flag — when the retired value and its
+                # correction are both in-context, generation serves the stale one 15-40% of
+                # the time (MemStrata 2606.26511; Madam-RAG 2504.13079). History/as-of
+                # retrieval (current_only=False, the default) still returns them.
+                out = [h for h in out if h.rel_path not in superseded_paths]
+            else:
+                pen = getattr(cfg, "supersede_penalty", 0.25)
+                for h in out:
+                    if h.rel_path in superseded_paths:
+                        h.score *= pen
+                        h.boosts["superseded"] = pen
+        if current_only and out:
+            # Claim-span exclusion (grain mismatch): drop chunks whose text contains a
+            # CLOSED claim, even in an otherwise-current doc — a fresh file can carry a
+            # stale span (a March paragraph, an uncorrected table cell).
+            closed = store.closed_claims()
+            if closed:
+                out = [h for h in out
+                       if not any(t.lower() in h.text.lower()
+                                  for t in closed.get(h.rel_path, ()))]
 
     # 6. Recency (call-when-needed) — bounded mtime freshness for recency-sensitive
     #    queries. READ-ONLY (no salience writes, no feedback loop), priority docs exempt.
@@ -550,7 +569,8 @@ def search(
 
 
 def keyword_only(
-    store: Store, query: str, k: int = 10, persona: str | None = None, envelope=None
+    store: Store, query: str, k: int = 10, persona: str | None = None, envelope=None,
+    current_only: bool = False,
 ) -> list[Hit]:
     """Pure FTS5 keyword search. No embedding required.
 
@@ -601,12 +621,31 @@ def keyword_only(
     # two retrieval paths (anomaly A-410). No RANKING change here: keyword search
     # stays rank-by-FTS-relevance and the penalty is not applied to the score;
     # this marks the record so the reader is told, which is the whole point.
-    superseded = {canonical_slug(x) for x in store.superseded_slugs()}
-    superseded.discard("")
-    if superseded:
-        for h in hits:
-            if _basename_slug(h.rel_path) in superseded:
-                h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
+    # C2-08: resolve to SPECIFIC target paths (AX-06's `_resolve_superseded_paths`),
+    # the same as the ranked path — NOT a bare basename-slug set. The old
+    # `_basename_slug(rel_path) in superseded_slugs()` flagged every same-named doc
+    # across directories, so `teamB/status.md` was marked SUPERSEDED by teamA's edge;
+    # an ambiguous edge now buries nothing. Flag only (no score multiplier): keyword
+    # search stays rank-by-FTS-relevance; this marks the record so the reader is told.
+    superseded_paths = _resolve_superseded_paths(store)
+    if superseded_paths:
+        if current_only:
+            # Dual-view eligibility (DR panel 2026-08-30): exclude superseded on the
+            # keyword path too, matching the ranked path. History/as-of retrieval uses
+            # current_only=False (the default), which keeps + flags them.
+            hits = [h for h in hits if h.rel_path not in superseded_paths]
+        else:
+            for h in hits:
+                if h.rel_path in superseded_paths:
+                    h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
+    if current_only and hits:
+        # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
+        # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.
+        closed = store.closed_claims()
+        if closed:
+            hits = [h for h in hits
+                    if not any(t.lower() in h.text.lower()
+                               for t in closed.get(h.rel_path, ()))]
     # Draft isolation is disclosure control, so it applies here too — the keyword
     # path must not be a way around it. Marking only (rank=False): keyword search
     # stays rank-by-FTS-relevance, exactly as it does for supersession above.
@@ -614,6 +653,58 @@ def keyword_only(
     hits = apply_belief_visibility(store, hits, persona, rank=False)
     hits, withheld = apply_disclosure(store, hits, envelope)
     return HitList.of(hits[:k], withheld=withheld, envelope=envelope)
+
+
+def _under_prefix(rel_path: str, prefixes) -> bool:
+    """True iff rel_path is AT or UNDER one of the allowed manifest prefixes."""
+    for p in prefixes:
+        p = str(p).rstrip("/")
+        if rel_path == p or rel_path.startswith(p + "/"):
+            return True
+    return False
+
+
+def enclave_query(
+    store: Store,
+    query: str,
+    *,
+    allowed_prefixes,
+    k: int = 10,
+    current_only: bool = True,
+    cite_only_out_of_scope: bool = False,
+    persona: str | None = None,
+    envelope=None,
+) -> list[Hit]:
+    """The integrator enclave's query path — capability-scoped retrieval, NO LLM.
+
+    Returns only chunks whose rel_path is UNDER one of ``allowed_prefixes`` (the caller's
+    manifest scope). This is the query-time fail-closed predicate the DR panel (2026-08-30)
+    prescribed as defense-in-depth ATOP import-time manifests: a scoped caller cannot pull
+    out-of-manifest content through a union index, and prompt-injecting one seat cannot turn
+    the union view into a confused deputy that leaks another compartment (Q5; CaMeL
+    2503.18813, OWASP LLM06). ``current_only`` default-excludes closed records (dual-view).
+
+    With ``cite_only_out_of_scope`` the out-of-scope hits are returned with their BYTES
+    stripped (text/title blanked, ``boosts['cite_only']=1.0``) so the enclave can report
+    'a conflicting record exists at <path>' by reference — text flows only for in-scope
+    chunks. This is the capability discipline that lets Fable keep integrator RECALL without
+    an agent holding the union index in its context.
+    """
+    from dataclasses import replace as _replace
+
+    prefixes = tuple(p for p in (allowed_prefixes or ()) if p)
+    hits = keyword_only(
+        store, query, k=max(k * 5, 25), persona=persona, envelope=envelope,
+        current_only=current_only,
+    )
+    scoped: list[Hit] = []
+    for h in hits:
+        if _under_prefix(h.rel_path, prefixes):
+            scoped.append(h)
+        elif cite_only_out_of_scope:
+            scoped.append(_replace(h, text="", title="",
+                                   boosts={**h.boosts, "cite_only": 1.0}))
+    return scoped[:k]
 
 
 def _fts_query(q: str) -> str:

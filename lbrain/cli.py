@@ -20,6 +20,7 @@ from .onboard import run_onboarding
 from .presentation import echo as present
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
+from .epoch import open_store
 from .store import SqliteExtensionError, Store
 
 
@@ -253,7 +254,7 @@ def doctor(as_json: bool):
     drift = None
     stats = {}
     try:
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         stored = {k: store.get_meta(k) for k in
                   ("embedding_provider", "embedding_model", "embedding_dim")}
         model = cfg.embedding_model
@@ -374,6 +375,65 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        # ── core-memory health ──
+        # The always-served layer had NO freshness check by design — so doctor
+        # provides one. 2026-09-01: a CORE that still said "you are at L0
+        # read-only" through three recorded promotions muted a seat's authority
+        # and voice on EVERY query. A stale CORE is a personality/authority bug,
+        # not documentation debt; and an over-budget CORE silently loses its
+        # TAIL from every serve (A-421).
+        _cm_path = str(getattr(cfg, "core_memory_path", "") or "")
+        _cm_budget = int(getattr(cfg, "core_memory_chars", 0) or 0)
+        if _cm_path:
+            _cm = Path(_cm_path).expanduser()
+            if not _cm.exists():
+                click.secho(f"  ✗ core memory MISSING: {_cm} — configured to serve "
+                            "always, serving nothing", fg="red")
+            else:
+                _n = len(_cm.read_text(encoding="utf-8", errors="replace"))
+                _age_d = (time.time() - _cm.stat().st_mtime) / 86400
+                if _cm_budget and _n > _cm_budget:
+                    click.secho(
+                        f"  ✗ core memory TRUNCATING: {_n} chars > budget {_cm_budget} — "
+                        "the TAIL is cut from every single serve (A-421). Raise "
+                        "core_memory_chars, or trim the file.", fg="red")
+                else:
+                    click.echo(f"  core memory: {_n} chars / budget {_cm_budget} · "
+                               f"last edited {_age_d:.0f}d ago")
+                if _age_d > 14:
+                    click.secho(
+                        f"  ⚠ core memory unedited for {_age_d:.0f} days — it is served on "
+                        "EVERY query and nothing supersedes it. Review it against the "
+                        "seat's live ledgers (permissions, status words, facts); a stale "
+                        "CORE overrides fresher records by sheer repetition.", fg="yellow")
+        # ── epoch surface (increment 4) ──
+        from .epoch import current_epoch_id as _cur, epoch_db as _edb, epochs_root as _eroot
+        _eid = _cur(CONFIG_DIR)
+        if _eid:
+            import sqlite3 as _sq
+            try:
+                _c = _sq.connect(f"file:{_edb(CONFIG_DIR, _eid)}?immutable=1", uri=True)
+                _wm = dict(_c.execute(
+                    "SELECT key, value FROM meta WHERE key IN "
+                    "('watermark_scan_end','watermark_scan_start')"))
+                _c.close()
+            except Exception:
+                _wm = {}
+            click.echo(f"  epoch: {_eid} — index current as of "
+                       f"{_wm.get('watermark_scan_end', 'unknown')} (content-digest watermark, never mtime)")
+            if str(CONFIG_DIR).startswith("/mnt/"):
+                click.secho(
+                    "  ⚠ epoch home on DrvFs: pointer swaps are atomic for readers but NOT "
+                    "provably crash-durable here — directory fsync is unreliable on the 9p "
+                    "bridge, and a successful fsync proves nothing (cache=mmap is client "
+                    "writeback). Authoritative homes belong on ext4; treat this one as a "
+                    "rebuildable replica.", fg="yellow")
+            _cur_file = _eroot(CONFIG_DIR) / "CURRENT"
+            if _cur_file.exists() and not os.access(_cur_file, os.W_OK):
+                click.secho(
+                    "  ⚠ epochs/CURRENT is not writable (read-only attribute?) — the next "
+                    "publish will fail at the pointer swap; clear the attribute first.",
+                    fg="yellow")
         _echo_currency(currency)
         if setup_drift:
             click.echo()
@@ -529,7 +589,7 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
     if not existing_config:
         cfg.serve_mode = "structured"
     cfg.write()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     stats = store.stats()
     store.close()
     active_key = ("(none needed — on-device)" if provider == "local"
@@ -723,12 +783,23 @@ def _project_belief(store, doc) -> int:
 def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: bool):
     """Walk source directories and ingest markdown into the brain."""
     cfg = Config.load()
+    # Epoch-managed home ⇒ build-validate-swap is the ONLY write path (design
+    # v1.4). Staging homes have no epochs/CURRENT, so `lbrain epoch build`'s own
+    # subprocess import is unaffected by this guard.
+    from .epoch import EpochError as _EpochError
+    from .write_gates import WriteGateError as _WGError
+    try:
+        store = open_store(cfg, for_write=True)
+    except _WGError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
+    except _EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
     sources = [Path(p).expanduser().resolve() for p in paths] if paths else cfg.sources
     if not sources:
         click.secho("✗ No sources configured. Run `lbrain init --source <dir>`.", fg="red")
         sys.exit(1)
-
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
 
     # A chunker upgrade must reach the DATA, not just the code. Import short-circuits
     # on the body hash, so shipping new chunk boundaries left every existing corpus on
@@ -784,6 +855,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
     updated_docs = 0
     unchanged_docs = 0
     meta_refreshed = 0   # frontmatter changed, body did not (A-401)
+    seen_rels: set[str] = set()   # keys this scan computed — feeds DD-01 dedupe
     beliefs_seen = 0
     total_chunks = 0
 
@@ -793,7 +865,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
         with store.transaction():
             for path in files:
                 doc = parse(path, repo_root=src)
-                existing_hash = store.get_doc_hash(doc.rel_path)
+                # MS-01: resolve row identity by FILE — a cross-source rel_path
+                # collision (e.g. three plates each with a root `_INDEX.md`)
+                # must not thrash one row on every import.
+                doc.rel_path, existing_hash = store.resolve_rel_path(
+                    doc.rel_path, str(doc.path), Path(src).name)
+                seen_rels.add(doc.rel_path)
                 # Supersession edges are resolved at search time, so keep them current
                 # for every doc — even ones whose chunks are unchanged (a Supersedes
                 # marker can be added/removed without re-chunking). With foreign_keys=ON
@@ -811,6 +888,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                     else:
                         unchanged_docs += 1
                     store.replace_supersessions(doc)
+                    store.replace_claim_spans(doc)
                     # Belief state lives ENTIRELY in frontmatter, so a promotion
                     # changes no chunk and would land in exactly this branch. If
                     # the projection were only refreshed on a body edit, a
@@ -825,6 +903,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                     store.delete_doc_chunks(doc.rel_path)
                 store.upsert_doc(doc)
                 store.replace_supersessions(doc)
+                store.replace_claim_spans(doc)
                 store.replace_wikilinks(doc)
                 beliefs_seen += _project_belief(store, doc)
                 chunks = chunk_doc(
@@ -835,6 +914,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
                 )
                 store.insert_chunks(chunks)
                 total_chunks += len(chunks)
+
+    # DD-01: collapse historical duplicate-abs_path twins onto the keys this
+    # scan computed. Runs on every import (not only --prune): the twins serve
+    # stale content NOW, and the pass is a no-op on a healthy brain.
+    with store.transaction():
+        deduped = store.dedupe_identity(seen_rels)
 
     pruned: list[str] = []
     if prune:
@@ -865,9 +950,14 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
         f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
         + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else "")
-        + (f", beliefs: {beliefs_seen}" if beliefs_seen else ""),
+        + (f", beliefs: {beliefs_seen}" if beliefs_seen else "")
+        + (f", identity-dupes collapsed: {len(deduped)}" if deduped else ""),
         fg="green",
     )
+    for rel, keep in deduped[:10]:
+        click.echo(f"    dup-identity collapsed: {rel}  →  {keep}")
+    if len(deduped) > 10:
+        click.echo(f"    … +{len(deduped) - 10} more")
     if pruned:
         for rel in pruned[:10]:
             click.echo(f"    pruned (gone or no longer indexable): {rel}")
@@ -898,7 +988,10 @@ def selftest(as_json):
 @main.command()
 @click.option("--stale/--all", default=True, help="Only embed un-embedded chunks (default)")
 @click.option("--batch", default=96, type=int, help="Embedding batch size")
-def embed(stale: bool, batch: int):
+@click.option("--reuse-from", "reuse_from", default=None,
+              help="Rebuild fast-path: copy embeddings by chunk_hash from a source brain.db "
+                   "(same-fingerprint chunks are reused instead of re-embedded).")
+def embed(stale: bool, batch: int, reuse_from):
     """Generate embeddings for chunks (re-embeds stale or all)."""
     cfg = Config.load()
     # provider="local" runs on-device and needs no credential — the whole point of
@@ -914,7 +1007,17 @@ def embed(stale: bool, batch: int):
         )
         sys.exit(1)
 
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    # Epoch-managed home ⇒ embedding writes go through `lbrain epoch build` only.
+    from .epoch import EpochError as _EpochError
+    from .write_gates import WriteGateError as _WGError
+    try:
+        store = open_store(cfg, for_write=True)
+    except _WGError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
+    except _EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
     embedder = make_embedder(cfg)
 
     # Guard against silently corrupting the vector space when the embedding config
@@ -944,6 +1047,21 @@ def embed(stale: bool, batch: int):
             fg="yellow",
         )
         store.reset_vectors(cfg.embedding_dim)
+
+    # Rebuild fast-path (CSO 2026-08-30): copy same-fingerprint embeddings by chunk_hash
+    # from a source brain so a de-wholesale rebuild re-embeds only the genuinely-new chunks
+    # (~89% reuse measured → ~25 min → ~3 min). Runs before stale selection so those chunks
+    # drop out of `pending`. Fingerprint-guarded inside; a mismatch reuses nothing.
+    if reuse_from:
+        reused, cand = store.reuse_embeddings_from(reuse_from, model=model, provider=provider)
+        if reused:
+            click.secho(
+                f"  reused {reused}/{cand} embeddings by chunk_hash from {reuse_from} "
+                f"— {cand - reused} need fresh embedding", fg="cyan")
+        else:
+            click.secho(
+                f"  ⚠ reuse-from matched 0 embeddings (fingerprint mismatch or no shared "
+                f"chunk_hash) — embedding all {cand} fresh", fg="yellow")
 
     if stale:
         pending = store.stale_chunks()
@@ -1011,7 +1129,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         if not ok:
             present(f"[AMP gate] no memory injected — {reason}.", role="caution")
             return
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     embedder = make_embedder(cfg)
     try:
         t0 = time.monotonic()
@@ -1080,7 +1198,7 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
     warn_if_unprovisioned()
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         t0 = time.monotonic()
         hits = keyword_only(store, query, k=k, persona=persona,
@@ -1117,8 +1235,14 @@ def stats():
     """Show brain statistics."""
     warn_if_unprovisioned()  # `lbrain stats` is where A-425 was observed
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     s = store.stats()
+    watermark = epoch_line = ""
+    if getattr(store, "immutable", False):
+        row = dict(store.db.execute(
+            "SELECT key, value FROM meta WHERE key IN ('epoch_id','watermark_scan_end')"))
+        epoch_line = row.get("epoch_id", getattr(store, "epoch_id", ""))
+        watermark = row.get("watermark_scan_end", "")
     store.close()
     click.echo(f"docs:           {s['docs']}")
     click.echo(f"chunks:         {s['chunks']}")
@@ -1127,6 +1251,11 @@ def stats():
     click.echo(f"priority docs:  {s['priority_docs']}")
     click.echo(f"wikilinks:      {s['wikilinks']}")
     click.echo(f"tier-2 archives:{s.get('archives', 0):>3}")
+    if epoch_line:
+        # The freshness watermark, printed on the tin (design v1.4 §4): content-
+        # digest-derived at build time, never an mtime.
+        click.echo(f"epoch:          {epoch_line}")
+        click.echo(f"  → index current as of: {watermark or 'unknown'}")
 
 
 @main.command()
@@ -1146,7 +1275,7 @@ def metrics(fmt: str, no_currency: bool):
 
     warn_if_unprovisioned()
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     try:
         m = telemetry.collect_metrics(store, None if no_currency else cfg)
     finally:
@@ -1185,7 +1314,7 @@ def check_action(action_text: str, k: int):
     """Cross-check a proposed action against saved feedback rules (anti-pattern detector)."""
     cfg = Config.load()
     warn_if_unprovisioned()  # "no conflicts" from an EMPTY brain is a green light
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = open_store(cfg)
     embedder = make_embedder(cfg)
     # Same omission as the MCP twin: this was the one retrieval path with no
     # envelope, so a standing permission scope did not apply to the tool called
@@ -1493,7 +1622,7 @@ def suggest(text, from_file, as_json):
            "action": None, "target": None}
     if s.should_commit:
         cfg = Config.load()
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         hits = []
         try:
             hits = search(cfg, store, make_embedder(cfg), text, k=3)
@@ -1574,7 +1703,10 @@ def consolidate(threshold: float, model: str, limit: int, dry_run: bool):
     """
     from .consolidate import ABSTRACTIONS_DIR, DEFAULT_MODEL, run_consolidation
     cfg = Config.load()
-    store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    store = _writer_store(
+        cfg, "consolidate",
+        extra="(consolidate would also write abstraction .md files with no index entry "
+              "until the next build — they self-heal at build time, but say so is the rule)")
     try:
         generated, skipped, total = run_consolidation(
             cfg, store,
@@ -1721,7 +1853,7 @@ def whoami(as_json: bool):
     cfg = Config.load()
     stats = {}
     try:
-        store = Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+        store = open_store(cfg)
         stats = store.stats()
         store.close()
     except Exception:
@@ -1955,7 +2087,26 @@ def _rewrite_frontmatter(path: Path, updates: dict) -> None:
 
 
 def _open_store(cfg):
-    return Store(cfg.db_path, embedding_dim=cfg.embedding_dim)
+    return open_store(cfg)
+
+
+def _writer_store(cfg, cmd: str, extra: str = ""):
+    """Open for WRITE with the curated epoch refusal (CSO AMBER-2: a raw
+    'readonly database' traceback is safe but rude; refuse up front, in words)."""
+    from .epoch import EpochError as _EpochError
+    from .write_gates import WriteGateError as _WGError
+    try:
+        return open_store(cfg, for_write=True)
+    except _WGError as e:  # W1/W2 refusal is rc=2: the CLI FAILS, hooks stay fail-safe
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(2)
+    except _EpochError:
+        click.secho(
+            f"✗ `{cmd}` writes to the brain, and this home is epoch-managed — "
+            "build→validate→swap is the only write path. Make the change in the "
+            "SOURCE files and run `lbrain epoch build`." + (f" {extra}" if extra else ""),
+            fg="red")
+        sys.exit(1)
 
 
 @main.group()
@@ -2051,7 +2202,7 @@ def belief_gate(slug):
     from . import beliefs as _b
 
     cfg = Config.load()
-    store = _open_store(cfg)
+    store = _writer_store(cfg, "belief gate")
     try:
         view = _b.StoreCorpusView(store)
         b = view.beliefs.get(slug)
@@ -2082,7 +2233,7 @@ def belief_promote(slug):
     from . import beliefs as _b
 
     cfg = Config.load()
-    store = _open_store(cfg)
+    store = _writer_store(cfg, "belief promote")
     try:
         view = _b.StoreCorpusView(store)
         b = view.beliefs.get(slug)
@@ -2122,7 +2273,7 @@ def belief_retract(slug, reason):
     from . import beliefs as _b
 
     cfg = Config.load()
-    store = _open_store(cfg)
+    store = _writer_store(cfg, "belief retract")
     try:
         view = _b.StoreCorpusView(store)
         b = view.beliefs.get(slug)
@@ -2158,6 +2309,87 @@ def belief_retract(slug, reason):
             click.echo("  nothing else rested on it.")
     finally:
         store.close()
+
+
+@main.group()
+def epoch():
+    """Atomic epochs — build → validate → swap as the only write path.
+
+    Design: ATOMIC-EPOCHS-DESIGN-2026-08-31.md v1.4. Opt-in per home; a home with
+    no epochs/CURRENT behaves exactly as before."""
+
+
+@epoch.command("build")
+@click.option("--full", is_flag=True, help="Fresh build (default is delta from the current epoch).")
+@click.option("--confirm-source-removed", multiple=True,
+              help="Assert that this source root was REMOVED on purpose — without it, a "
+                   "vanished or hollow root refuses promotion (mass-absence is not deletion).")
+@click.option("--keep", default=3, show_default=True, help="Prior epochs to retain.")
+@click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
+def epoch_build_cmd(full, confirm_source_removed, keep, max_bytes):
+    """Build a candidate, run gate v2, publish atomically."""
+    from .epoch import BuilderBusy, EpochError
+    from .epoch_build import build
+
+    cfg = Config.load()
+    try:
+        report = build(CONFIG_DIR, cfg, delta=not full,
+                       confirm_source_removed=confirm_source_removed,
+                       keep=keep, max_bytes=max_bytes)
+    except BuilderBusy as e:
+        click.secho(f"✗ {e}", fg="yellow")
+        sys.exit(3)
+    except EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
+    click.secho(
+        f"✓ epoch {report['epoch_id']} PUBLISHED — docs: {report['docs']}, "
+        f"scan {report['scan_start']} → {report['scan_end']}"
+        + (f", pruned: {len(report['pruned'])}" if report.get("pruned") else ""),
+        fg="green")
+    if report.get("durability_caveat"):
+        click.secho(f"  ⚠ {report['durability_caveat']}", fg="yellow")
+
+
+@epoch.command("status")
+def epoch_status_cmd():
+    """Current epoch, retained epochs, and the freshness watermark."""
+    import sqlite3 as _sq
+
+    from .epoch import current_epoch_id, epoch_db, leased_epochs, list_epochs
+
+    cur = current_epoch_id(CONFIG_DIR)
+    if cur is None:
+        click.echo("legacy layout — no epoch has been published for this home")
+        return
+    click.echo(f"CURRENT: {cur}")
+    con = _sq.connect(str(epoch_db(CONFIG_DIR, cur)))
+    try:
+        meta = dict(con.execute(
+            "SELECT key, value FROM meta WHERE key IN "
+            "('watermark_scan_start','watermark_scan_end','epoch_id')"))
+    finally:
+        con.close()
+    click.echo(f"  index current as of: {meta.get('watermark_scan_end', 'unknown')}")
+    leased = leased_epochs(CONFIG_DIR)
+    for e in list_epochs(CONFIG_DIR):
+        marks = ("*" if e == cur else " ") + ("L" if e in leased else " ")
+        click.echo(f"  {marks} {e}")
+
+
+@epoch.command("prune")
+@click.option("--keep", default=3, show_default=True)
+@click.option("--max-bytes", default=None, type=int)
+def epoch_prune_cmd(keep, max_bytes):
+    """Remove old epochs (never CURRENT, leased, or .failed forensics)."""
+    from .epoch import BuilderBusy, prune
+
+    try:
+        removed = prune(CONFIG_DIR, keep=keep, max_bytes=max_bytes)
+    except BuilderBusy as e:
+        click.secho(f"✗ prune refused: {e} (a build is live — rmtree never races it)", fg="yellow")
+        sys.exit(3)
+    click.echo(f"pruned: {len(removed)}" + (f" — {', '.join(removed)}" if removed else ""))
 
 
 # The `python -m lbrain.cli` entry point. MUST stay the last statement in this

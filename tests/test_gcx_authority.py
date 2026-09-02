@@ -266,3 +266,32 @@ def test_a_legacy_resolution_claims_no_authority_mode(monkeypatch):
     r = gcx.resolve("gcx://rfc/793")
     assert r.authority_mode == ""
     assert r.status == "VERIFIED"
+
+
+# ── GCX-02 (2026-08-31): an authority record makes a BARE name resolvable ──
+# Found by the first production record (keel's seat-root bind): the empty-
+# candidates refusal fired BEFORE the authority consult, so a pointer record
+# could redirect among existing GCX-Name claimants but could not create
+# resolvability for a name with zero GCX-Name transactions — which is the
+# whole shape of a seat-root → profile pointer.
+
+def test_gcx02_authority_resolves_a_name_with_zero_gcxname_transactions(monkeypatch):
+    monkeypatch.setattr(gcx, "OPERATOR_ADDRESS", OP)
+    gw = _Gateway(
+        name_nodes=[],  # the seat root carries no GCX-Name transaction, by design
+        authority_nodes=[_node("AUTH1", {"GCX-Target": "PROFILE"}, owner=OP, height=100)],
+        byid_nodes=[_node("PROFILE", {"Canonical-SHA256": SHA})],
+    )
+    monkeypatch.setattr(gcx, "_post_json", gw)
+    monkeypatch.setattr(gcx, "fetch", lambda txid, **k: PAYLOAD)
+    r = gcx.resolve("gcx://metavolvelabs/csuite/cio/keel")
+    assert r.txid == "PROFILE" and r.verified
+    assert r.authority_txid == "AUTH1"
+
+
+def test_gcx02_no_authority_and_no_candidates_still_refuses(monkeypatch):   # NO-REGRESSION
+    monkeypatch.setattr(gcx, "OPERATOR_ADDRESS", OP)
+    gw = _Gateway(name_nodes=[], authority_nodes=[])
+    monkeypatch.setattr(gcx, "_post_json", gw)
+    with pytest.raises(gcx.ResolveError, match="not registered"):
+        gcx.lookup("gcx://rfc/nope")

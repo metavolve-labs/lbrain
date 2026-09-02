@@ -75,6 +75,19 @@ CREATE TABLE IF NOT EXISTS supersessions (
     FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
 );
 
+-- Claim-span dual-view (DR panel 2026-08-30). A PROJECTION of a doc's `claims:`
+-- frontmatter: specific claims inside a living document, each with a lifecycle.
+-- current_only retrieval excludes any chunk whose text contains a CLOSED claim's
+-- text (status != current, or valid_to has passed). Source of truth is the file;
+-- delete + re-import and the rows cascade away.
+CREATE TABLE IF NOT EXISTS claim_spans (
+    src_path   TEXT NOT NULL,
+    claim_text TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'current',
+    valid_to   TEXT,
+    FOREIGN KEY (src_path) REFERENCES docs(rel_path) ON DELETE CASCADE
+);
+
 -- Per-agent beliefs (lbrain/beliefs.py). A belief IS a markdown doc — this table
 -- is a PROJECTION of its frontmatter, kept queryable so retrieval can filter on
 -- author and lifecycle without re-parsing files. Source of truth stays the file,
@@ -120,7 +133,28 @@ CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
 
 
 class Store:
-    def __init__(self, db_path: Path, embedding_dim: int = 1536):
+    def __init__(self, db_path: Path, embedding_dim: int = 1536, immutable: bool = False):
+        # Epoch-era read path (design v1.4 + vendor3): a PUBLISHED epoch is
+        # read-only by construction, so open it `immutable=1` — SQLite then never
+        # creates -wal/-shm and never attempts the last-closer exclusive-lock
+        # checkpoint, which is the DrvFs zombie-reader hang class. Immutable mode
+        # skips every write-side setup below; the schema is already there.
+        if immutable:
+            self.db_path = db_path
+            self.embedding_dim = embedding_dim
+            self.immutable = True
+            self.db = sqlite3.connect(
+                f"file:{db_path}?immutable=1", uri=True)
+            if not hasattr(self.db, "enable_load_extension"):
+                raise SqliteExtensionError(
+                    "This Python was built without SQLite loadable-extension support "
+                    "(see the writable-open error text for platform fixes).")
+            self.db.enable_load_extension(True)
+            sqlite_vec.load(self.db)
+            self.db.enable_load_extension(False)
+            self.db.row_factory = sqlite3.Row
+            return
+        self.immutable = False
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # brain.db holds every chunk of the corpus in CLEARTEXT. Under the common
         # umask 022, mkdir gave 0755 and sqlite3.connect() gave 0644 — world-
@@ -315,6 +349,60 @@ class Store:
         ).fetchone()
         return row["doc_hash"] if row else None
 
+    def resolve_rel_path(self, rel_path: str, abs_path: str, src_name: str) -> tuple[str, str | None]:
+        """Cross-source rel_path collision guard (MS-01, 2026-08-31).
+
+        Row identity is the FILE, not the bare key: rel_path is PRIMARY KEY but
+        is computed relative to whichever source root offered the file, so two
+        roots can each offer a root-level `_INDEX.md`. Keyed on rel_path alone,
+        those files thrash a single row — chunks and vectors rewritten on every
+        import, `doctor` permanently CHANGED on the losers (measured on the CCO
+        brain: 3 plates × `_INDEX.md`, "updated" forever, never converging).
+
+        Resolution order:
+        - a row already holding this abs_path keeps its key, disambiguated or
+          not — stable across re-imports;
+        - a bare key held by a DIFFERENT file still on disk forces
+          `<src_name>/<rel_path>` (both files are alive; neither may take the
+          other's row), with a stable path-hash suffix as the last resort when
+          even the source names collide;
+        - a key held by a file that is GONE is taken over, preserving the
+          moved-source behavior that predates this guard.
+
+        Returns (effective_rel_path, existing_doc_hash_or_None).
+        """
+        # DD-01: prefer the row whose key MATCHES the freshly-computed rel_path,
+        # and order the fallback — on a brain with historical duplicate-abs_path
+        # twins, a bare fetchone() picks a row nondeterministically, which could
+        # latch the scan onto the stale twin and starve the canonical row.
+        row = self.db.execute(
+            "SELECT rel_path, doc_hash FROM docs WHERE abs_path = ? AND rel_path = ?",
+            (abs_path, rel_path),
+        ).fetchone()
+        if row is None:
+            row = self.db.execute(
+                "SELECT rel_path, doc_hash FROM docs WHERE abs_path = ? ORDER BY rel_path",
+                (abs_path,),
+            ).fetchone()
+        if row:
+            return row["rel_path"], row["doc_hash"]
+        eff = rel_path
+        other = self.db.execute(
+            "SELECT abs_path, doc_hash FROM docs WHERE rel_path = ?", (eff,)
+        ).fetchone()
+        if other and other["abs_path"] != abs_path and os.path.exists(other["abs_path"]):
+            eff = f"{src_name}/{rel_path}"
+            other = self.db.execute(
+                "SELECT abs_path, doc_hash FROM docs WHERE rel_path = ?", (eff,)
+            ).fetchone()
+            if other and other["abs_path"] != abs_path and os.path.exists(other["abs_path"]):
+                import hashlib
+                eff = f"{src_name}-{hashlib.sha1(abs_path.encode()).hexdigest()[:8]}/{rel_path}"
+                other = self.db.execute(
+                    "SELECT abs_path, doc_hash FROM docs WHERE rel_path = ?", (eff,)
+                ).fetchone()
+        return eff, (other["doc_hash"] if other else None)
+
     def doc_metadata_differs(self, doc: Doc) -> bool:
         """True if the stored row disagrees with this Doc's FRONTMATTER-derived
         fields, even though the body hash matches.
@@ -408,6 +496,52 @@ class Store:
         self.db.execute("DELETE FROM fts_chunks WHERE rel_path = ?", (rel_path,))
         self.db.execute("DELETE FROM chunks WHERE rel_path = ?", (rel_path,))
 
+    def dedupe_identity(self, seen_rel_paths) -> list[tuple[str, str]]:
+        """DD-01 (2026-08-31): collapse duplicate-abs_path doc rows onto the key
+        the current scan actually computed.
+
+        MS-01 made the FILE the row identity going forward, but historical
+        subdir imports left twin rows — same abs_path, different rel_path
+        (measured on the main brain: 196 groups). A stale twin is unreachable
+        by any root scan (its rel_path is never recomputed), never pruned (the
+        file exists), and keeps serving stale chunks plus pre-SUP-15
+        supersession rows that no re-mint can reach.
+
+        Canonical = a row whose rel_path is in ``seen_rel_paths`` (the keys the
+        just-finished import scan produced). Groups where NO row was seen are
+        left untouched — the file lives outside the scanned roots, and guessing
+        which twin is canonical would be a new defect, not a cleanup. If more
+        than one row of a group was seen, both stay: that means two configured
+        roots overlap, which is a config question, not a dedup.
+
+        Returns [(removed_rel_path, kept_rel_path), ...].
+        """
+        removed: list[tuple[str, str]] = []
+        seen = set(seen_rel_paths or ())
+        if not seen:
+            return removed
+        groups: dict[str, list[str]] = {}
+        for r in self.db.execute(
+            "SELECT abs_path, rel_path FROM docs WHERE abs_path IN "
+            "(SELECT abs_path FROM docs GROUP BY abs_path HAVING COUNT(*) > 1)"
+        ):
+            groups.setdefault(r["abs_path"], []).append(r["rel_path"])
+        for abs_path, rels in sorted(groups.items()):
+            kept = sorted(r for r in rels if r in seen)
+            if not kept:
+                continue
+            keep = kept[0]
+            for rel in sorted(rels):
+                if rel in kept:
+                    continue
+                self.delete_doc_chunks(rel)
+                self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+                self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
+                self.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (rel,))
+                self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+                removed.append((rel, keep))
+        return removed
+
     def prune_missing(
         self,
         source_roots: list | None = None,
@@ -435,6 +569,23 @@ class Store:
         from .index import is_backup_path
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
+        # Scope the prune to docs UNDER the imported roots. A NARROW import
+        # (`lbrain import <subdir>`) walks only that subtree, so it must never
+        # prune docs from OTHER configured sources it never walked — those files
+        # are on disk and their docs are live. (CIO/keel brain, 2026-08-30: a
+        # narrow experiment-folder import pruned 38 _COLLAB inbox docs whose files
+        # were present the whole time.) `source_roots` was formerly ONLY the
+        # mount-gone guard above; it now also bounds WHAT is eligible to be pruned.
+        # When it is None (a deliberate whole-brain sweep) every doc stays in
+        # scope, exactly as before.
+        if source_roots:
+            _roots = [os.path.realpath(str(r)) for r in source_roots]
+
+            def _under_root(abs_path: str) -> bool:
+                rp = os.path.realpath(abs_path)
+                return any(rp == root or rp.startswith(root + os.sep) for root in _roots)
+
+            rows = [r for r in rows if _under_root(r["abs_path"])]
         # "No longer indexable" is not the same as "no longer on disk". A doc that
         # became EXCLUDED (a backup tree) still exists, so an existence-only prune
         # left it serving forever: discover() stopped finding it, import reported
@@ -477,6 +628,38 @@ class Store:
                 "INSERT OR IGNORE INTO supersessions (src_path, tgt_slug) VALUES (?, ?)",
                 (doc.rel_path, tgt),
             )
+
+    def replace_claim_spans(self, doc: Doc) -> None:
+        """Project a doc's `claims:` frontmatter into claim_spans. Idempotent per doc
+        (mirrors replace_supersessions) so it stays correct on re-import and clears
+        rows when a claim is removed from the file."""
+        self.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (doc.rel_path,))
+        for c in getattr(doc, "claims", []) or []:
+            if not c.get("text"):
+                continue
+            self.db.execute(
+                "INSERT INTO claim_spans (src_path, claim_text, status, valid_to) "
+                "VALUES (?, ?, ?, ?)",
+                (doc.rel_path, c["text"], (c.get("status") or "current"),
+                 (c.get("valid_to") or None)),
+            )
+
+    def closed_claims(self, today: str | None = None) -> dict[str, list[str]]:
+        """Per-doc claim texts that are CLOSED for present-time retrieval — status is
+        not 'current', OR valid_to has passed. current_only drops any chunk whose text
+        contains one of these. Open (current, unexpired) claims return nothing, so they
+        never touch retrieval."""
+        import datetime as _dt
+        today = today or _dt.date.today().isoformat()
+        out: dict[str, list[str]] = {}
+        for r in self.db.execute(
+            "SELECT src_path, claim_text, status, valid_to FROM claim_spans"
+        ):
+            status = (r["status"] or "current").lower()
+            vt = r["valid_to"]
+            if (status != "current" or (vt is not None and str(vt) < today)) and r["claim_text"]:
+                out.setdefault(r["src_path"], []).append(r["claim_text"])
+        return out
 
     def superseded_slugs(self) -> set[str]:
         """Slugs some other doc explicitly supersedes — buried at retrieval so the
@@ -676,6 +859,71 @@ class Store:
                 (cid, blob),
             )
             self.db.execute("UPDATE chunks SET embedded = 1 WHERE chunk_id = ?", (cid,))
+
+    def reuse_embeddings_from(self, source_db_path, *, model: str, provider: str) -> tuple[int, int]:
+        """Copy embeddings by chunk_hash from a SOURCE brain into this (rebuilt) brain, for
+        chunks not yet embedded. A de-wholesale is a rebuild, and ~90% of kept chunks are
+        byte-identical, so their vectors already exist (CSO measured 89.3% on CCO, 2026-08-30)
+        — reusing them turns a ~25-min rebuild into ~3 min. ONNX embedding is linear-slow
+        (~0.29s/chunk), so the win is in embedding FEWER chunks, not faster ones.
+
+        Reuse ONLY when the source's embedding fingerprint (dim/model/provider) matches this
+        brain's: a chunk with the same text built under a different embedder lives in a
+        different vector space. Missing/mismatched → left un-embedded (embed fresh, don't
+        guess). Returns (reused, candidates)."""
+        import os
+        import sqlite3
+
+        src_path = str(source_db_path)
+        if not os.path.exists(src_path):
+            return 0, 0
+        src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+        src.row_factory = sqlite3.Row
+        try:
+            src.enable_load_extension(True)
+            sqlite_vec.load(src)
+            src.enable_load_extension(False)
+
+            def _m(key):
+                r = src.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+                return r["value"] if r else None
+
+            # Fingerprint guard — same vector space, or reuse nothing.
+            if (_m("embedding_model"), _m("embedding_provider"), str(_m("embedding_dim"))) != (
+                model, provider, str(self.embedding_dim)
+            ):
+                return 0, 0
+
+            # Bulk-load the source's (chunk_hash -> embedding) map in ONE sequential join
+            # scan. Per-row random reads over a /mnt/c (Windows-mount) source brain cross the
+            # WSL boundary on every read and hang in D-state I/O (CSO measured 45 min); the
+            # single scan is sequential and fast (his staged-local run: 156 s). First
+            # embedding per hash wins — identical text ⇒ identical vector, so dupes are equal.
+            src_map: dict[str, bytes] = {}
+            for r in src.execute(
+                "SELECT c.chunk_hash AS h, v.embedding AS emb "
+                "FROM chunks c JOIN vec_chunks v ON v.rowid = c.chunk_id "
+                "WHERE c.embedded = 1"
+            ):
+                if r["emb"] is not None and r["h"] not in src_map:
+                    src_map[r["h"]] = bytes(r["emb"])
+
+            targets = self.db.execute(
+                "SELECT chunk_id, chunk_hash FROM chunks WHERE embedded = 0"
+            ).fetchall()
+            cids: list[int] = []
+            blobs: list[bytes] = []
+            for t in targets:
+                blob = src_map.get(t["chunk_hash"])
+                if blob is not None:
+                    cids.append(t["chunk_id"])
+                    blobs.append(blob)
+            if cids:
+                self.write_embeddings(cids, blobs)  # validates blob width + sets embedded=1
+                self.db.commit()
+            return len(cids), len(targets)
+        finally:
+            src.close()
 
     # ---------- counts / health ----------
 

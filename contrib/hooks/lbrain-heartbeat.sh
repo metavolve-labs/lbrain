@@ -69,6 +69,41 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       "$(date -Is)" >>"$LOG" 2>&1
     return 0
   fi
+  # Epoch-aware (CSO verdict §8 + W-spec sequencing, 2026-09-01): on an
+  # epoch-managed home plain `lbrain import` is REFUSED by design — this
+  # function was eating that refusal on every beat (the silent-refusal class at
+  # prompt frequency). There: build a delta epoch, and only when a source
+  # actually drifted past the current epoch db (a build costs minutes, a beat
+  # fires each 15). Every branch logs — refusal/no-op silence is the bug class.
+  if [ -f "$LBHOME/epochs/CURRENT" ]; then
+    local cur epoch_db drift d
+    cur=$(cat "$LBHOME/epochs/CURRENT" 2>/dev/null)
+    epoch_db="$LBHOME/epochs/$cur/brain.db"
+    if [ -z "$cur" ] || [ ! -f "$epoch_db" ]; then
+      printf '[%s] epoch home but CURRENT/db unresolvable (%s) — refusing refresh, fix the home\n' \
+        "$(date -Is)" "${cur:-empty}" >>"$LOG" 2>&1
+      return 0
+    fi
+    # Drift check against the brain's OWN configured sources (WATCH_DIRS is the
+    # read-delta list and may not match); mtime-only heuristic — the epoch gate
+    # stays the authority on what actually lands.
+    local -a src_dirs=()
+    mapfile -t src_dirs < <(sed -n '/^sources = \[/,/^\]/p' "$LBHOME/config.toml" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"')
+    [ "${#src_dirs[@]}" -eq 0 ] && src_dirs=("${WATCH_DIRS[@]}")
+    drift=""
+    for d in "${src_dirs[@]}"; do
+      [ -d "$d" ] || continue
+      drift=$(find "$d" -name '*.md' -newer "$epoch_db" -print -quit 2>/dev/null)
+      [ -n "$drift" ] && break
+    done
+    if [ -n "$drift" ]; then
+      printf '[%s] epoch home: source drift (%s) — building delta epoch\n' "$(date -Is)" "$drift" >>"$LOG" 2>&1
+      timeout 600 "$LB" epoch build >>"$LOG" 2>&1
+    else
+      printf '[%s] epoch home: no drift past current epoch — no-op\n' "$(date -Is)" >>"$LOG" 2>&1
+    fi
+    return 0
+  fi
   timeout 60 "$LB" import >>"$LOG" 2>&1
   local stale
   stale=$("$LB" stats 2>/dev/null | awk -F'[: ]+' '/^chunks:/{c=$2}/^embedded:/{e=$2}END{print (c+0)-(e+0)}')
