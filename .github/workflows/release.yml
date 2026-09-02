@@ -97,6 +97,14 @@ jobs:
             echo "::error::HEAD ($(git rev-parse --short HEAD)) is not $TAG ($(git rev-parse --short "$TAG^{commit}")) — dispatch this workflow on the tag itself."
             exit 1
           fi
+          # The tag annotation must NAME a CSO verdict (RELEASING.md step 4-5):
+          # scripts/release-preflight.sh refuses without one, and this makes the
+          # workflow able to see that the preflight's gate was actually crossed.
+          if ! git tag -l --format='%(contents)' "$TAG" | grep -qi "CSO verdict"; then
+            echo "::error::tag $TAG's message does not name a CSO verdict — run scripts/release-preflight.sh (RELEASING.md); its CLEAR output dictates the tag message."
+            exit 1
+          fi
+          echo "  tag message names a CSO verdict — preflight gate crossed"
           FAIL=0; VERIFIED=0
           # `; echo` immunizes against a future unterminated last line (CSO note 2).
           while read -r sha label; do

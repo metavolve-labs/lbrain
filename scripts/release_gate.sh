@@ -44,9 +44,16 @@ rm -rf dist/ && python3 -m build --quiet 2>/dev/null || python3 -m build
 WHEEL=$(ls dist/*.whl | head -1)
 [ -n "$WHEEL" ] && ok "built $WHEEL" || { bad "no wheel produced"; exit 1; }
 SRC_MODS=$(find lbrain -name '*.py' | sort)
+# Read the wheel inventory ONCE, then compare against the captured list. The
+# previous per-module `unzip -l | grep -q` intermittently reported present
+# modules as missing (observed 2026-09-02: dialin.py + lair_protocol.py flagged
+# in one run, clean in the next, wheel verified complete both times) — a
+# pipeline whose producer can die mid-write is not a measurement. -Z1 gives
+# bare paths, and grep -Fxq makes the match exact, not substring.
+INVENTORY=$(python3 -c "import zipfile,sys; print('\n'.join(zipfile.ZipFile(sys.argv[1]).namelist()))" "$WHEEL")
 MISSING_MODS=""
 for m in $SRC_MODS; do
-  unzip -l "$WHEEL" | grep -q "$m" || MISSING_MODS="$MISSING_MODS $m"
+  printf '%s\n' "$INVENTORY" | grep -Fxq "$m" || MISSING_MODS="$MISSING_MODS $m"
 done
 if [ -z "$MISSING_MODS" ]; then
   ok "wheel carries every source module ($(echo "$SRC_MODS" | wc -l) files)"
