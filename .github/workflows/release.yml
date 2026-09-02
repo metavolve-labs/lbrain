@@ -85,16 +85,27 @@ jobs:
         # release-blocking work sits on a branch stops being possible.
         run: |
           TAG="v$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
-          FAIL=0
+          # AMBER-REL-2 (CSO 2026-09-02): build builds HEAD of the dispatched ref,
+          # so the tag containing the fixes proves nothing unless HEAD IS the tag —
+          # otherwise artifacts don't match the commit their version names (the
+          # 0.1.1 untraceability in modern dress). Dispatch ON the tag.
+          if [ "$(git rev-parse "$TAG^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::HEAD ($(git rev-parse --short HEAD)) is not $TAG ($(git rev-parse --short "$TAG^{commit}")) — dispatch this workflow on the tag itself."
+            exit 1
+          fi
+          FAIL=0; VERIFIED=0
+          # `; echo` immunizes against a future unterminated last line (CSO note 2).
           while read -r sha label; do
             case "$sha" in ''|'#'*) continue;; esac
             if git merge-base --is-ancestor "$sha" "$TAG" 2>/dev/null; then
-              echo "  ✓ $TAG contains $sha ($label)"
+              echo "  ✓ $TAG contains $sha ($label)"; VERIFIED=$((VERIFIED+1))
             else
               echo "::error::$TAG does NOT contain required fix $sha ($label) — this release would ship without its own guarantees."
               FAIL=1
             fi
-          done < RELEASE-REQUIRES
+          done < <(cat RELEASE-REQUIRES; echo)
+          # An empty manifest passes but must READ as zero, not as coverage (CSO note 1).
+          echo "  RELEASE-REQUIRES fixes verified: $VERIFIED"
           exit "$FAIL"
 
       - run: pip install build twine
