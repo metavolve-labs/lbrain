@@ -12,6 +12,9 @@
   <img src="https://img.shields.io/badge/python-3.10%E2%80%933.13-555?style=flat-square" alt="Python 3.10-3.13">
 </p>
 
+> **⚠️ WARNING:** This product is designed to make your AI a more trusted and efficient
+> **WORKER**, not a more personable chatbot.
+
 > **Beta.** Early software from a small team, with no independent security audit yet. Keep backups, as
 > you would with any beta.
 
