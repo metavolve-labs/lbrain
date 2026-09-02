@@ -128,6 +128,29 @@ jobs:
           echo "lbrain/framework entries: $COUNT"
           [ "$COUNT" -ge 6 ] || { echo "::error::wheel is missing lbrain.framework — rebuild"; exit 1; }
 
+      - name: The artifact must AGREE WITH ITSELF about its version
+        # Third occurrence closed here (0.1.5→0.1.4, 0.1.9→0.1.8, 0.1.10→0.1.9.post1,
+        # mac-CSO STOP 2026-09-02T0518Z): pyproject and lbrain/__init__.__version__ are
+        # two declarations, and only pyproject was on the release path's critical path.
+        # The pytest drift gate fired RED in CI and the publish path never reads CI.
+        # This runs ON THE BYTES BEING UPLOADED — no source tree, no pytest, and a
+        # dispatch cannot route around it.
+        run: |
+          python - <<'PY'
+          import glob, re, sys, zipfile
+          w = sorted(glob.glob("dist/*.whl"))[-1]
+          z = zipfile.ZipFile(w)
+          meta_v = re.search(r"-([^-]+)-py", w.split("/")[-1]).group(1)
+          init = z.read("lbrain/__init__.py").decode()
+          m = re.search(r'__version__\s*=\s*"([^"]+)"', init)
+          self_v = m.group(1) if m else "(missing)"
+          print(f"dist metadata: {meta_v}   lbrain.__version__: {self_v}")
+          if self_v != meta_v:
+              print(f"::error::the artifact misreports itself: metadata {meta_v} but "
+                    f"__version__ {self_v}. This wheel must not be published.")
+              sys.exit(1)
+          PY
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist
