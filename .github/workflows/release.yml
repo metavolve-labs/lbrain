@@ -72,7 +72,11 @@ jobs:
           fi
           echo "  not yet on PyPI (HTTP $CODE) — ok to publish"
 
-          git fetch --tags --quiet
+          # --force: when this workflow is dispatched ON the tag (the intended
+          # path since AMBER-REL-2), checkout has already materialized the tag
+          # ref locally and a plain --tags fetch refuses to clobber it — dying
+          # under `set -e` with no message (observed run 33593710375).
+          git fetch --tags --force --quiet
           if ! git rev-parse "v$PKG" >/dev/null 2>&1; then
             echo "::error::no git tag v$PKG. Tag the commit you are publishing so the artifact maps to it."
             exit 1
