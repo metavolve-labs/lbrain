@@ -321,11 +321,30 @@ whether your stored vectors match your current embedding settings. Include its o
 aren't — switching embedding providers on an existing brain, two brains on one machine,
 imported-but-not-embedded records, and why a note can vanish from results without being deleted.
 
-## Permanent names
+## Agent identity
 
-A memory that outlives your tools can also have a name that outlives your accounts.
-[lbrain.ai](https://lbrain.ai) is the project home; a permanent `gcx://` name of your own can be
-claimed at [lbrain.ai/claim.html](https://lbrain.ai/claim.html).
+A brain that persists can also know **whose** it is. Identity is a first-class layer in
+LBrain — and deliberately optional: an anonymous install stays fully functional forever.
+Identity accretes onto a brain; it never gates one.
+
+```bash
+lbrain register --name jarvis --address <your-key-address>   # bind a gcx:// name to this brain
+lbrain whoami                                                # who is this brain, what is it trusted for?
+```
+
+- `register` is **free**. It persists the identity to `~/.lbrain/identity.json` (0600);
+  from then on `whoami` and the MCP `lair_whoami` report this brain *as* that identity —
+  which matters the moment more than one agent, tool, or machine touches your memory.
+- `whoami` answers the question an agent should ask before relying on retrieved records:
+  what am I reading, how does it serve, and who does it claim to be.
+- Since 0.1.10 the **write path honors identity**: a process claiming a seat
+  (`LBRAIN_SEAT`) cannot write into a brain whose identity doesn't match, and a config
+  resolving to a foreign database is refused with both paths named. "Wrote into the wrong
+  brain" stopped being a documentation warning and became an engine refusal.
+
+The name can outlive your accounts, too: [lbrain.ai](https://lbrain.ai) is the project
+home, and a permanent `gcx://` name — yours, portable across tools, models, and machines —
+can be claimed at [lbrain.ai/claim.html](https://lbrain.ai/claim.html).
 
 ## More
 

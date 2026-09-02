@@ -39,6 +39,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history: the RELEASE-REQUIRES gate below runs merge-base
+          # --is-ancestor, which is meaningless on a depth-1 clone.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -74,6 +78,24 @@ jobs:
             exit 1
           fi
           echo "  tag v$PKG exists and points at $(git rev-parse --short "v$PKG")"
+
+      - name: Refuse a release that does not CONTAIN its named fixes
+        # Born 2026-09-02 (the 0.1.9.x lesson): the version being published must
+        # be a descendant of every SHA in RELEASE-REQUIRES. Publishing main while
+        # release-blocking work sits on a branch stops being possible.
+        run: |
+          TAG="v$(grep -m1 '^version' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')"
+          FAIL=0
+          while read -r sha label; do
+            case "$sha" in ''|'#'*) continue;; esac
+            if git merge-base --is-ancestor "$sha" "$TAG" 2>/dev/null; then
+              echo "  ✓ $TAG contains $sha ($label)"
+            else
+              echo "::error::$TAG does NOT contain required fix $sha ($label) — this release would ship without its own guarantees."
+              FAIL=1
+            fi
+          done < RELEASE-REQUIRES
+          exit "$FAIL"
 
       - run: pip install build twine
       - run: python -m build

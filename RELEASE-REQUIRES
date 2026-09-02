@@ -1,0 +1,16 @@
+# RELEASE-REQUIRES — commits the next published version MUST contain.
+#
+# Born 2026-09-02: 0.1.9/0.1.9.post1 published while 35 commits of release-blocking
+# work (the W1/W2 write gates and the archive funnel fix) sat unmerged on a
+# stale-titled PR — the shipped package could not honor its own headline guarantee.
+# The release workflow refuses to publish any tag that does not CONTAIN every SHA
+# listed here (git merge-base --is-ancestor). A release that lacks its named fixes
+# becomes structurally impossible instead of remembered-against.
+#
+# Format: <full-or-short-sha> <one-line label>. '#' lines and blanks ignored.
+# Maintain: add a line when a fix becomes release-blocking; prune lines only after
+# the fix has shipped in a published version (then it is protected by the
+# already-on-PyPI guard instead).
+909d302 archive sub-CLI funneled through W1/W2 + epoch refusal (RED-W-BYPASS-1)
+bf25ffb W1/W2 write-path gates at the open_store chokepoint
+04d9b1e capture hook presence-aware seat guard, unconditional refusal logging
