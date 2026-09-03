@@ -164,6 +164,44 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
             click.secho("✗ empty transcript — nothing to capture", fg="yellow")
         sys.exit(0)
 
+    # --- epoch-managed home: STAGE, don't refuse (item-6 inc-1) --------------
+    # The store stays closed; the spool takes the capture and `epoch build`
+    # sweeps it (inc-2). W1/W2 run inside spool_capture BEFORE any byte lands;
+    # only the epoch refusal is exempt — that exemption is the entire feature.
+    # No passphrase here: the spool holds the raw payload (same trust boundary
+    # as brain.db's plaintext chunks) and the archiver encrypts at sweep time.
+    from ..epoch import current_epoch_id
+
+    home = Path(CONFIG_DIR)
+    if current_epoch_id(home) is not None:
+        if remote:
+            click.secho(
+                "✗ epoch-managed home: --remote capture must also write its index into "
+                "the store, and build→validate→swap is the only db write path. Capture "
+                "locally (it lands in capture-staging/ for the next `lbrain epoch build`) "
+                "and push to Arweave from the swept record.", fg="red")
+            sys.exit(2)
+        from ..spool import STAGING_DIRNAME, spool_capture, staged_count
+        from ..write_gates import WriteGateError
+
+        label = title or session_id or Path(from_file).stem
+        try:
+            res = spool_capture(Config.load(), home, payload, session_id=session_id,
+                                title=label, namespace=namespace)
+        except WriteGateError as e:  # rc=2 like every gated writer; hooks stay fail-safe
+            click.secho(f"✗ {e}", fg="red")
+            sys.exit(2)
+        n = staged_count(home)
+        if res.skipped:
+            click.echo(f"· already staged: {label} ({res.sha256[:16]}…)")
+        elif quiet:
+            click.echo(f"✓ staged {label} → capture-staging/{res.sha256[:16]}… ({len(payload)}B; {n} awaiting epoch build)")
+        else:
+            click.secho(f"✓ Staged capture '{label}' → {STAGING_DIRNAME}/", fg="green")
+            click.echo(f"  sha256 {res.sha256[:16]}…  ·  {len(payload)} bytes")
+            click.echo(f"  {n} capture(s) staged — they enter the brain at the next `lbrain epoch build`")
+        return
+
     passphrase = archive_passphrase()
     if not passphrase:
         if not quiet:
