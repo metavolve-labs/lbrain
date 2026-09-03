@@ -291,6 +291,16 @@ def doctor(as_json: bool):
     except Exception:
         setup_drift = []
 
+    # --- capture-staging spool (item-6 inc-1) ------------------------------
+    # Between builds a staged capture is invisible to queries; acceptable only
+    # if NAMED (silent staging would be the unembedded-import doorway wearing a
+    # new coat). Visibility, not corruption: never fails the doctor gate.
+    try:
+        from .spool import staged_count
+        captures_staged = staged_count(Path(CONFIG_DIR))
+    except Exception:
+        captures_staged = 0
+
     provenance = _build_provenance()
 
     if as_json:
@@ -303,6 +313,7 @@ def doctor(as_json: bool):
             "chunker_live": chunker_live, "chunker_stored": chunker_stored,
             "chunker_drift": _chunker_drift(chunker_live, chunker_stored),
             "setup_drift": setup_drift,
+            "captures_staged": captures_staged,
             "index_currency": currency.as_dict() if currency else None,
         }, indent=2, default=str))
     else:
@@ -375,6 +386,10 @@ def doctor(as_json: bool):
         if stats:
             click.echo(f"  docs: {stats.get('docs')}  chunks: {stats.get('chunks')}"
                        f"  embedded: {stats.get('embedded')}")
+        if captures_staged:
+            click.secho(f"  ⚠ {captures_staged} capture(s) staged in capture-staging/ — "
+                        "invisible to queries until the next `lbrain epoch build`",
+                        fg="yellow")
         # ── core-memory health ──
         # The always-served layer had NO freshness check by design — so doctor
         # provides one. 2026-09-01: a CORE that still said "you are at L0
