@@ -44,6 +44,18 @@ from pathlib import Path
 STAGING_DIRNAME = "capture-staging"
 PAYLOAD_SUFFIX = ".transcript"
 META_SUFFIX = ".meta.json"
+# 128 bits of the sha256 in the filename (RED-SPOOL-1, CTO tear-up 2026-09-03):
+# 64 bits made an accidental prefix collision merely improbable and an
+# attacker-influenced one thinkable — transcripts are exactly the
+# poisoned-content surface. 128 ends the conversation, and the skip path
+# below dereferences the stored FULL hash regardless: a name is a reference,
+# never a verification.
+NAME_HEX = 32
+
+
+class SpoolIntegrityError(Exception):
+    """A pre-existing spool entry's stored hash does not match the content its
+    name claims — silent capture loss (collision or tampering) refused LOUD."""
 
 
 def staging_dir(home: Path) -> Path:
@@ -88,10 +100,43 @@ def spool_capture(cfg, home: Path, payload: bytes, *, session_id: str | None,
 
     digest = hashlib.sha256(payload).hexdigest()
     d = staging_dir(home)
-    payload_path = d / f"{digest[:16]}{PAYLOAD_SUFFIX}"
-    meta_path = d / f"{digest[:16]}{META_SUFFIX}"
-    if payload_path.exists() and meta_path.exists():
-        return SpoolResult(digest, payload_path, meta_path, skipped=True)
+    payload_path = d / f"{digest[:NAME_HEX]}{PAYLOAD_SUFFIX}"
+    meta_path = d / f"{digest[:NAME_HEX]}{META_SUFFIX}"
+
+    # RED-SPOOL-1: the skip path must DEREFERENCE, never trust the name.
+    # An entry already at this name is only "this capture" if its stored full
+    # hash matches the new payload's — otherwise skipping silently LOSES the
+    # new capture behind a colliding/tampered one.
+    if meta_path.exists():
+        try:
+            stored = json.loads(meta_path.read_text(encoding="utf-8")).get("sha256", "")
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise SpoolIntegrityError(
+                f"spool meta {meta_path} is unreadable/unparseable ({exc}) — cannot "
+                f"verify the existing entry against new capture sha256 {digest}; "
+                "refusing to skip OR overwrite. Inspect the entry."
+            )
+        if stored != digest:
+            raise SpoolIntegrityError(
+                f"spool name collision at {payload_path.name}: existing entry stores "
+                f"sha256 {stored}, new capture is sha256 {digest} — refusing to skip "
+                "(silent capture loss) and refusing to overwrite (the spool is "
+                "additive-only). Inspect the entry."
+            )
+        if payload_path.exists():
+            return SpoolResult(digest, payload_path, meta_path, skipped=True)
+        # meta without payload: not a shape our crash ordering produces (meta
+        # renames LAST) — fall through and rewrite the payload for this meta.
+    elif payload_path.exists():
+        # Torn spool (payload renamed, crash before meta). The stored bytes are
+        # complete (tmp+rename) — verify they ARE this content before adopting.
+        stored_digest = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+        if stored_digest != digest:
+            raise SpoolIntegrityError(
+                f"torn spool entry {payload_path.name} holds sha256 {stored_digest}, "
+                f"new capture is sha256 {digest} — name collision on an incomplete "
+                "entry; refusing to overwrite. Inspect the entry."
+            )
 
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
     _write_then_rename(payload_path, payload)

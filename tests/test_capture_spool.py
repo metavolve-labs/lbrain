@@ -177,7 +177,8 @@ def test_g1_epoch_home_stages_no_passphrase_needed_db_untouched(tmp_path, transc
     payloads, metas = spool_entries(home)
     assert len(payloads) == 1 and len(metas) == 1
     digest = hashlib.sha256(transcript.read_bytes()).hexdigest()
-    assert payloads[0].name == f"{digest[:16]}.transcript"
+    assert payloads[0].name == f"{digest[:32]}.transcript", \
+        "128-bit names (RED-SPOOL-1): 64 bits left collisions thinkable"
     assert payloads[0].read_bytes() == transcript.read_bytes()
     meta = json.loads(metas[0].read_text(encoding="utf-8"))
     assert meta["sha256"] == digest
@@ -232,8 +233,8 @@ def test_p5_interrupt_between_payload_and_meta_then_retry(tmp_path, monkeypatch)
 
     d = home / "capture-staging"
     digest = hashlib.sha256(payload).hexdigest()
-    assert (d / f"{digest[:16]}.transcript").exists(), "payload rename came first"
-    assert not (d / f"{digest[:16]}.meta.json").exists(), "meta must rename LAST"
+    assert (d / f"{digest[:32]}.transcript").exists(), "payload rename came first"
+    assert not (d / f"{digest[:32]}.meta.json").exists(), "meta must rename LAST"
     assert staged_count(home) == 0, "an entry without meta is INCOMPLETE, never counted"
 
     res = spool_capture(cfg, home, payload, session_id="s", title="t", namespace=None)
@@ -290,6 +291,91 @@ def test_r2_shred_on_epoch_home_still_refuses(tmp_path):
     assert proc.returncode != 0, "shred must NOT succeed on an epoch home"
     payloads, metas = spool_entries(home)
     assert not payloads and not metas, "a shred must never stage anything (a deferred shred is a lie)"
+
+
+# --------------------------------------------------------------------------- #
+# RED-SPOOL-1 (CTO tear-up 2026-09-03): the skip path must dereference the
+# stored hash, never trust the filename. A pre-planted mismatched entry is the
+# forced collision.
+# --------------------------------------------------------------------------- #
+
+def _plant_entry(home: Path, name_hex: str, payload: bytes, meta_sha: str) -> None:
+    d = home / "capture-staging"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{name_hex}.transcript").write_bytes(payload)
+    (d / f"{name_hex}.meta.json").write_text(
+        json.dumps({"schema": 1, "sha256": meta_sha}), encoding="utf-8")
+
+
+def test_red_spool_1_collision_mismatch_fails_loud_names_both_hashes(tmp_path):
+    from lbrain.spool import SpoolIntegrityError, spool_capture
+
+    home = make_epoch_home(tmp_path / "lbrain-home")
+    write_config(home)
+    cfg = SimpleNamespace(db_path=home / "brain.db")
+
+    new_payload = b"the capture that must not be lost\n"
+    new_digest = hashlib.sha256(new_payload).hexdigest()
+    old_payload = b"DIFFERENT content squatting on the same name\n"
+    old_digest = hashlib.sha256(old_payload).hexdigest()
+    _plant_entry(home, new_digest[:32], old_payload, old_digest)
+
+    with pytest.raises(SpoolIntegrityError) as exc:
+        spool_capture(cfg, home, new_payload, session_id="s", title="t", namespace=None)
+    msg = str(exc.value)
+    assert new_digest in msg and old_digest in msg, "both hashes must be NAMED"
+    # The squatting entry is untouched: refuse to skip AND refuse to overwrite.
+    d = home / "capture-staging"
+    assert (d / f"{new_digest[:32]}.transcript").read_bytes() == old_payload
+
+
+def test_red_spool_1_cli_rc2_never_already_staged(tmp_path, transcript):
+    home = make_epoch_home(tmp_path / "lbrain-home")
+    write_config(home)
+    new_digest = hashlib.sha256(transcript.read_bytes()).hexdigest()
+    old_payload = b"squatter\n"
+    _plant_entry(home, new_digest[:32], old_payload,
+                 hashlib.sha256(old_payload).hexdigest())
+
+    proc = run_cli(["capture", "--from-file", str(transcript)],
+                   cli_env(tmp_path, home), tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 2, f"expected rc=2, got {proc.returncode}: {out}"
+    assert "already staged" not in out.lower(), "a collision must NEVER read as a skip"
+    assert new_digest in out
+
+
+def test_red_spool_1_unparseable_meta_fails_loud(tmp_path):
+    from lbrain.spool import SpoolIntegrityError, spool_capture
+
+    home = make_epoch_home(tmp_path / "lbrain-home")
+    write_config(home)
+    cfg = SimpleNamespace(db_path=home / "brain.db")
+    payload = b"capture behind broken meta\n"
+    digest = hashlib.sha256(payload).hexdigest()
+    d = home / "capture-staging"
+    d.mkdir(parents=True)
+    (d / f"{digest[:32]}.transcript").write_bytes(payload)
+    (d / f"{digest[:32]}.meta.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(SpoolIntegrityError):
+        spool_capture(cfg, home, payload, session_id="s", title="t", namespace=None)
+
+
+def test_red_spool_1_torn_entry_with_foreign_bytes_refuses(tmp_path):
+    from lbrain.spool import SpoolIntegrityError, spool_capture
+
+    home = make_epoch_home(tmp_path / "lbrain-home")
+    write_config(home)
+    cfg = SimpleNamespace(db_path=home / "brain.db")
+    new_payload = b"honest capture\n"
+    digest = hashlib.sha256(new_payload).hexdigest()
+    d = home / "capture-staging"
+    d.mkdir(parents=True)
+    (d / f"{digest[:32]}.transcript").write_bytes(b"foreign bytes, no meta")
+
+    with pytest.raises(SpoolIntegrityError):
+        spool_capture(cfg, home, new_payload, session_id="s", title="t", namespace=None)
 
 
 # --------------------------------------------------------------------------- #
