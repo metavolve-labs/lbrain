@@ -181,14 +181,16 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
                 "locally (it lands in capture-staging/ for the next `lbrain epoch build`) "
                 "and push to Arweave from the swept record.", fg="red")
             sys.exit(2)
-        from ..spool import STAGING_DIRNAME, spool_capture, staged_count
+        from ..spool import STAGING_DIRNAME, SpoolIntegrityError, spool_capture, staged_count
         from ..write_gates import WriteGateError
 
         label = title or session_id or Path(from_file).stem
         try:
             res = spool_capture(Config.load(), home, payload, session_id=session_id,
                                 title=label, namespace=namespace)
-        except WriteGateError as e:  # rc=2 like every gated writer; hooks stay fail-safe
+        except (WriteGateError, SpoolIntegrityError) as e:
+            # rc=2 like every gated writer; hooks stay fail-safe. Integrity
+            # refusals (RED-SPOOL-1) are loud here, never a quiet "already staged".
             click.secho(f"✗ {e}", fg="red")
             sys.exit(2)
         n = staged_count(home)
