@@ -566,7 +566,7 @@ class Store:
 
         from pathlib import Path as _Path
 
-        from .index import is_backup_path
+        from .index import is_excluded_path
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
         # Scope the prune to docs UNDER the imported roots. A NARROW import
@@ -595,7 +595,7 @@ class Store:
         gone = [
             r["rel_path"]
             for r in rows
-            if not os.path.exists(r["abs_path"]) or is_backup_path(_Path(r["abs_path"]))
+            if not os.path.exists(r["abs_path"]) or is_excluded_path(_Path(r["abs_path"]))
         ]
         if gone and not force and rows and len(gone) / len(rows) > max_fraction:
             raise RuntimeError(

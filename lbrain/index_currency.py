@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .index import discover, is_backup_path, parse
+from .index import discover, is_excluded_path, parse
 
 # What an import would do to each divergent record. Named for the user's mental
 # model ("what happened to my file?"), not the importer's branch names.
@@ -189,7 +189,7 @@ def survey(store, sources) -> Survey:
         # Matches prune_missing exactly: "no longer indexable" is not the same as
         # "no longer on disk" — a doc that moved into a backup tree still exists
         # and would still be served forever without this second clause.
-        if not os.path.exists(abs_path) or is_backup_path(p):
+        if not os.path.exists(abs_path) or is_excluded_path(p):
             s.orphaned.append(rel_path)
         else:
             # Still on disk, but discover() under the configured roots never
