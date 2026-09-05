@@ -246,6 +246,10 @@ class Config:
     # which is the pre-existing behaviour.
     allowed_doc_types: list[str] = field(default_factory=list)
     allowed_path_prefixes: list[str] = field(default_factory=list)  # rel_path prefixes
+    # Path substrings that are NOT indexable (delisted, never erased): e.g. "/_archive/".
+    # Empty by default — an exclusion that ships as a default is an ambient default.
+    # Applied at discover() for import, currency AND the epoch deletion manifest.
+    exclude_path_markers: list[str] = field(default_factory=list)
     force_priority_only: bool = False
     # Class assumed for a document with no `disclosure:` frontmatter. Empty means
     # UNCLASSIFIED, and every blinding mode withholds unclassified material — so
@@ -286,6 +290,8 @@ class Config:
             # the dim.
             from .embed import LocalEmbedClient
 
+            from .index import set_exclude_markers
+            set_exclude_markers(())
             return cls(
                 embedding_provider="local",
                 embedding_model=LocalEmbedClient.DEFAULT_MODEL,
@@ -293,6 +299,8 @@ class Config:
                 gemini_base_url=os.environ.get("GEMINI_BASE_URL", cls.gemini_base_url),
             )
         raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        from .index import set_exclude_markers
+        set_exclude_markers(list(raw.get("exclude_path_markers", []) or []))
         sources = [Path(s).expanduser() for s in raw.get("sources", [])]
         api_key = raw.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
         gemini_key = (
@@ -336,6 +344,7 @@ class Config:
             beliefs_dir=raw.get("beliefs_dir", cls.beliefs_dir),
             allowed_doc_types=list(raw.get("allowed_doc_types", []) or []),
             allowed_path_prefixes=list(raw.get("allowed_path_prefixes", []) or []),
+            exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
             force_priority_only=raw.get("force_priority_only", cls.force_priority_only),
             disclosure_default=raw.get("disclosure_default", cls.disclosure_default),
             arweave_enabled=raw.get("arweave_enabled", cls.arweave_enabled),
@@ -389,6 +398,8 @@ class Config:
             "allowed_doc_types = [" + ", ".join(q(x) for x in self.allowed_doc_types) + "]",
             "allowed_path_prefixes = ["
             + ", ".join(q(x) for x in self.allowed_path_prefixes) + "]",
+            "exclude_path_markers = ["
+            + ", ".join(q(x) for x in self.exclude_path_markers) + "]",
             f"force_priority_only = {str(self.force_priority_only).lower()}",
             f"disclosure_default = {q(self.disclosure_default)}",
             f"arweave_enabled = {str(self.arweave_enabled).lower()}",

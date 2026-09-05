@@ -222,9 +222,37 @@ def is_backup_path(p: Path) -> bool:
     return any(m in s for m in _BACKUP_MARKERS)
 
 
+# Operator-declared exclusions (config.toml `exclude_path_markers`). EMPTY by default:
+# a default that silently delists anything would be an ambient default (Wave 0,
+# 2026-09-05: 279 docs under already-MARKED `_archive/` trees were still served because
+# marking a tree is not delisting it — the source glob ingests the whole root).
+# Set once at Config.load() so import, currency and the epoch deletion manifest all
+# agree on what is indexable; a disagreement there would make the gate misjudge.
+_EXTRA_MARKERS: tuple[str, ...] = ()
+
+
+def set_exclude_markers(markers) -> None:
+    global _EXTRA_MARKERS
+    _EXTRA_MARKERS = tuple(str(m) for m in (markers or ()) if str(m))
+
+
+def exclude_markers() -> tuple[str, ...]:
+    return _EXTRA_MARKERS
+
+
+def is_excluded_path(p: Path) -> bool:
+    """Not indexable by policy: a backup snapshot OR an operator-excluded tree.
+    This is the predicate every discover/currency/prune site must share."""
+    if is_backup_path(p):
+        return True
+    s = p.as_posix()
+    return any(m in s for m in _EXTRA_MARKERS)
+
+
 def discover(roots: list[Path]) -> list[Path]:
     """Find indexable *.md under each root, refusing any path that resolves
-    outside the root that offered it, and skipping pre-change backup trees.
+    outside the root that offered it, and skipping pre-change backup trees and
+    operator-excluded trees (config `exclude_path_markers`).
 
     rglob does not descend into symlinked DIRECTORIES but it does yield
     symlinked FILES, and parse() then read_text()s them — so a cloned repo
@@ -243,7 +271,7 @@ def discover(roots: list[Path]) -> list[Path]:
         except OSError:
             continue
         for p in sorted(root.rglob("*.md")):
-            if is_backup_path(p):
+            if is_excluded_path(p):
                 continue
             try:
                 rp = p.resolve()
