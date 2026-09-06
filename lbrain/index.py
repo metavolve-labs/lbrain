@@ -216,6 +216,26 @@ _BACKUP_MARKERS = (
 )
 
 
+_RETIRED_STATUS = {"retired", "archived", "superseded", "closed", "done", "parked"}
+_RETIRED_PATH_MARKERS = ("-archived-", "-retired-", "-superseded-")
+
+
+def is_retired_signal(path_parts, meta) -> bool:
+    """True when the record carries an explicit retired status, by path marker or frontmatter.
+    Name-derived salience (000-PRIORITY-) must never outlive the status the name encoded."""
+    for part in path_parts:
+        low = part.lower()
+        if any(m in low for m in _RETIRED_PATH_MARKERS):
+            return True
+    if not isinstance(meta, dict):
+        return False
+    st = str(meta.get("status", "")).strip().lower()
+    if st in _RETIRED_STATUS:
+        return True
+    r = meta.get("retired")
+    return r is True or (isinstance(r, str) and r.strip().lower() in ("true", "yes", "1"))
+
+
 def is_backup_path(p: Path) -> bool:
     """True if this path is a pre-change snapshot rather than a live record."""
     s = p.as_posix()
@@ -416,9 +436,17 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     # so rel.split("/") returned the whole string as one element and the
     # 000-PRIORITY boost silently never fired — a ranking difference with no
     # error message, which is worse than a crash.
-    is_priority = any(
-        part.startswith("000-PRIORITY") for part in re.split(r"[\\/]", rel)
-    )
+    _parts = re.split(r"[\\/]", rel)
+    is_priority = any(part.startswith("000-PRIORITY") for part in _parts)
+    # "Renaming is not retiring" (Wave 0 finding, 2026-09-05, CSO-named): 65 lairs archived
+    # under names like 000-PRIORITY-X-archived-20260513 kept the 1.3x boost for ~5 months,
+    # because the boost inherited salience from a NAME that outlived the status it encoded.
+    # A retired status, however it is signalled, MUST win over the name:
+    #   - a dated archive rename marker in any path segment ("-archived-", "-ARCHIVED-",
+    #     "-retired-", "-superseded-"), or
+    #   - frontmatter `status:` in a closed set, or `retired: true`.
+    if is_priority and is_retired_signal(_parts, meta):
+        is_priority = False
 
     # Claim-span dual-view (DR panel 2026-08-30): a `claims:` frontmatter list retires
     # specific claims INSIDE a living document. Each {text, status, valid_to}. current_only
