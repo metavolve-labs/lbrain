@@ -2337,7 +2337,7 @@ def epoch():
     no epochs/CURRENT behaves exactly as before."""
 
 
-@cli.command("prune-unreachable")
+@main.command("prune-unreachable")
 @click.option("--yes", is_flag=True, help="Apply. Without it this is a dry run that lists the rows.")
 @click.option("--force", is_flag=True, help="Override the >50%-of-corpus refusal.")
 def prune_unreachable_cmd(yes, force):
