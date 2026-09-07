@@ -610,6 +610,65 @@ class Store:
             self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
         return gone
 
+    def prune_unreachable(
+        self,
+        source_roots: list,
+        max_fraction: float = 0.5,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Drop docs whose file still EXISTS on disk but lies under NO configured
+        source root — the UNREACHABLE class of `index_currency.survey`: no import
+        will ever refresh them and `prune_missing` (existence-based) will never
+        remove them, so they are served, indefinitely, unmaintained. Measured
+        2026-09-08 on a seat home: 719 rows from a memory directory imported once
+        by `lbrain import <subdir>` and never listed in `sources`.
+
+        Guards mirror `prune_missing`: if any configured root is itself missing,
+        prune NOTHING (the mount is gone, not the docs); refuse to drop more than
+        ``max_fraction`` of the corpus unless ``force``. ``dry_run`` returns the
+        would-be-pruned rel_paths without touching the store. Returns the pruned
+        (or would-be-pruned) rel_paths."""
+        import os
+        from pathlib import Path as _Path
+
+        from .index import is_excluded_path
+
+        roots = [os.path.realpath(str(r)) for r in (source_roots or [])]
+        if not roots:
+            return []  # no sources configured → nothing is reachable by definition; refuse to guess
+        for root in roots:
+            if not os.path.isdir(root):
+                return []  # a source root vanished → mount gone, not docs; skip prune
+
+        def _under_root(abs_path: str) -> bool:
+            rp = os.path.realpath(abs_path)
+            return any(rp == root or rp.startswith(root + os.sep) for root in roots)
+
+        rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
+        unreachable = [
+            r["rel_path"]
+            for r in rows
+            if os.path.exists(r["abs_path"])
+            and not is_excluded_path(_Path(r["abs_path"]))
+            and not _under_root(r["abs_path"])
+        ]
+        if unreachable and not force and rows and len(unreachable) / len(rows) > max_fraction:
+            raise RuntimeError(
+                f"prune-unreachable would remove {len(unreachable)}/{len(rows)} docs "
+                f"(>{int(max_fraction * 100)}%) — refusing. Check `sources` in config.toml; "
+                "re-run with --force to override."
+            )
+        if dry_run:
+            return unreachable
+        for rel in unreachable:
+            self.delete_doc_chunks(rel)
+            self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+        return unreachable
+
     def replace_wikilinks(self, doc: Doc) -> None:
         self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (doc.rel_path,))
         for tgt in doc.wikilinks:
