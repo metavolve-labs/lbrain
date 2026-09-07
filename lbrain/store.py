@@ -132,6 +132,42 @@ CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
 """
 
 
+
+def _norm_path(p) -> str:
+    """realpath + normcase: on case-insensitive filesystems (DrvFs, APFS default) a root
+    spelled in different case opens the same directory, and a byte comparison would call a
+    present, reachable document unreachable (CSO/mac review of PR #57, 2026-09-07)."""
+    import os
+    return os.path.normcase(os.path.realpath(str(p)))
+
+
+def _under_roots(abs_path: str, roots: list[str]) -> bool:
+    """True when abs_path lies at or under any root. `roots` must already be _norm_path'd.
+    String match first (cheap, exact); then an inode walk — on a case-insensitive filesystem
+    (DrvFs, APFS) a root spelled in different case is the SAME directory, and os.path.normcase
+    is the identity on POSIX, so only samefile semantics can see it."""
+    import os
+    rp = _norm_path(abs_path)
+    if any(rp == root or rp.startswith(root + os.sep) for root in roots):
+        return True
+    try:
+        root_ids = {(s.st_dev, s.st_ino) for s in (os.stat(r) for r in roots)}
+    except OSError:
+        return False
+    cur = os.path.dirname(rp)
+    while True:
+        try:
+            s = os.stat(cur)
+        except OSError:
+            return False
+        if (s.st_dev, s.st_ino) in root_ids:
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
+
 class Store:
     def __init__(self, db_path: Path, embedding_dim: int = 1536, immutable: bool = False):
         # Epoch-era read path (design v1.4 + vendor3): a PUBLISHED epoch is
@@ -579,13 +615,9 @@ class Store:
         # When it is None (a deliberate whole-brain sweep) every doc stays in
         # scope, exactly as before.
         if source_roots:
-            _roots = [os.path.realpath(str(r)) for r in source_roots]
+            _roots = [_norm_path(r) for r in (source_roots or [])]
 
-            def _under_root(abs_path: str) -> bool:
-                rp = os.path.realpath(abs_path)
-                return any(rp == root or rp.startswith(root + os.sep) for root in _roots)
-
-            rows = [r for r in rows if _under_root(r["abs_path"])]
+            rows = [r for r in rows if _under_roots(r["abs_path"], _roots)]
         # "No longer indexable" is not the same as "no longer on disk". A doc that
         # became EXCLUDED (a backup tree) still exists, so an existence-only prune
         # left it serving forever: discover() stopped finding it, import reported
@@ -609,6 +641,66 @@ class Store:
             self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
             self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
         return gone
+
+    def prune_unreachable(
+        self,
+        source_roots: list,
+        max_fraction: float = 0.5,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> list[str]:
+        """Drop docs whose file still EXISTS on disk but lies under NO configured
+        source root — the UNREACHABLE class of `index_currency.survey`: no import
+        will ever refresh them and `prune_missing` (existence-based) will never
+        remove them, so they are served, indefinitely, unmaintained. Measured
+        2026-09-07 on a seat home: 719 rows — 658 lair docs from plates outside the
+        configured sources plus 61 of another seat's persona files — left by a wider
+        import whose directories were never listed in `sources`.
+
+        Rows under an `exclude_path_markers` path are skipped on purpose: exclusion is
+        the curation verb for those, and a delisted row must not be deleted by a verb
+        the operator did not aim at it.
+
+        Guards mirror `prune_missing`: if any configured root is itself missing,
+        prune NOTHING (the mount is gone, not the docs); refuse to drop more than
+        ``max_fraction`` of the corpus unless ``force``. ``dry_run`` returns the
+        would-be-pruned rel_paths without touching the store. Returns the pruned
+        (or would-be-pruned) rel_paths."""
+        import os
+        from pathlib import Path as _Path
+
+        from .index import is_excluded_path
+
+        roots = [_norm_path(r) for r in (source_roots or [])]
+        if not roots:
+            return []  # no sources configured → nothing is reachable by definition; refuse to guess
+        for root in roots:
+            if not os.path.isdir(root):
+                return []  # a source root vanished → mount gone, not docs; skip prune
+
+        rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
+        unreachable = [
+            r["rel_path"]
+            for r in rows
+            if os.path.exists(r["abs_path"])
+            and not is_excluded_path(_Path(r["abs_path"]))
+            and not _under_roots(r["abs_path"], roots)
+        ]
+        if dry_run:
+            return unreachable   # inspection never needs the authorisation flag (CSO/mac B, 2026-09-07)
+        if unreachable and not force and rows and len(unreachable) / len(rows) > max_fraction:
+            raise RuntimeError(
+                f"prune-unreachable would remove {len(unreachable)}/{len(rows)} docs "
+                f"(>{int(max_fraction * 100)}%) — refusing. Check `sources` in config.toml; "
+                "re-run with --force to override."
+            )
+        for rel in unreachable:
+            self.delete_doc_chunks(rel)
+            self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+        return unreachable
 
     def replace_wikilinks(self, doc: Doc) -> None:
         self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (doc.rel_path,))

@@ -794,9 +794,12 @@ def _project_belief(store, doc) -> int:
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--prune/--no-prune", default=True, help="Drop docs no longer on disk")
 @click.option("--force-prune", is_flag=True, help="Override the prune safety guards (mount-gone / >50%)")
+@click.option("--prune-unreachable", "prune_unreachable", is_flag=True,
+              help="Also drop docs whose file still exists but lies under NO configured source "
+                   "(the UNREACHABLE class `doctor` reports); guarded like --prune.")
 @click.option("--rechunk", is_flag=True,
               help="Re-chunk every document even if its body is unchanged.")
-def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: bool):
+def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unreachable: bool, rechunk: bool):
     """Walk source directories and ingest markdown into the brain."""
     cfg = Config.load()
     # Epoch-managed home ⇒ build-validate-swap is the ONLY write path (design
@@ -946,6 +949,24 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, rechunk: 
             store.close()
             click.secho(f"✗ {e}", fg="red")
             sys.exit(1)
+    pruned_unreachable: list[str] = []
+    if prune_unreachable:
+        try:
+            with store.transaction():
+                # the directories walked by THIS import count as reachable for this run:
+                # otherwise `lbrain import <dir> --prune-unreachable` on a dir outside
+                # `sources` imports and deletes the same docs in one command (CSO/mac C).
+                pruned_unreachable = store.prune_unreachable(
+                    source_roots=[Path(p).expanduser().resolve()
+                                  for p in list(cfg.sources) + list(paths or ())],
+                    force=force_prune)
+        except RuntimeError as e:
+            store.close()
+            click.secho(f"✗ {e}", fg="red")
+            sys.exit(1)
+        if pruned_unreachable:
+            click.secho(f"  pruned {len(pruned_unreachable)} UNREACHABLE doc(s) "
+                        f"(on disk, under no configured source)", fg="yellow")
 
     # Stamp AFTER a successful pass only, and ONLY when that pass covered every
     # configured source. `lbrain import <one-dir>` re-chunks one source and would
@@ -2335,14 +2356,68 @@ def epoch():
     no epochs/CURRENT behaves exactly as before."""
 
 
+@main.command("prune-unreachable")
+@click.option("--yes", is_flag=True, help="Apply. Without it this is a dry run that lists the rows.")
+@click.option("--force", is_flag=True, help="Override the >50%-of-corpus refusal.")
+def prune_unreachable_cmd(yes, force):
+    """List (default) or drop indexed docs that still exist on disk but lie under NO
+    configured source — rows no import refreshes and no --prune removes.
+
+    Epoch homes: use `lbrain epoch build --prune-unreachable` (the only write path)."""
+    from .epoch import EpochError, open_store
+    cfg = Config.load()
+    roots = [Path(p).expanduser().resolve() for p in cfg.sources]
+    try:
+        store = open_store(cfg, for_write=yes)   # an epoch home refuses the write: build is the only write path
+    except EpochError as e:
+        click.secho(f"✗ {e}", fg="red")
+        click.secho("  use `lbrain epoch build --prune-unreachable`", fg="yellow")
+        sys.exit(2)
+    try:
+        rows = store.prune_unreachable(source_roots=roots, force=force, dry_run=True)
+    except RuntimeError as e:
+        store.close()
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
+    if not rows:
+        click.secho("  ✓ no unreachable docs", fg="green")
+        store.close()
+        return
+    click.secho(f"  {len(rows)} UNREACHABLE doc(s) (on disk, under no configured source):", fg="yellow")
+    for rel in rows[:10]:
+        click.echo(f"      · {rel}")
+    if len(rows) > 10:
+        click.echo(f"      · … and {len(rows) - 10} more")
+    total = store.db.execute("SELECT COUNT(*) FROM docs").fetchone()[0] or 0
+    over = total and len(rows) / total > 0.5
+    if over:
+        click.secho(f"  ⚠ that is {len(rows)}/{total} of the corpus (>50%): check `sources` in "
+                    "config.toml first; --yes will refuse without --force", fg="yellow")
+    if not yes:
+        click.secho("  dry run — re-run with --yes to drop them", fg="yellow")
+        store.close()
+        return
+    try:
+        with store.transaction():
+            done = store.prune_unreachable(source_roots=roots, force=force)
+    except RuntimeError as e:
+        store.close()
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
+    store.close()
+    click.secho(f"  pruned {len(done)} unreachable doc(s)", fg="yellow")
+
+
 @epoch.command("build")
 @click.option("--full", is_flag=True, help="Fresh build (default is delta from the current epoch).")
 @click.option("--confirm-source-removed", multiple=True,
               help="Assert that this source root was REMOVED on purpose — without it, a "
                    "vanished or hollow root refuses promotion (mass-absence is not deletion).")
+@click.option("--prune-unreachable", "prune_unreachable", is_flag=True,
+              help="Drop docs that still exist on disk but lie under no configured source (guarded).")
 @click.option("--keep", default=3, show_default=True, help="Prior epochs to retain.")
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
-def epoch_build_cmd(full, confirm_source_removed, keep, max_bytes):
+def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes):
     """Build a candidate, run gate v2, publish atomically."""
     from .epoch import BuilderBusy, EpochError
     from .epoch_build import build
@@ -2351,6 +2426,7 @@ def epoch_build_cmd(full, confirm_source_removed, keep, max_bytes):
     try:
         report = build(CONFIG_DIR, cfg, delta=not full,
                        confirm_source_removed=confirm_source_removed,
+                       prune_unreachable=prune_unreachable,
                        keep=keep, max_bytes=max_bytes)
     except BuilderBusy as e:
         click.secho(f"✗ {e}", fg="yellow")

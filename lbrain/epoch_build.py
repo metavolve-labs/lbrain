@@ -300,6 +300,7 @@ def build(
     *,
     delta: bool = True,
     confirm_source_removed: tuple[str, ...] = (),
+    prune_unreachable: bool = False,
     keep: int = 3,
     max_bytes: int | None = None,
     lbrain_bin: str = "lbrain",
@@ -345,7 +346,8 @@ def build(
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
             (staging / "config.toml").write_text(raw, encoding="utf-8")
 
-            _run_cli(["import", "--prune"], staging, lbrain_bin, lock=lock)
+            _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else []),
+                     staging, lbrain_bin, lock=lock)
             lock.heartbeat()
             # A CONFIRMED-removed root's docs are purged deliberately here — prune's
             # own mount-gone guard (correctly) refuses to drop them, so intent has
