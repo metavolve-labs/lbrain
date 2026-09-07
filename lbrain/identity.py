@@ -80,6 +80,11 @@ class Identity:
         os.replace(tmp, IDENTITY_PATH)
 
 
+def _serving_db(cfg) -> str:
+    from .epoch import serving_db_path
+    return serving_db_path(cfg)
+
+
 def _identity_note(ident) -> str:
     """The one line a consuming agent must read before trusting anything above."""
     if ident is None:
@@ -128,7 +133,7 @@ def describe(cfg, stats: dict | None = None) -> dict:
             "note": _identity_note(ident),
         },
         "brain": {
-            "db": str(getattr(cfg, "db_path", "")),
+            "db": _serving_db(cfg),
             "sources": [str(s) for s in getattr(cfg, "sources", [])],
             "docs": (stats or {}).get("docs"),
             "chunks": (stats or {}).get("chunks"),

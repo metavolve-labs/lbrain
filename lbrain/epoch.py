@@ -100,6 +100,18 @@ def current_epoch_id(home: Path) -> str | None:
     return eid or None
 
 
+def serving_db_path(cfg) -> str:
+    """What a STATUS display should print as the database: the epoch db actually served,
+    never the config path. After the legacy file is tombstoned, printing cfg.db_path names a
+    file that no longer exists (found 2026-09-05, Wave 0 follow-up). A dangling CURRENT is
+    reported as text, not raised — this is a display, and the store already fails loudly."""
+    legacy = Path(getattr(cfg, "db_path", ""))
+    try:
+        return str(resolve_db_path(legacy.parent, legacy))
+    except EpochError as e:
+        return f"{legacy}  (EPOCH ERROR: {e})"
+
+
 def resolve_db_path(home: Path, legacy_db_path: Path) -> Path:
     """The database a reader should open right now.
 

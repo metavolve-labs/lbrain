@@ -216,15 +216,75 @@ _BACKUP_MARKERS = (
 )
 
 
+# Statuses that mean "this record has been RETIRED from the live corpus". Deliberately
+# narrow (CSO review of PR #56, 2026-09-08): `done`, `closed` and `parked` describe a
+# task's state, not the document's — a 000-PRIORITY lair with `status: done` is still the
+# live record of that work and must keep its salience. Only these three retire a record.
+_RETIRED_STATUS = {"retired", "archived", "superseded"}
+_RETIRED_PATH_MARKERS = ("-archived-", "-retired-", "-superseded-")
+
+
+def is_retired_signal(path_parts, meta) -> bool:
+    """True when the record carries an explicit retired status, by path marker or frontmatter.
+    Name-derived salience (000-PRIORITY-) must never outlive the status the name encoded."""
+    for part in path_parts:
+        low = part.lower()
+        if any(m in low for m in _RETIRED_PATH_MARKERS):
+            return True
+    if not isinstance(meta, dict):
+        return False
+    st = str(meta.get("status", "")).strip().lower()
+    if st in _RETIRED_STATUS:
+        return True
+    r = meta.get("retired")
+    return r is True or (isinstance(r, str) and r.strip().lower() in ("true", "yes", "1"))
+
+
 def is_backup_path(p: Path) -> bool:
     """True if this path is a pre-change snapshot rather than a live record."""
     s = p.as_posix()
     return any(m in s for m in _BACKUP_MARKERS)
 
 
+# Operator-declared exclusions (config.toml `exclude_path_markers`). EMPTY by default:
+# a default that silently delists anything would be an ambient default (Wave 0,
+# 2026-09-05: 279 docs under already-MARKED `_archive/` trees were still served because
+# marking a tree is not delisting it — the source glob ingests the whole root).
+# Set once at Config.load() so import, currency and the epoch deletion manifest all
+# agree on what is indexable; a disagreement there would make the gate misjudge.
+_EXTRA_MARKERS: tuple[str, ...] = ()
+
+
+def set_exclude_markers(markers) -> None:
+    """Arm the operator-declared exclusions (config.toml `exclude_path_markers`).
+
+    Module-global state, armed ONLY by `Config.load()` (which reads config.toml).
+    A `Config()` constructed programmatically carries no exclusions unless the
+    caller invokes this function itself — documented rather than changed (CSO
+    review of PR #56, 2026-09-08): an exclusion that arms itself would be an
+    ambient default, which this module refuses on principle.
+    """
+    global _EXTRA_MARKERS
+    _EXTRA_MARKERS = tuple(str(m) for m in (markers or ()) if str(m))
+
+
+def exclude_markers() -> tuple[str, ...]:
+    return _EXTRA_MARKERS
+
+
+def is_excluded_path(p: Path) -> bool:
+    """Not indexable by policy: a backup snapshot OR an operator-excluded tree.
+    This is the predicate every discover/currency/prune site must share."""
+    if is_backup_path(p):
+        return True
+    s = p.as_posix()
+    return any(m in s for m in _EXTRA_MARKERS)
+
+
 def discover(roots: list[Path]) -> list[Path]:
     """Find indexable *.md under each root, refusing any path that resolves
-    outside the root that offered it, and skipping pre-change backup trees.
+    outside the root that offered it, and skipping pre-change backup trees and
+    operator-excluded trees (config `exclude_path_markers`).
 
     rglob does not descend into symlinked DIRECTORIES but it does yield
     symlinked FILES, and parse() then read_text()s them — so a cloned repo
@@ -243,7 +303,7 @@ def discover(roots: list[Path]) -> list[Path]:
         except OSError:
             continue
         for p in sorted(root.rglob("*.md")):
-            if is_backup_path(p):
+            if is_excluded_path(p):
                 continue
             try:
                 rp = p.resolve()
@@ -388,9 +448,17 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     # so rel.split("/") returned the whole string as one element and the
     # 000-PRIORITY boost silently never fired — a ranking difference with no
     # error message, which is worse than a crash.
-    is_priority = any(
-        part.startswith("000-PRIORITY") for part in re.split(r"[\\/]", rel)
-    )
+    _parts = re.split(r"[\\/]", rel)
+    is_priority = any(part.startswith("000-PRIORITY") for part in _parts)
+    # "Renaming is not retiring" (Wave 0 finding, 2026-09-05, CSO-named): 65 lairs archived
+    # under names like 000-PRIORITY-X-archived-20260513 kept the 1.3x boost for ~5 months,
+    # because the boost inherited salience from a NAME that outlived the status it encoded.
+    # A retired status, however it is signalled, MUST win over the name:
+    #   - a dated archive rename marker in any path segment ("-archived-", "-ARCHIVED-",
+    #     "-retired-", "-superseded-"), or
+    #   - frontmatter `status:` in a closed set, or `retired: true`.
+    if is_priority and is_retired_signal(_parts, meta):
+        is_priority = False
 
     # Claim-span dual-view (DR panel 2026-08-30): a `claims:` frontmatter list retires
     # specific claims INSIDE a living document. Each {text, status, valid_to}. current_only

@@ -620,7 +620,8 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
     click.secho(f"✓ LBrain initialized at {CONFIG_DIR}", fg="green")
     click.echo(f"  provider: {provider} ({cfg.embedding_model}, {cfg.embedding_dim}d)")
     click.echo(f"  config:   {CONFIG_PATH}")
-    click.echo(f"  db:       {cfg.db_path}")
+    from .epoch import serving_db_path
+    click.echo(f"  db:       {serving_db_path(cfg)}")
     click.echo(f"  sources:  {len(cfg.sources)} configured")
     click.echo(f"  docs:     {stats['docs']}")
     if not active_key:
