@@ -493,7 +493,7 @@ def chunk(
     buf_path = ""  # heading path of the FIRST section in the buffer
     idx = 0
     for sec, hpath in sections:
-        sec_tokens = len(_encoder().encode(sec))
+        sec_tokens = len(_encoder().encode(sec, disallowed_special=()))
         if buf_tokens + sec_tokens <= max_tokens:
             if not buf:
                 buf_path = hpath
@@ -604,7 +604,7 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
     cont_path = " > ".join(p for p in (hpath, own_text) if p)
 
     def _tok(text: str) -> int:
-        return len(_encoder().encode(text))
+        return len(_encoder().encode(text, disallowed_special=()))
 
     def _flush() -> list[str]:
         """Emit the buffer; return its trailing lines within the overlap budget."""
@@ -638,7 +638,7 @@ def _window_section(doc: "Doc", sec: str, max_tokens: int, overlap: int,
         if lt > max_tokens:
             # One line larger than the whole budget. Nothing to preserve — slice it.
             _flush()
-            toks = _encoder().encode(line)
+            toks = _encoder().encode(line, disallowed_special=())
             step = max(1, max_tokens - overlap)
             for start in range(0, len(toks), step):
                 out.append(_make_chunk(
