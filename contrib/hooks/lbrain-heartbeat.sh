@@ -96,11 +96,24 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       drift=$(find "$d" -name '*.md' -newer "$epoch_db" -print -quit 2>/dev/null)
       [ -n "$drift" ] && break
     done
+    # Staged captures are DEBT the beat must name (item-6 inc-1): a spool entry
+    # is work the brain cannot serve until a build sweeps it. COMPLETE entries
+    # only (meta renames last, so meta presence is the completeness marker).
+    # VISIBILITY ONLY until inc-2 lands: `epoch build` does not sweep the spool
+    # yet, so triggering a build on staged>0 today would loop a useless
+    # minutes-long build every beat. When the inc-2 sweep ships, staged>0
+    # becomes a build trigger alongside source drift.
+    local staged=0 m
+    for m in "$LBHOME"/capture-staging/*.meta.json; do
+      [ -f "$m" ] && [ -f "${m%.meta.json}.transcript" ] && staged=$((staged+1))
+    done
     if [ -n "$drift" ]; then
-      printf '[%s] epoch home: source drift (%s) — building delta epoch\n' "$(date -Is)" "$drift" >>"$LOG" 2>&1
+      printf '[%s] epoch home: source drift (%s; staged_captures=%s) — building delta epoch\n' \
+        "$(date -Is)" "$drift" "$staged" >>"$LOG" 2>&1
       timeout 600 "$LB" epoch build >>"$LOG" 2>&1
     else
-      printf '[%s] epoch home: no drift past current epoch — no-op\n' "$(date -Is)" >>"$LOG" 2>&1
+      printf '[%s] epoch home: no source drift; staged_captures=%s awaiting sweep (inc-2) — no build\n' \
+        "$(date -Is)" "$staged" >>"$LOG" 2>&1
     fi
     return 0
   fi
