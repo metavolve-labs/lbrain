@@ -216,7 +216,11 @@ _BACKUP_MARKERS = (
 )
 
 
-_RETIRED_STATUS = {"retired", "archived", "superseded", "closed", "done", "parked"}
+# Statuses that mean "this record has been RETIRED from the live corpus". Deliberately
+# narrow (CSO review of PR #56, 2026-09-08): `done`, `closed` and `parked` describe a
+# task's state, not the document's — a 000-PRIORITY lair with `status: done` is still the
+# live record of that work and must keep its salience. Only these three retire a record.
+_RETIRED_STATUS = {"retired", "archived", "superseded"}
 _RETIRED_PATH_MARKERS = ("-archived-", "-retired-", "-superseded-")
 
 
@@ -252,6 +256,14 @@ _EXTRA_MARKERS: tuple[str, ...] = ()
 
 
 def set_exclude_markers(markers) -> None:
+    """Arm the operator-declared exclusions (config.toml `exclude_path_markers`).
+
+    Module-global state, armed ONLY by `Config.load()` (which reads config.toml).
+    A `Config()` constructed programmatically carries no exclusions unless the
+    caller invokes this function itself — documented rather than changed (CSO
+    review of PR #56, 2026-09-08): an exclusion that arms itself would be an
+    ambient default, which this module refuses on principle.
+    """
     global _EXTRA_MARKERS
     _EXTRA_MARKERS = tuple(str(m) for m in (markers or ()) if str(m))
 
