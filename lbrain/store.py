@@ -142,10 +142,30 @@ def _norm_path(p) -> str:
 
 
 def _under_roots(abs_path: str, roots: list[str]) -> bool:
-    """True when abs_path lies at or under any root. `roots` must already be _norm_path'd."""
+    """True when abs_path lies at or under any root. `roots` must already be _norm_path'd.
+    String match first (cheap, exact); then an inode walk — on a case-insensitive filesystem
+    (DrvFs, APFS) a root spelled in different case is the SAME directory, and os.path.normcase
+    is the identity on POSIX, so only samefile semantics can see it."""
     import os
     rp = _norm_path(abs_path)
-    return any(rp == root or rp.startswith(root + os.sep) for root in roots)
+    if any(rp == root or rp.startswith(root + os.sep) for root in roots):
+        return True
+    try:
+        root_ids = {(s.st_dev, s.st_ino) for s in (os.stat(r) for r in roots)}
+    except OSError:
+        return False
+    cur = os.path.dirname(rp)
+    while True:
+        try:
+            s = os.stat(cur)
+        except OSError:
+            return False
+        if (s.st_dev, s.st_ino) in root_ids:
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
 
 
 class Store:
