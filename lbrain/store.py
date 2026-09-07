@@ -132,6 +132,22 @@ CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
 """
 
 
+
+def _norm_path(p) -> str:
+    """realpath + normcase: on case-insensitive filesystems (DrvFs, APFS default) a root
+    spelled in different case opens the same directory, and a byte comparison would call a
+    present, reachable document unreachable (CSO/mac review of PR #57, 2026-09-07)."""
+    import os
+    return os.path.normcase(os.path.realpath(str(p)))
+
+
+def _under_roots(abs_path: str, roots: list[str]) -> bool:
+    """True when abs_path lies at or under any root. `roots` must already be _norm_path'd."""
+    import os
+    rp = _norm_path(abs_path)
+    return any(rp == root or rp.startswith(root + os.sep) for root in roots)
+
+
 class Store:
     def __init__(self, db_path: Path, embedding_dim: int = 1536, immutable: bool = False):
         # Epoch-era read path (design v1.4 + vendor3): a PUBLISHED epoch is
@@ -579,13 +595,9 @@ class Store:
         # When it is None (a deliberate whole-brain sweep) every doc stays in
         # scope, exactly as before.
         if source_roots:
-            _roots = [os.path.realpath(str(r)) for r in source_roots]
+            _roots = [_norm_path(r) for r in (source_roots or [])]
 
-            def _under_root(abs_path: str) -> bool:
-                rp = os.path.realpath(abs_path)
-                return any(rp == root or rp.startswith(root + os.sep) for root in _roots)
-
-            rows = [r for r in rows if _under_root(r["abs_path"])]
+            rows = [r for r in rows if _under_roots(r["abs_path"], _roots)]
         # "No longer indexable" is not the same as "no longer on disk". A doc that
         # became EXCLUDED (a backup tree) still exists, so an existence-only prune
         # left it serving forever: discover() stopped finding it, import reported
@@ -621,8 +633,13 @@ class Store:
         source root — the UNREACHABLE class of `index_currency.survey`: no import
         will ever refresh them and `prune_missing` (existence-based) will never
         remove them, so they are served, indefinitely, unmaintained. Measured
-        2026-09-08 on a seat home: 719 rows from a memory directory imported once
-        by `lbrain import <subdir>` and never listed in `sources`.
+        2026-09-07 on a seat home: 719 rows — 658 lair docs from plates outside the
+        configured sources plus 61 of another seat's persona files — left by a wider
+        import whose directories were never listed in `sources`.
+
+        Rows under an `exclude_path_markers` path are skipped on purpose: exclusion is
+        the curation verb for those, and a delisted row must not be deleted by a verb
+        the operator did not aim at it.
 
         Guards mirror `prune_missing`: if any configured root is itself missing,
         prune NOTHING (the mount is gone, not the docs); refuse to drop more than
@@ -634,16 +651,12 @@ class Store:
 
         from .index import is_excluded_path
 
-        roots = [os.path.realpath(str(r)) for r in (source_roots or [])]
+        roots = [_norm_path(r) for r in (source_roots or [])]
         if not roots:
             return []  # no sources configured → nothing is reachable by definition; refuse to guess
         for root in roots:
             if not os.path.isdir(root):
                 return []  # a source root vanished → mount gone, not docs; skip prune
-
-        def _under_root(abs_path: str) -> bool:
-            rp = os.path.realpath(abs_path)
-            return any(rp == root or rp.startswith(root + os.sep) for root in roots)
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
         unreachable = [
@@ -651,16 +664,16 @@ class Store:
             for r in rows
             if os.path.exists(r["abs_path"])
             and not is_excluded_path(_Path(r["abs_path"]))
-            and not _under_root(r["abs_path"])
+            and not _under_roots(r["abs_path"], roots)
         ]
+        if dry_run:
+            return unreachable   # inspection never needs the authorisation flag (CSO/mac B, 2026-09-07)
         if unreachable and not force and rows and len(unreachable) / len(rows) > max_fraction:
             raise RuntimeError(
                 f"prune-unreachable would remove {len(unreachable)}/{len(rows)} docs "
                 f"(>{int(max_fraction * 100)}%) — refusing. Check `sources` in config.toml; "
                 "re-run with --force to override."
             )
-        if dry_run:
-            return unreachable
         for rel in unreachable:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))

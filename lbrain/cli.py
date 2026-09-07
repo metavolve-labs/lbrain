@@ -938,8 +938,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     if prune_unreachable:
         try:
             with store.transaction():
+                # the directories walked by THIS import count as reachable for this run:
+                # otherwise `lbrain import <dir> --prune-unreachable` on a dir outside
+                # `sources` imports and deletes the same docs in one command (CSO/mac C).
                 pruned_unreachable = store.prune_unreachable(
-                    source_roots=[Path(p).expanduser().resolve() for p in cfg.sources],
+                    source_roots=[Path(p).expanduser().resolve()
+                                  for p in list(cfg.sources) + list(paths or ())],
                     force=force_prune)
         except RuntimeError as e:
             store.close()
@@ -2369,12 +2373,22 @@ def prune_unreachable_cmd(yes, force):
         click.echo(f"      · {rel}")
     if len(rows) > 10:
         click.echo(f"      · … and {len(rows) - 10} more")
+    total = store.db.execute("SELECT COUNT(*) FROM docs").fetchone()[0] or 0
+    over = total and len(rows) / total > 0.5
+    if over:
+        click.secho(f"  ⚠ that is {len(rows)}/{total} of the corpus (>50%): check `sources` in "
+                    "config.toml first; --yes will refuse without --force", fg="yellow")
     if not yes:
         click.secho("  dry run — re-run with --yes to drop them", fg="yellow")
         store.close()
         return
-    with store.transaction():
-        done = store.prune_unreachable(source_roots=roots, force=force)
+    try:
+        with store.transaction():
+            done = store.prune_unreachable(source_roots=roots, force=force)
+    except RuntimeError as e:
+        store.close()
+        click.secho(f"✗ {e}", fg="red")
+        sys.exit(1)
     store.close()
     click.secho(f"  pruned {len(done)} unreachable doc(s)", fg="yellow")
 

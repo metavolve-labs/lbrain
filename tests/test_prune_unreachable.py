@@ -1,7 +1,7 @@
 """UNREACHABLE rows: on disk, under no configured source — no import refreshes them,
 `prune_missing` (existence-based) never removes them, so they are served forever.
-Measured 2026-09-08 on a seat home: 719 rows from a memory directory imported once by
-`lbrain import <subdir>` and never listed in `sources`. This verb removes exactly them,
+Measured 2026-09-07 on a seat home: 719 rows (658 lair docs outside the configured
+sources + 61 of another seat's persona files) left by a wider import never listed in `sources`. This verb removes exactly them,
 with prune_missing's guards (mount-gone → nothing; >50% → refuse unless force)."""
 import os
 
@@ -85,3 +85,69 @@ def test_gone_file_is_not_this_verbs_business(tmp_path):
     st, rootA, rootM = _build(tmp_path)
     os.remove(rootM / "m1.md")
     assert st.prune_unreachable(source_roots=[rootA]) == []
+
+
+# ---- CSO/mac review of PR #57 (2026-09-07): A case-differing root, B dry run over the line,
+# ---- C same-run import+prune. RED against 903eed8, GREEN after the fix.
+
+def test_case_differing_root_is_still_reachable(monkeypatch):
+    """A (unit): a root spelled in different case must count as the same root on a
+    case-insensitive filesystem. Simulated by making normcase fold case, so the test
+    is deterministic on Linux tmpfs too."""
+    import os
+    from lbrain import store as S
+    monkeypatch.setattr(S.os.path, "normcase", str.lower)
+    monkeypatch.setattr(S.os.path, "realpath", lambda p: str(p))
+    roots = [S._norm_path("/Mnt/C/Users/x/Lairs")]
+    assert S._under_roots("/mnt/c/users/x/lairs/a/b.md", roots)
+    assert not S._under_roots("/mnt/c/users/x/other/b.md", roots)
+
+
+def _fs_is_case_insensitive() -> bool:
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "CaSe.txt").write_text("x")
+    return (d / "case.txt").exists()
+
+
+@pytest.mark.skipif(not _fs_is_case_insensitive(),
+                    reason="filesystem is case-sensitive; the live reproduction needs DrvFs/APFS")
+def test_case_differing_root_live(tmp_path):
+    """A (live, only on a case-insensitive fs): the CSO's reproduction shape."""
+    st, rootA, rootM = _build(tmp_path)
+    swapped = str(rootA).swapcase()
+    assert os.path.isdir(swapped)
+    kept = st.prune_unreachable(source_roots=[swapped, rootM], dry_run=True)
+    assert kept == []
+
+
+def test_dry_run_lists_even_when_over_the_fraction_guard(tmp_path):
+    """B: inspection must never need --force. 2 of 3 rows unreachable (>50%)."""
+    st, rootA, rootM = _build(tmp_path)
+    listed = st.prune_unreachable(source_roots=[rootM], dry_run=True)   # A's two rows are unreachable now
+    assert sorted(listed) == ["a1.md", "a2.md"]
+    assert _rels(st) == ["a1.md", "a2.md", "m1.md"]                      # nothing touched
+    with pytest.raises(RuntimeError):
+        st.prune_unreachable(source_roots=[rootM])                         # apply still refuses
+    assert sorted(st.prune_unreachable(source_roots=[rootM], force=True)) == ["a1.md", "a2.md"]
+
+
+def test_walked_dir_counts_as_reachable_for_the_same_run(tmp_path):
+    """C: the import call site now passes cfg.sources + this run's paths. At store level:
+    a root list that includes the just-walked dir keeps its docs."""
+    st, rootA, rootM = _build(tmp_path)
+    assert st.prune_unreachable(source_roots=[rootA, rootM], dry_run=True) == []
+    assert st.prune_unreachable(source_roots=[rootA], dry_run=True) == ["m1.md"]
+
+
+def test_prune_missing_also_clears_claim_spans(tmp_path):
+    """CSO/mac note: prune_missing does not delete claim_spans explicitly. It does not
+    need to: claim_spans.src_path REFERENCES docs(rel_path) ON DELETE CASCADE and the
+    store opens with PRAGMA foreign_keys=ON. This test pins the cascade (GREEN on 903eed8)."""
+    st, rootA, rootM = _build(tmp_path)
+    st.db.execute("INSERT INTO claim_spans (src_path, claim_text, status, valid_to) VALUES (?,?,?,?)",
+                  ("m1.md", "claim", "active", None))
+    st.db.commit()
+    (rootM / "m1.md").unlink()
+    st.prune_missing(source_roots=[rootA, rootM], force=True)
+    assert st.db.execute("SELECT COUNT(*) FROM claim_spans WHERE src_path='m1.md'").fetchone()[0] == 0
