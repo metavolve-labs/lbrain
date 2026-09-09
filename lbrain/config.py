@@ -174,6 +174,7 @@ class Config:
     chunk_overlap: int = 64
     priority_boost: float = 1.3
     rrf_k: int = 60  # Reciprocal Rank Fusion smoothing constant (higher = flatter)
+    keyword_decisive_tau: float = 0.0  # PHASE 1b (#61): if BM25 top-1/top-2 margin >= tau, the keyword top-1 takes fused position 1. 0.0 = off (pure RRF).
     contextual_prefix: bool = False  # prepend doc macro-context to each chunk's embed/FTS text
     # --- AMP (Augmented Memory Protocol) injection layer — gating, budgeting, provenance ---
     amp_gating: bool = True  # skip injection for trivial/low-signal queries (Gate 1)
@@ -322,6 +323,7 @@ class Config:
             chunk_overlap=raw.get("chunk_overlap", cls.chunk_overlap),
             priority_boost=raw.get("priority_boost", cls.priority_boost),
             rrf_k=raw.get("rrf_k", cls.rrf_k),
+            keyword_decisive_tau=float(raw.get("keyword_decisive_tau", cls.keyword_decisive_tau) or 0.0),
             contextual_prefix=raw.get("contextual_prefix", cls.contextual_prefix),
             amp_gating=raw.get("amp_gating", cls.amp_gating),
             amp_min_chars=raw.get("amp_min_chars", cls.amp_min_chars),
@@ -371,6 +373,7 @@ class Config:
             f"chunk_overlap = {self.chunk_overlap}",
             f"priority_boost = {self.priority_boost}",
             f"rrf_k = {self.rrf_k}",
+            f"keyword_decisive_tau = {float(self.keyword_decisive_tau)}",
             f"contextual_prefix = {str(self.contextual_prefix).lower()}",
             f"amp_gating = {str(self.amp_gating).lower()}",
             f"amp_min_chars = {self.amp_min_chars}",

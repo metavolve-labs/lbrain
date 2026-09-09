@@ -454,6 +454,20 @@ def search(
         h.keyword_score += c
         h.score += c
 
+    # 3b. PHASE 1b (issue #61): a decisive keyword win takes fused position 1. RRF adds positions, so a chunk that is
+    #     BM25 rank 1 by a wide margin but cosine rank ~45 loses to chunks placed modestly on both lists (measured:
+    #     needle at hybrid rank 13 of 64 while keyword_only ranks it 1). If the top BM25 score exceeds the runner-up by
+    #     a factor >= keyword_decisive_tau, that chunk is placed first; everything else keeps its RRF order. Off by default.
+    tau = float(getattr(cfg, "keyword_decisive_tau", 0.0) or 0.0)
+    if tau > 0 and kw_rows:
+        b1 = abs(float(kw_rows[0]["rank"]))
+        b2 = abs(float(kw_rows[1]["rank"])) if len(kw_rows) > 1 else 0.0
+        margin = (b1 / b2) if b2 > 0 else float("inf")
+        if margin >= tau:
+            top = hits[kw_rows[0]["chunk_id"]]
+            top.boosts["decisive_keyword"] = round(margin, 3) if margin != float("inf") else 1e9
+            top.score = max(x.score for x in hits.values()) + 1.0
+
     # 4. Filters + domain boosts (multiplicative on the fused score)
     out: list[Hit] = []
     for h in hits.values():
