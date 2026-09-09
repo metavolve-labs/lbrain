@@ -373,7 +373,7 @@ class Config:
             f"chunk_overlap = {self.chunk_overlap}",
             f"priority_boost = {self.priority_boost}",
             f"rrf_k = {self.rrf_k}",
-            f"keyword_decisive_tau = {self.keyword_decisive_tau}",
+            (f"keyword_decisive_tau = {self.keyword_decisive_tau}" if self.keyword_decisive_tau is not None else "# keyword_decisive_tau = 1.25   # off (None); PHASE 1b (#61): decisive BM25 win takes fused position 1"),
             f"contextual_prefix = {str(self.contextual_prefix).lower()}",
             f"amp_gating = {str(self.amp_gating).lower()}",
             f"amp_min_chars = {self.amp_min_chars}",
