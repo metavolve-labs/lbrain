@@ -458,8 +458,8 @@ def search(
     #     BM25 rank 1 by a wide margin but cosine rank ~45 loses to chunks placed modestly on both lists (measured:
     #     needle at hybrid rank 13 of 64 while keyword_only ranks it 1). If the top BM25 score exceeds the runner-up by
     #     a factor >= keyword_decisive_tau, that chunk is placed first; everything else keeps its RRF order. Off by default.
-    tau = getattr(cfg, "keyword_decisive_tau", None)
-    if tau and kw_rows:
+    tau = float(getattr(cfg, "keyword_decisive_tau", 0.0) or 0.0)
+    if tau > 0 and kw_rows:
         b1 = abs(float(kw_rows[0]["rank"]))
         b2 = abs(float(kw_rows[1]["rank"])) if len(kw_rows) > 1 else 0.0
         margin = (b1 / b2) if b2 > 0 else float("inf")
