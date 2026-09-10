@@ -7,6 +7,10 @@ CONFIG_DIR late (never at import), so the manifest lands in the tmp home.
 from __future__ import annotations
 
 from pathlib import Path
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 
 from click.testing import CliRunner
 
@@ -63,6 +67,67 @@ def test_templates_cli_points_at_the_placeholder(tmp_path):
     assert "__LBRAIN_SOURCE_DIRS__" in res.output
     snippet = (tmp_path / "h" / "claude-code-settings-snippet.json").read_text()
     assert str(tmp_path / "h") in snippet  # snippet references its own dir
+
+
+# --------------------------------------------------------------------------- #
+# Codex named profile                                                         #
+# --------------------------------------------------------------------------- #
+
+def test_codex_profile_injects_brain_and_persona(tmp_path):
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    (brain / "config.toml").write_text('embedding_provider = "local"\n')
+    path, created = dialin.write_codex_profile(
+        tmp_path / "codex", "artiswa", brain, persona="cco"
+    )
+    assert created is True
+    parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    assert parsed["shell_environment_policy"]["inherit"] == "all"
+    assert parsed["shell_environment_policy"]["set"] == {
+        "LBRAIN_HOME": str(brain.resolve()),
+        "LBRAIN_PERSONA": "cco",
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_codex_profile_is_idempotent_but_never_overwrites(tmp_path):
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    (brain / "config.toml").write_text('embedding_provider = "local"\n')
+    path, _ = dialin.write_codex_profile(tmp_path / "codex", "lbrain", brain)
+    assert dialin.write_codex_profile(
+        tmp_path / "codex", "lbrain", brain
+    ) == (path, False)
+    path.write_text("# user-owned profile\n")
+    import pytest
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        dialin.write_codex_profile(tmp_path / "codex", "lbrain", brain)
+
+
+def test_codex_profile_rejects_unprovisioned_home_and_bad_name(tmp_path):
+    import pytest
+    with pytest.raises(ValueError, match="not a provisioned"):
+        dialin.write_codex_profile(tmp_path / "codex", "lbrain", tmp_path / "empty")
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    (brain / "config.toml").write_text("")
+    with pytest.raises(ValueError, match="profile must"):
+        dialin.write_codex_profile(tmp_path / "codex", "../escape", brain)
+
+
+def test_codex_profile_cli_prints_launch_and_verification(tmp_path):
+    brain = tmp_path / "brain"
+    brain.mkdir()
+    (brain / "config.toml").write_text('embedding_provider = "local"\n')
+    res = CliRunner().invoke(main, [
+        "setup", "codex-profile", "--profile", "artiswa",
+        "--codex-home", str(tmp_path / "codex"),
+        "--brain-home", str(brain), "--persona", "cco",
+    ])
+    assert res.exit_code == 0, res.output
+    assert "codex --profile artiswa" in res.output
+    assert "codex sandbox --profile artiswa -- lbrain whoami" in res.output
+    assert "SQLite opens it in WAL mode" in res.output
 
 
 # --------------------------------------------------------------------------- #
