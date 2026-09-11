@@ -210,6 +210,40 @@ def core_block(path: str, max_chars: int = 900, envelope=None, withheld=None,
     return label + "\n" + text + "\n"
 
 
+_ENGINE_STAMP: str | None = None
+
+
+def engine_stamp() -> str:
+    """Which code answered: package version, plus the git short sha when the package runs from a
+    checkout. Computed ONCE per process and cached, on purpose: a long-lived MCP server keeps the
+    stamp of the code it loaded, so a reader can see that a stale process answered.
+
+    CSO A3 parity case, 2026-09-11T07:31Z: a seat's MCP server served a retired record unmarked at
+    rank 1 above its correction, hours after the repair landed, because the process predated it,
+    and "nothing in the served output tells the reader which code answered". Now something does.
+    Reads .git/HEAD and the ref file directly; no subprocess, no git binary required.
+    """
+    global _ENGINE_STAMP
+    if _ENGINE_STAMP is not None:
+        return _ENGINE_STAMP
+    from . import __version__
+    stamp = __version__
+    try:
+        import os
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        head = open(os.path.join(root, ".git", "HEAD"), encoding="utf-8").read().strip()
+        if head.startswith("ref: "):
+            sha = open(os.path.join(root, ".git", head[5:]), encoding="utf-8").read().strip()
+        else:
+            sha = head
+        if sha:
+            stamp += "+" + sha[:7]
+    except OSError:
+        pass  # a wheel install has no checkout; the version alone is the honest stamp
+    _ENGINE_STAMP = stamp
+    return stamp
+
+
 def provenance(kept, total: int, used_chars: int, budget_chars: int, strategy: str = "tool") -> str:
     """AMP provenance: a one-line, auditable injection-metadata footer."""
     scores = [h.score for h in kept]
@@ -217,4 +251,4 @@ def provenance(kept, total: int, used_chars: int, budget_chars: int, strategy: s
     srcs = len({h.rel_path for h in kept})
     bud = f"{used_chars}/{budget_chars} chars" if budget_chars else f"{used_chars} chars (unbudgeted)"
     return (f"[AMP] strategy={strategy} · injected {len(kept)}/{total} hits "
-            f"from {srcs} source(s) · budget {bud} · score {rng}")
+            f"from {srcs} source(s) · budget {bud} · score {rng} · engine {engine_stamp()}")
