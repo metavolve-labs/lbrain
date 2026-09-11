@@ -65,3 +65,29 @@ def test_affected_window_is_the_first_utc_hours_on_a_negative_offset_host():
              if datetime.datetime(2026, 9, 11, h, 30, tzinfo=datetime.timezone.utc).astimezone(tz).date()
              < datetime.date(2026, 9, 11)]
     assert early == [0, 1, 2, 3, 4, 5, 6]
+
+
+def test_record_date_behaviour_not_just_source(tz_utc_minus_7):
+    """CALL record_date and assert the label it returns.
+
+    The CCO's standing point, made hours before this file existed: counting a source-level check as an
+    operational result is one of the team's three biggest avoidable costs. The first version of this file
+    asserted that a string appears in serve.py, which proves the edit landed and proves nothing about what
+    a reader is served. This constructs a Hit with the run's exact mtime and asserts the returned tuple.
+    """
+    if not hasattr(time, "tzset"):
+        pytest.skip("cannot force the host zone on this platform")
+    from lbrain.search import Hit
+    from lbrain.serve import record_date
+
+    h = Hit(rel_path="_META/zz-a2-frame-probe.md", chunk_idx=0, text="probe", title="probe",
+            score=1.0, mtime=RUN_TS)
+    label, date = record_date(h)
+
+    # the basis is still named honestly...
+    assert label == "file-dated"
+    # ...and the date is now the UTC one, not the host's previous day
+    assert date == "2026-09-11", (
+        "record_date returned %r; on a UTC-7 host the pre-fix code returned 2026-09-10 "
+        "for a file that did not exist at any instant of that UTC day" % date
+    )
