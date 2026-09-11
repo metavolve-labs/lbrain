@@ -151,10 +151,12 @@ lbrain embed --stale
 lbrain query "what did we decide about the deploy flag?"
 ```
 
-Rather kick the tires before pointing it at your own notes? Both examples above run against the
-bundled corpus:
+Want to try the sample notes first? They live in this repository and are not installed by pip.
+With Git installed, fetch the repository and enter its root before running the demo:
 
 ```bash
+git clone https://github.com/metavolve-labs/lbrain.git lbrain-demo
+cd lbrain-demo
 lbrain init --source examples/demo-corpus
 lbrain import && lbrain embed --stale
 lbrain query "what flag do deploys use?"
