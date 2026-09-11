@@ -50,7 +50,9 @@ with `lbrain --version` and `git log -1` on the CLI. **A footer with no `engine`
 process that predates this field.** The stamp is bound when the code is imported, so it names what the
 process loaded, not what is on disk now.
 
-Restart checklist, in order: (1) the code on disk is what you intend (`lbrain --version`, `git log -1`);
+Restart checklist, in order: (0) the client's server entry pins `LBRAIN_HOME` (README, "Connect it to an
+agent"): after reconnecting, `lair_whoami` must name the brain you meant, since a server inherits the
+client's environment and otherwise opens the default home; (1) the code on disk is what you intend (`lbrain --version`, `git log -1`);
 (2) `lbrain query "<anything>"` on the CLI ends with the expected `engine` stamp; (3) restart the MCP
 server in every client that holds one (in Claude Code, `/mcp` and reconnect `lbrain`); (4) the same
 query through the client's `lair_query` tool shows the same `engine` stamp; (5) for an epoch-managed

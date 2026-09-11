@@ -179,12 +179,19 @@ the model coming *down*, not your notes going *up*); after that, embedding is fu
 cleanly for its human, and the contract for consuming what it serves.
 
 ```bash
-# Claude Code
-claude mcp add lbrain -- lbrain mcp
+# Claude Code — pin the brain home in the server's own environment
+claude mcp add lbrain -e LBRAIN_HOME="$HOME/.lbrain" -- lbrain mcp
 
 # Any client that speaks streamable HTTP
-lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
+LBRAIN_HOME="$HOME/.lbrain" lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
 ```
+
+**Pin `LBRAIN_HOME` in the server entry, not only in your shell.** An MCP server inherits the environment
+of the client that launched it, not of the terminal you set the variable in. If you run more than one
+brain on a machine (one per agent, one per project) and the client's config carries no `env`, the server
+silently opens the default `~/.lbrain` and answers from the wrong memory. Measured 2026-09-11: a second
+agent's server reported the first agent's identity. Check with the `lair_whoami` tool after connecting;
+for Codex, give the `[mcp_servers.lbrain]` table an `env = { LBRAIN_HOME = "/path/to/that/brain" }` line.
 
 Five tools over MCP: semantic recall, exact-phrase search, a save-worthiness check, an action check
 against your recorded corrections, and corpus statistics. Everything also works from the shell —
