@@ -1,7 +1,9 @@
 """A2 date-frame regression: the served date label must be the UTC date, not the host's.
 
 CSO A2 run 2026-09-11: a record whose mtime was 2026-09-11T05:26:18Z served `file-dated 2026-09-10`
-on a UTC-7 host. The file did not exist at any instant of 2026-09-10 UTC.
+on a UTC-7 host. An mtime is a modification instant, not a creation instant (CCO 07:00Z): the claim
+is that the modification stamped on the file happened at no instant of 2026-09-10 UTC, and the
+label said it did.
 
 This file was first committed as a standalone script with module-level `sys.exit()`. Under pytest that
 aborts COLLECTION for the whole suite with INTERNALERROR, so a regression test for one defect disabled
@@ -15,7 +17,9 @@ import time
 
 import pytest
 
-# the exact instant from the run: late in a UTC day, previous day on a UTC-7 host
+# the exact instant from the run: EARLY in a UTC day (05:26Z, inside the 00:00-06:59Z window that a
+# UTC-7 host resolves to the previous local date). The first version of this comment said "late";
+# the CCO checked the arithmetic and the direction was wrong, so it is corrected here rather than left.
 RUN_TS = datetime.datetime(2026, 9, 11, 5, 26, 18, tzinfo=datetime.timezone.utc).timestamp()
 SERVE_PY = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lbrain", "serve.py")
 
@@ -89,5 +93,5 @@ def test_record_date_behaviour_not_just_source(tz_utc_minus_7):
     # ...and the date is now the UTC one, not the host's previous day
     assert date == "2026-09-11", (
         "record_date returned %r; on a UTC-7 host the pre-fix code returned 2026-09-10 "
-        "for a file that did not exist at any instant of that UTC day" % date
+        "for a modification that occurred at no instant of that UTC day" % date
     )
