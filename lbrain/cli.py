@@ -1162,8 +1162,13 @@ def embed(stale: bool, batch: int, reuse_from):
               help="Blinding mode for THIS request. May only NARROW the LBRAIN_DISCLOSURE ceiling.")
 @click.option("--sealed", default=None,
               help="Adversarial mode: comma/space-separated slugs to disclose. Narrows only.")
+@click.option("--current-only", "current_only", is_flag=True,
+              help="EXCLUDE superseded and retired records instead of serving them marked (dual-view; "
+                   "the default keeps and marks them). A3 re-run 2026-09-11: this exclusion existed in "
+                   "the search layer and no CLI or MCP caller could reach it.")
 def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool, recency: bool,
-          serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None):
+          serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None,
+          current_only: bool):
     """Semantic + keyword hybrid search across the brain."""
     warn_if_unprovisioned()
     cfg = Config.load()
@@ -1178,7 +1183,8 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         t0 = time.monotonic()
         envelope = _resolve_envelope(cfg, disclosure, sealed)
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
-                      rerank=rerank, recency=recency, persona=persona, envelope=envelope)
+                      rerank=rerank, recency=recency, persona=persona, envelope=envelope,
+                      current_only=current_only)
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, serve_mode)
         if warn:
@@ -1237,7 +1243,10 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
               type=click.Choice(["adversarial", "independent", "collaborative", "full"]),
               help="Blinding mode for THIS request. May only NARROW the LBRAIN_DISCLOSURE ceiling.")
 @click.option("--sealed", default=None, help="Adversarial mode: slugs to disclose. Narrows only.")
-def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None):
+@click.option("--current-only", "current_only", is_flag=True,
+              help="EXCLUDE superseded and retired records instead of serving them marked.")
+def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None,
+               current_only: bool):
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
     warn_if_unprovisioned()
     cfg = Config.load()
@@ -1245,7 +1254,8 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
     try:
         t0 = time.monotonic()
         hits = keyword_only(store, query, k=k, persona=persona,
-                            envelope=_resolve_envelope(cfg, disclosure, sealed))
+                            envelope=_resolve_envelope(cfg, disclosure, sealed),
+                            current_only=current_only)
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, None)
         if warn:
