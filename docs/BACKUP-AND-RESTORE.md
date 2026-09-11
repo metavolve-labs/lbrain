@@ -27,37 +27,57 @@ regenerate and everything you can.
 
 ## Back up
 
-Copy the home directory as a tree while nothing is building. The pieces that matter, in order:
+Two home shapes ship, and the route covers both. An **epoch-managed** home has `epochs/CURRENT`; a
+**legacy** home has one database at the configured `db_path` (`config.toml`; default `<home>/brain.db`)
+and no `epochs/` tree. The first version of this page had an inline block that worked on the first shape
+and exited 1 on the second, leaving a config-only backup (CCO independent replay, 2026-09-11T07:40Z).
+The route is now a script that detects the shape, and it is tested against both:
 
 ```bash
-H="${LBRAIN_HOME:-$HOME/.lbrain}"
-B="$H/backups/home-$(date -u +%Y%m%dT%H%M%SZ)"
-mkdir -p "$B"
-cp -a "$H/config.toml" "$H/identity.json" "$H/CORE.md" "$B/" 2>/dev/null   # whichever exist
-[ -f "$H/env" ] && cp -a "$H/env" "$B/"                                     # credentials, if any
-cp -a "$H/epochs" "$B/epochs"                                                # the served index and its history
+scripts/lbrain-backup.sh                 # → <home>/backups/home-<UTC stamp>/
+scripts/lbrain-backup.sh /mnt/usb/lbrain-2026-09-11   # → an independent location (see below)
 ```
 
-Then **prove the copy is readable before you need it**. A backup that has never been opened is a
-hope:
+What it does, in order: refuses if this home has a writer (`lbrain epoch build` or `epoch prune` hold
+the builder lock `epochs/.builder.lock.d`; a `.building` directory means a build is live or died mid-way; on a
+legacy home the SQLite online backup API gives a consistent snapshot even beside a writer); copies `config.toml`, `identity.json`, `CORE.md` and `env` where present; on an
+epoch home refuses if `CURRENT` names an epoch whose `brain.db` is missing (a torn home is not backed
+up, it is reported) and otherwise copies the whole `epochs/` tree; on a legacy home takes a consistent
+snapshot of the configured database through SQLite's online backup API (a plain `cp` of a live
+WAL-mode database can miss committed pages) into `<backup>/brain.db`; runs `PRAGMA quick_check` on the
+copied database; and writes `BACKUP-MANIFEST.txt` naming the shape, the source, each copied file and
+the database sha256. Exit 0 means copied and checked; 2 means nothing was copied and the reason is on
+stderr; 3 means the copy is there but failed its integrity check and is marked so.
+
+**Two kinds of backup, and they are not the same thing.** The default destination under
+`<home>/backups/` is an **in-home rollback copy**: it protects against a bad build, a wrong prune, or
+an edit you regret, and it dies with the disk. A **disaster backup** is the same directory written to
+an independent location (another disk, another machine, object storage) by giving the script a
+destination and by whatever copies your other files off the machine. Keep both; do not mistake the
+first for the second.
+
+Then **prove the copy is readable before you need it**. A backup that has never been opened is a hope:
 
 ```bash
-LBRAIN_HOME="$B" lbrain epoch status          # names the epoch CURRENT points at and the retained ones
-LBRAIN_HOME="$B" lbrain search "<a phrase you know is in your corpus>"
+LBRAIN_HOME=<backup dir> lbrain epoch status      # epoch shape: names CURRENT and the retained epochs
+LBRAIN_HOME=<backup dir> lbrain search "<a phrase you know is in your corpus>"
 ```
 
-Both commands must answer. If `epoch status` reports that CURRENT names an epoch whose database
-does not exist, the copy is torn; take it again while no build is running.
+For a legacy-shape backup, `epoch status` does not apply; run the search after pointing a scratch
+home's `config.toml` `db_path` at `<backup>/brain.db`, or simply restore it (below) and search there.
 
-Your **sources** are not in the home. Back them up wherever they live; `config.toml` records the
-paths. A restored home pointing at sources that are gone rebuilds an empty index and says so.
+Your **sources** are not in the home. Their locations are whatever `config.toml` `sources` names, and
+that list is yours to set. Back them up wherever they live; a restored home pointing at sources that
+are gone rebuilds an empty index and says so.
 
-**What the acceptance run proved about this copy** (CSO, A5, 2026-09-11): a tree copy of
-`config.toml`, `identity.json` and the whole `epochs/` directory served the same records
-immediately, with a superseded record still carrying its `SUPERSEDED` marker, and at three
-checkpoints (after cloning, after pruning, after a destroy-and-restore) the served text and the
-retirement state both matched. Compare **content and retirement state**, not database identity:
-identical ids can hide a retired record quietly coming back live.
+**What the acceptance runs proved about this copy** (CSO A5 2026-09-11T05:48Z on an epoch home; CCO
+replay 07:40Z, B1 to B4 and an active-lease prune): a tree copy of `config.toml`, `identity.json` and
+the whole `epochs/` directory served the same records immediately, with a superseded record still
+carrying its `SUPERSEDED` marker, and at three checkpoints (after cloning, after pruning, after a
+destroy-and-restore) the served text and the retirement state both matched. Compare **content and
+retirement state**, not database identity: identical ids can hide a retired record quietly coming back
+live. The legacy shape has the script's own tests behind it (`tests/test_backup_script_both_home_shapes.py`)
+and no independent acceptance replay yet.
 
 ## Restore
 
@@ -66,8 +86,8 @@ what you do when the first is impossible.
 
 ### Route 1: put the tree back
 
-Stop anything that writes to the home (an `lbrain epoch build` in progress; nothing else writes).
-Then:
+Every writer must be idle: on an epoch home that is `lbrain epoch build` **and** `lbrain epoch prune`
+(prune writes too); on a legacy home it is `import`, `embed` and `capture`. Then, for an epoch home:
 
 ```bash
 H="${LBRAIN_HOME:-$HOME/.lbrain}"
@@ -82,6 +102,18 @@ lbrain search "<the same phrase as before>"
 The restore is complete when both commands answer as they did from the backup. The served epoch is
 whatever `epochs/CURRENT` in the backup named; nothing in the copy needs editing.
 
+For a **legacy** home, the database goes back to the **configured** path, not to a fixed name:
+
+```bash
+H="${LBRAIN_HOME:-$HOME/.lbrain}"
+B=<the backup directory you verified above>
+DB=$(sed -n 's/^db_path *= *"\(.*\)"/\1/p' "$H/config.toml" | head -1); DB="${DB:-$H/brain.db}"
+mv "$DB" "$DB.broken-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null
+rm -f "$DB-wal" "$DB-shm"                                     # stale WAL files belong to the old file
+cp -a "$B/brain.db" "$DB"; cp -a "$B/config.toml" "$H/config.toml"
+lbrain search "<the same phrase as before>"
+```
+
 ### Route 2: rebuild from sources
 
 If there is no usable backup of `epochs/`, or the backup predates source edits you want served:
@@ -92,8 +124,10 @@ lbrain epoch status
 ```
 
 This is the only write path into an epoch-managed home. It regenerates the index from the sources
-named in `config.toml`. It does not need the old `epochs/` tree at all; if `epochs/CURRENT` is
-dangling (see below), remove the pointer deliberately first, then build. What you lose on this route
+named in `config.toml`. It does not need the old `epochs/` tree at all; if `<home>/epochs/CURRENT` is
+dangling (see below), remove that pointer deliberately first, then build. On a **legacy** home the
+equivalent is `lbrain import && lbrain embed --stale`, which rebuilds the configured database from the
+same sources. What you lose on this route
 is **history**: prior epochs, which are earlier states of the index, are not recreated. Nothing about
 the corpus itself is lost, because the corpus was never in the home.
 
@@ -106,8 +140,9 @@ silently serving nothing or falling back to an older epoch. The message is:
 > prior epoch or remove the pointer deliberately
 
 That refusal is correct behaviour and is what the acceptance run saw. "Restore a prior epoch" means
-Route 1 (copy the epoch directory back). "Remove the pointer deliberately" means `rm epochs/CURRENT`
-followed by Route 2. Do not point CURRENT at another retained epoch by hand: `publish` checks that an
+Route 1 (copy the epoch directory back). "Remove the pointer deliberately" means
+`rm "${LBRAIN_HOME:-$HOME/.lbrain}/epochs/CURRENT"`, the pointer of the home that is bound, never a
+relative path from wherever you happen to be, followed by Route 2. Do not point CURRENT at another retained epoch by hand: `publish` checks that an
 epoch was gate-vetted before it will serve it, and a hand edit skips that check.
 
 ## Pruning, and the boundary of what a rebuild can bring back
@@ -133,9 +168,10 @@ rebuild, not to search for the directory.**
 
 ## Untested, stated rather than implied
 
-The acceptance run exercised a clean tree copy, a prune, and a destroy-and-restore of CURRENT. It did
-**not** exercise recovery from a corrupted database, from a partial write, or from a crash in the
-middle of the publish swap. `epoch build` writes a candidate, validates it, and repoints CURRENT with
+The acceptance runs exercised a clean tree copy, a prune (including under an active reader lease),
+and a destroy-and-restore of CURRENT, all on the epoch shape. They did **not** exercise recovery from
+a corrupted database, from a partial write, from a crash in the middle of the publish swap, or from
+lost sources; and the legacy-shape route has script tests but no independent replay yet. `epoch build` writes a candidate, validates it, and repoints CURRENT with
 an atomic rename, so a crash mid-build leaves a `.building` or `.failed` directory and an untouched
 CURRENT; that design is documented in `ATOMIC-EPOCHS-DESIGN-2026-08-31.md` and has not been
 fault-injected as part of this row. Until it is, treat this page as covering the three cases it names.
