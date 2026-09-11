@@ -86,33 +86,25 @@ what you do when the first is impossible.
 
 ### Route 1: put the tree back
 
-Every writer must be idle: on an epoch home that is `lbrain epoch build` **and** `lbrain epoch prune`
-(prune writes too); on a legacy home it is `import`, `embed` and `capture`. Then, for an epoch home:
-
 ```bash
-H="${LBRAIN_HOME:-$HOME/.lbrain}"
-B=<the backup directory you verified above>
-mv "$H/epochs" "$H/epochs.broken-$(date -u +%Y%m%dT%H%M%SZ)"   # keep the wreck; never delete evidence
-cp -a "$B/epochs" "$H/epochs"
-cp -a "$B/config.toml" "$H/config.toml"                         # and identity.json / CORE.md / env as needed
-lbrain epoch status
+scripts/lbrain-restore.sh <the backup directory you verified above>
 lbrain search "<the same phrase as before>"
 ```
 
-The restore is complete when both commands answer as they did from the backup. The served epoch is
-whatever `epochs/CURRENT` in the backup named; nothing in the copy needs editing.
+The script restores in an order that the CCO's replay (2026-09-11T07:53Z) showed matters: an earlier inline
+version resolved the database path from the *current* config, put the database there, and then restored an
+*older* config that pointed somewhere else; every command returned 0 and the search found nothing. So:
+**config and identity first**; then the `epochs/` tree (the wreck moved aside, never deleted) or, on a legacy
+home, the database at the path the **restored** config names, with stale `-wal`/`-shm` files removed; then
+verification that the database the restored config resolves to has the sha256 the backup's own manifest
+recorded and passes `quick_check`. Exit 0 means the pair is consistent and verified; 3 means something was
+copied and verification failed (the pre-restore files are kept as `*.broken-<stamp>` / `*.pre-restore-<stamp>`);
+2 means nothing was restored and stderr says why. Every writer must be idle first: on an epoch home that is
+`lbrain epoch build` **and** `lbrain epoch prune`; on a legacy home `import`, `embed` and `capture`.
 
-For a **legacy** home, the database goes back to the **configured** path, not to a fixed name:
-
-```bash
-H="${LBRAIN_HOME:-$HOME/.lbrain}"
-B=<the backup directory you verified above>
-DB=$(sed -n 's/^db_path *= *"\(.*\)"/\1/p' "$H/config.toml" | head -1); DB="${DB:-$H/brain.db}"
-mv "$DB" "$DB.broken-$(date -u +%Y%m%dT%H%M%SZ)" 2>/dev/null
-rm -f "$DB-wal" "$DB-shm"                                     # stale WAL files belong to the old file
-cp -a "$B/brain.db" "$DB"; cp -a "$B/config.toml" "$H/config.toml"
-lbrain search "<the same phrase as before>"
-```
+The restore is complete when `lbrain search` answers as it did from the backup. Tests
+(`tests/test_restore_script_config_db_pair.py`) run backup then restore on both shapes, on the changed-config
+case exactly as replayed, and on a tampered backup, which must fail verification and keep the wreck.
 
 ### Route 2: rebuild from sources
 
