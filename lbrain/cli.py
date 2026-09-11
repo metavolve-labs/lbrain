@@ -1818,7 +1818,7 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
             except OSError:
                 continue
             scanned += 1
-            mtime = datetime.date.fromtimestamp(f.stat().st_mtime).isoformat()
+            mtime = datetime.datetime.fromtimestamp(f.stat().st_mtime, datetime.timezone.utc).date().isoformat()  # UTC frame, see serve.record_date
             label, date = claim_date(text, rel, mtime)
             if label in ("file-dated", ""):
                 undated += 1

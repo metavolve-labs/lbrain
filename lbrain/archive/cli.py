@@ -273,7 +273,7 @@ def recall(query, k, namespace):
     click.secho(f"--- {len(rows)} archived record(s) ---\n", fg="cyan")
     for i, r in enumerate(rows, 1):
         import datetime as _dt
-        when = _dt.datetime.fromtimestamp(r["created"]).strftime("%Y-%m-%d") if r["created"] else "?"
+        when = _dt.datetime.fromtimestamp(r["created"], _dt.timezone.utc).strftime("%Y-%m-%d") if r["created"] else "?"  # UTC frame
         click.secho(f"  [{i}] {r['title']}  (dist {r['dist']:.3f})", fg="yellow")
         click.echo(f"      txid {r['txid']}  ·  {when}  ·  {r['namespace']}  ·  {r['n_bytes']} bytes")
         preview = r["snapshot"].strip().replace("\n", " ")[:300]
@@ -395,7 +395,7 @@ def archives_cmd(namespace, verify):
     click.secho(f"--- {len(rows)} archived record(s) ---", fg="cyan")
     for r in rows:
         import datetime as _dt
-        when = _dt.datetime.fromtimestamp(r["created"]).strftime("%Y-%m-%d %H:%M") if r["created"] else "?"
+        when = _dt.datetime.fromtimestamp(r["created"], _dt.timezone.utc).strftime("%Y-%m-%d %H:%M") if r["created"] else "?"  # UTC frame
         flag = "  ⨯ SHREDDED" if r["shredded"] else ""
         click.secho(f"  {r['txid']}{flag}", fg=("red" if r["shredded"] else "yellow"))
         click.echo(f"     {r['title']}  ·  {when}  ·  {r['namespace']}  ·  {r['n_bytes']}B  ·  {r['transport']}")
