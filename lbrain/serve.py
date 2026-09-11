@@ -555,6 +555,11 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
             parts.append(mark)
     if "superseded" in h.boosts:
         parts.append("SUPERSEDED")
+    elif "retired" in h.boosts:
+        # A3 (2026-09-11): self-declared retirement (frontmatter status / path marker) had no
+        # reader-visible token; the record rendered exactly like a live one. No link here: a
+        # status cannot name its correction, only an edge can, and the header does not pretend.
+        parts.append("RETIRED")
     # Belief lifecycle (lbrain/beliefs.py). The DRAFT wording is load-bearing, not
     # decoration: a model cannot tell its own prior speculation from an observed
     # fact once both are tokens in context — the attention mechanism blends them.

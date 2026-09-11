@@ -3,6 +3,7 @@ then a few cheap, bounded signal boosts (priority, wikilink graph, supersession)
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -111,6 +112,43 @@ def _resolve_superseded_paths(store) -> set[str]:
                 resolved.add(same_dir[0])
             # else: genuinely ambiguous — bury nothing
     return resolved
+
+
+def _resolve_self_retired_paths(store) -> set[str]:
+    """Records that declare their OWN retirement: frontmatter `status: retired|archived|
+    superseded`, `retired: true`, or a `-retired-`/`-archived-`/`-superseded-` path segment.
+
+    A3 replay (CSO, 2026-09-11T05:24Z, fixture manifest sha 588cc863): `index.is_retired_signal()`
+    accepted all three declarations, but only the supersession EDGE reached the ranker and the
+    served header. A record retired by frontmatter alone was retired for salience and live for
+    the reader: served at rank 1 above its own correction, header indistinguishable from a live
+    record. Two components each behaving as written, with a gap between them.
+
+    A status says "I am dead", not "who replaced me", so this route cannot carry a link to the
+    correction; only an edge can. A self-retired record is therefore excluded under current_only
+    and flagged `retired` (not `superseded`) otherwise, and the header says RETIRED without a
+    link. That limit is stated, not papered. A record carrying BOTH routes is handled by the edge
+    (callers subtract the edge set) so it is penalised once and marked SUPERSEDED.
+
+    SQL prefilter before JSON: parsing every metadata blob per query is not a filter (store.py,
+    on the disclosure column). Only rows whose metadata or path can carry a signal are parsed.
+    """
+    from .index import is_retired_signal  # local: index imports nothing from here, keep it so
+    rows = store.db.execute(
+        "SELECT rel_path, metadata FROM docs WHERE metadata LIKE '%\"status\"%' "
+        "OR metadata LIKE '%\"retired\"%' OR lower(rel_path) LIKE '%-retired-%' "
+        "OR lower(rel_path) LIKE '%-archived-%' OR lower(rel_path) LIKE '%-superseded-%'"
+    ).fetchall()
+    out: set[str] = set()
+    for r in rows:
+        try:
+            meta = json.loads(r["metadata"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        parts = [x for x in re.split(r"[\\/]", r["rel_path"]) if x]
+        if is_retired_signal(parts, meta):
+            out.add(r["rel_path"])
+    return out
 
 
 def canonical_slug(target: str) -> str:
@@ -535,6 +573,19 @@ def search(
                     if h.rel_path in superseded_paths:
                         h.score *= pen
                         h.boosts["superseded"] = pen
+        # A3 (2026-09-11): the status / path-marker retirement route, which reached the salience
+        # boost and nothing else. Same treatment as the edge, minus the link it cannot carry.
+        # Subtracting the edge set keeps a doubly-declared record penalised once, as SUPERSEDED.
+        retired_paths = _resolve_self_retired_paths(store) - (superseded_paths or set())
+        if retired_paths:
+            if current_only:
+                out = [h for h in out if h.rel_path not in retired_paths]
+            else:
+                pen = getattr(cfg, "supersede_penalty", 0.25)
+                for h in out:
+                    if h.rel_path in retired_paths:
+                        h.score *= pen
+                        h.boosts["retired"] = pen
         if current_only and out:
             # Claim-span exclusion (grain mismatch): drop chunks whose text contains a
             # CLOSED claim, even in an otherwise-current doc — a fresh file can carry a
@@ -652,6 +703,16 @@ def keyword_only(
             for h in hits:
                 if h.rel_path in superseded_paths:
                     h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
+    # A3 (2026-09-11): status / path-marker route on the keyword path too, flag only, so the
+    # reader is told on BOTH retrieval paths (the A-410 lesson, one route over).
+    retired_paths = _resolve_self_retired_paths(store) - superseded_paths
+    if retired_paths:
+        if current_only:
+            hits = [h for h in hits if h.rel_path not in retired_paths]
+        else:
+            for h in hits:
+                if h.rel_path in retired_paths:
+                    h.boosts["retired"] = 1.0
     if current_only and hits:
         # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
         # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.
