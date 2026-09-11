@@ -361,7 +361,9 @@ can be claimed at [lbrain.ai/claim.html](https://lbrain.ai/claim.html).
 - [`Dockerfile`](Dockerfile), [`docker-compose.kite.yml`](docker-compose.kite.yml) — containerized deployment
 
 **Truth hierarchy:** your source files are authoritative; the index is a derivative cache. If they
-disagree, trust the file and re-run `lbrain import && lbrain embed --stale`.
+disagree, trust the file and re-sync: `lbrain epoch build` on an epoch-managed home (one with
+`epochs/CURRENT`; direct writes are refused there by design), or `lbrain import && lbrain embed --stale`
+on a legacy home. After an upgrade, restart any running MCP server: see `docs/UPGRADING.md`.
 
 If LBrain earns a place in your setup, a ⭐ on this repo is the signal that helps the next person
 find it.
