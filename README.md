@@ -16,7 +16,8 @@
 > **WORKER**, not a more personable chatbot.
 
 > **Beta.** Early software from a small team, with no independent security audit yet. Keep backups, as
-> you would with any beta.
+> you would with any beta; [`docs/BACKUP-AND-RESTORE.md`](docs/BACKUP-AND-RESTORE.md) says what to copy,
+> how to prove the copy readable, and the two restore routes.
 
 **Local memory for AI that knows which record to trust.**
 
@@ -354,6 +355,7 @@ can be claimed at [lbrain.ai/claim.html](https://lbrain.ai/claim.html).
 ## More
 
 - [`docs/DESIGN-binding-aware-serving.md`](docs/DESIGN-binding-aware-serving.md) — the serving design and its review record
+- [`docs/BACKUP-AND-RESTORE.md`](docs/BACKUP-AND-RESTORE.md) — what to copy, how to verify it, how to restore, what prune makes unrecoverable
 - [`docs/lair-framework/`](docs/lair-framework/) — the organizing convention LBrain reads
 - [`contrib/`](contrib/) — session-capture hooks, a shared-key proxy
 - [`Dockerfile`](Dockerfile), [`docker-compose.kite.yml`](docker-compose.kite.yml) — containerized deployment

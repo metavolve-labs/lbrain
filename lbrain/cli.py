@@ -20,7 +20,7 @@ from .onboard import run_onboarding
 from .presentation import echo as present
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
-from .epoch import open_store
+from .epoch import EpochError, open_store
 from .store import SqliteExtensionError, Store
 
 
@@ -42,6 +42,12 @@ class _LBrainGroup(click.Group):
             return super().invoke(ctx)
         except (SqliteExtensionError, UnknownProviderError) as exc:
             raise click.ClickException(str(exc)) from None
+        except EpochError as exc:
+            # A5 (CSO run 2026-09-11): a dangling epochs/CURRENT refused correctly ("restore a prior
+            # epoch or remove the pointer deliberately") and then surfaced as a raw traceback on the
+            # commands that do not catch it themselves. The refusal is an operator condition with a
+            # documented repair (docs/BACKUP-AND-RESTORE.md), so it is printed as one, exit 1.
+            raise click.ClickException(f"{exc}\n  see docs/BACKUP-AND-RESTORE.md") from None
 
 
 @click.group(cls=_LBrainGroup)
@@ -2415,7 +2421,9 @@ def prune_unreachable_cmd(yes, force):
                    "vanished or hollow root refuses promotion (mass-absence is not deletion).")
 @click.option("--prune-unreachable", "prune_unreachable", is_flag=True,
               help="Drop docs that still exist on disk but lie under no configured source (guarded).")
-@click.option("--keep", default=3, show_default=True, help="Prior epochs to retain.")
+@click.option("--keep", default=3, show_default=True,
+              help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
+                   ".failed forensics: --keep 2 leaves CURRENT plus two.")
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes):
     """Build a candidate, run gate v2, publish atomically."""
@@ -2470,8 +2478,12 @@ def epoch_status_cmd():
 
 
 @epoch.command("prune")
-@click.option("--keep", default=3, show_default=True)
-@click.option("--max-bytes", default=None, type=int)
+# A5 (CSO run 2026-09-11): the help said only "[default: 3]" and an operator following it would expect
+# --keep 2 to leave two directories; it leaves three, because keep counts PRIOR epochs. Say so.
+@click.option("--keep", default=3, show_default=True,
+              help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
+                   ".failed forensics: --keep 2 leaves CURRENT plus two.")
+@click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 def epoch_prune_cmd(keep, max_bytes):
     """Remove old epochs (never CURRENT, leased, or .failed forensics)."""
     from .epoch import BuilderBusy, prune
