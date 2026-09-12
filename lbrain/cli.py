@@ -1948,7 +1948,25 @@ def whoami(as_json: bool):
     click.secho("  serving contract", fg="cyan")
     click.echo(f"    mode:       {s['mode']}  (provider: {s['provider']})")
     click.echo(f"    attributed: {s['attribution']}")
-    click.echo(f"    staleness:  {'marked inline' if s['staleness_marked'] else 'NOT marked'}")
+    # A-576(a) residual 1 (CSO, 2026-09-12T20:45Z): this line rendered only the
+    # boolean, so the coverage qualifier existed in the structured output and was
+    # SILENT on the surface every seat actually reads at wake — a pre-key epoch
+    # printed a bare "marked inline" and an incomplete-coverage epoch printed a
+    # bare "NOT marked" with no count and no reason. An honest gap that only
+    # appears in a channel nobody reads is not an honest gap.
+    _cov = s.get("coverage")
+    if isinstance(_cov, dict):
+        _n = _cov.get("unscanned_docs")
+        _q = ("coverage verified: every indexed doc is under a configured source root"
+              if _n == 0 else
+              f"{_n} indexed doc(s) under NO configured source root — served, never "
+              f"rescanned, staleness undetectable")
+    elif isinstance(_cov, str) and _cov:
+        _q = "coverage UNVERIFIED — this epoch predates the measurement; rebuild to measure"
+    else:
+        _q = "coverage not reported by this brain"
+    click.echo(f"    staleness:  {'marked inline' if s['staleness_marked'] else 'NOT marked'}"
+               f"  ({_q})")
     click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")
 
 
