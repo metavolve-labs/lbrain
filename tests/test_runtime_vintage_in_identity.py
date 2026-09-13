@@ -49,3 +49,51 @@ def test_the_stamp_is_the_LOADED_checkout_not_a_live_read(tmp_path, monkeypatch)
     first = amp.engine_stamp()
     monkeypatch.setattr(amp, "_ENGINE_STAMP", first, raising=False)
     assert amp.engine_stamp() == first, "engine stamp is recomputed; a stale process would lie"
+
+
+def test_whoami_human_surface_renders_the_process_vintage():
+    """A-585 part 2: the vintage must appear on the DEFAULT surface, not only --json.
+
+    The runtime block shipped in describe() and was rendered nowhere a receipt is read from:
+    invisible without --json on the CLI, and absent entirely from a pinned MCP server. An
+    instrument for "which code answered?" that cannot answer it on the default surface is
+    undeployed, not shipped.
+    """
+    from click.testing import CliRunner
+    from lbrain.cli import main as cli
+
+    res = CliRunner().invoke(cli, ["whoami"])
+    assert res.exit_code == 0, res.output
+    out = res.output
+
+    # the human surface names the vintage and warns what it means
+    assert "this process" in out
+    assert "engine:" in out
+    assert "started:" in out
+    assert "NOT in this process" in out
+
+
+def test_whoami_vintage_is_not_satisfied_by_any_timestamp_on_the_page():
+    """ANTI-TRIVIAL ARM. The test above passes if the page merely contains a time somewhere.
+
+    A build date, an epoch id or a coverage_checked_at would all satisfy a naive check while
+    telling the reader nothing about WHICH CODE answered. This pins the two facts that only a
+    live process can report -- its own start time and its own engine stamp -- and requires them
+    to match this interpreter rather than any string that looks like a date.
+    """
+    import os
+    from click.testing import CliRunner
+    from lbrain.cli import main as cli
+    from lbrain.identity import _proc_started, _engine_stamp_safe
+
+    res = CliRunner().invoke(cli, ["whoami"])
+    out = res.output
+
+    started = _proc_started()
+    if started:
+        # the rendered start time is THIS process's, not a corpus/build timestamp
+        assert started in out, f"whoami must render this process's own start {started!r}"
+
+    stamp = _engine_stamp_safe()
+    if stamp:
+        assert stamp in out, f"whoami must render this process's own engine stamp {stamp!r}"

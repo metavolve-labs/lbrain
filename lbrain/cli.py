@@ -1969,6 +1969,22 @@ def whoami(as_json: bool):
                f"  ({_q})")
     click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")
 
+    # A-585 part 2: the vintage belongs on the surface a receipt is actually read from.
+    # The runtime block shipped in describe() and was rendered NOWHERE -- visible only behind
+    # --json, which no receipt route uses, and absent entirely from a pinned MCP server. So the
+    # instrument built to make "which code answered?" checkable could not answer it on either
+    # default surface (CSO, 2026-09-13T16:16Z, finding the same class one layer down).
+    rt = info.get("runtime") or {}
+    if rt:
+        _started = rt.get("started") or "unknown"
+        click.echo()
+        click.secho("  this process", fg="cyan")
+        click.echo(f"    engine:   {rt.get('engine', 'unknown')}")
+        click.echo(f"    started:  {_started}"
+                   f"{'  (start time unavailable)' if _started == 'unknown' else ''}")
+        click.secho("    a fix committed after 'started' is NOT in this process, however "
+                    "current the tree is", fg="yellow")
+
 
 @main.command()
 @click.option("--name", required=True, help="The gcx:// label you own (without the scheme), e.g. jarvis")
