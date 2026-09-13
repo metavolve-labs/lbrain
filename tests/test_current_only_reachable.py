@@ -6,6 +6,8 @@ Signature checks are reachability proofs, not operational results, and are label
 """
 import inspect
 
+import click
+
 
 def test_mcp_tools_accept_current_only():
     from lbrain import mcp_server
@@ -20,4 +22,10 @@ def test_cli_query_and_search_expose_the_flag():
         names = {o.name for o in cmd.params}
         assert "current_only" in names, cmd.name
         opt = [o for o in cmd.params if o.name == "current_only"][0]
-        assert "--current-only" in opt.opts and opt.is_flag and opt.default is False
+        assert "--current-only" in opt.opts and opt.is_flag, cmd.name
+        # Ask Click what the flag actually DEFAULTS TO, via the public accessor, rather than
+        # reading `opt.default` — that attribute is Click's internal encoding of "unset" and it
+        # changed shape: 8.3 stores False, 8.5 stores Sentinel.UNSET. Both resolve to False
+        # through get_default(). Reproduced on 8.5.0 before this line was written; the old
+        # assertion passed locally and failed on all four CI Pythons.
+        assert opt.get_default(click.Context(cmd)) is False, cmd.name
