@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 from pathlib import Path
@@ -20,7 +21,7 @@ from .onboard import run_onboarding
 from .presentation import echo as present
 from .search import keyword_only, search
 from .serve import blinding_notice, fence_block, render_response, resolve_mode, sanitize_field
-from .epoch import open_store
+from .epoch import EpochError, open_store
 from .store import SqliteExtensionError, Store
 
 
@@ -42,6 +43,12 @@ class _LBrainGroup(click.Group):
             return super().invoke(ctx)
         except (SqliteExtensionError, UnknownProviderError) as exc:
             raise click.ClickException(str(exc)) from None
+        except EpochError as exc:
+            # A5 (CSO run 2026-09-11): a dangling epochs/CURRENT refused correctly ("restore a prior
+            # epoch or remove the pointer deliberately") and then surfaced as a raw traceback on the
+            # commands that do not catch it themselves. The refusal is an operator condition with a
+            # documented repair (docs/BACKUP-AND-RESTORE.md), so it is printed as one, exit 1.
+            raise click.ClickException(f"{exc}\n  see docs/BACKUP-AND-RESTORE.md") from None
 
 
 @click.group(cls=_LBrainGroup)
@@ -1156,8 +1163,13 @@ def embed(stale: bool, batch: int, reuse_from):
               help="Blinding mode for THIS request. May only NARROW the LBRAIN_DISCLOSURE ceiling.")
 @click.option("--sealed", default=None,
               help="Adversarial mode: comma/space-separated slugs to disclose. Narrows only.")
+@click.option("--current-only", "current_only", is_flag=True,
+              help="EXCLUDE superseded and retired records instead of serving them marked (dual-view; "
+                   "the default keeps and marks them). A3 re-run 2026-09-11: this exclusion existed in "
+                   "the search layer and no CLI or MCP caller could reach it.")
 def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool, recency: bool,
-          serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None):
+          serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None,
+          current_only: bool):
     """Semantic + keyword hybrid search across the brain."""
     warn_if_unprovisioned()
     cfg = Config.load()
@@ -1172,7 +1184,8 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         t0 = time.monotonic()
         envelope = _resolve_envelope(cfg, disclosure, sealed)
         hits = search(cfg, store, embedder, query, k=k, doc_type=doc_type, priority_only=priority,
-                      rerank=rerank, recency=recency, persona=persona, envelope=envelope)
+                      rerank=rerank, recency=recency, persona=persona, envelope=envelope,
+                      current_only=current_only)
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, serve_mode)
         if warn:
@@ -1231,7 +1244,10 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
               type=click.Choice(["adversarial", "independent", "collaborative", "full"]),
               help="Blinding mode for THIS request. May only NARROW the LBRAIN_DISCLOSURE ceiling.")
 @click.option("--sealed", default=None, help="Adversarial mode: slugs to disclose. Narrows only.")
-def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None):
+@click.option("--current-only", "current_only", is_flag=True,
+              help="EXCLUDE superseded and retired records instead of serving them marked.")
+def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None,
+               current_only: bool):
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
     warn_if_unprovisioned()
     cfg = Config.load()
@@ -1239,7 +1255,8 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
     try:
         t0 = time.monotonic()
         hits = keyword_only(store, query, k=k, persona=persona,
-                            envelope=_resolve_envelope(cfg, disclosure, sealed))
+                            envelope=_resolve_envelope(cfg, disclosure, sealed),
+                            current_only=current_only)
         dt_ms = (time.monotonic() - t0) * 1000
         mode, warn = resolve_mode(cfg, None)
         if warn:
@@ -1818,7 +1835,7 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
             except OSError:
                 continue
             scanned += 1
-            mtime = datetime.date.fromtimestamp(f.stat().st_mtime).isoformat()
+            mtime = datetime.datetime.fromtimestamp(f.stat().st_mtime, datetime.timezone.utc).date().isoformat()  # UTC frame, see serve.record_date
             label, date = claim_date(text, rel, mtime)
             if label in ("file-dated", ""):
                 undated += 1
@@ -1931,7 +1948,25 @@ def whoami(as_json: bool):
     click.secho("  serving contract", fg="cyan")
     click.echo(f"    mode:       {s['mode']}  (provider: {s['provider']})")
     click.echo(f"    attributed: {s['attribution']}")
-    click.echo(f"    staleness:  {'marked inline' if s['staleness_marked'] else 'NOT marked'}")
+    # A-576(a) residual 1 (CSO, 2026-09-12T20:45Z): this line rendered only the
+    # boolean, so the coverage qualifier existed in the structured output and was
+    # SILENT on the surface every seat actually reads at wake — a pre-key epoch
+    # printed a bare "marked inline" and an incomplete-coverage epoch printed a
+    # bare "NOT marked" with no count and no reason. An honest gap that only
+    # appears in a channel nobody reads is not an honest gap.
+    _cov = s.get("coverage")
+    if isinstance(_cov, dict):
+        _n = _cov.get("unscanned_docs")
+        _q = ("coverage verified: every indexed doc is under a configured source root"
+              if _n == 0 else
+              f"{_n} indexed doc(s) under NO configured source root — served, never "
+              f"rescanned, staleness undetectable")
+    elif isinstance(_cov, str) and _cov:
+        _q = "coverage UNVERIFIED — this epoch predates the measurement; rebuild to measure"
+    else:
+        _q = "coverage not reported by this brain"
+    click.echo(f"    staleness:  {'marked inline' if s['staleness_marked'] else 'NOT marked'}"
+               f"  ({_q})")
     click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")
 
 
@@ -2415,7 +2450,9 @@ def prune_unreachable_cmd(yes, force):
                    "vanished or hollow root refuses promotion (mass-absence is not deletion).")
 @click.option("--prune-unreachable", "prune_unreachable", is_flag=True,
               help="Drop docs that still exist on disk but lie under no configured source (guarded).")
-@click.option("--keep", default=3, show_default=True, help="Prior epochs to retain.")
+@click.option("--keep", default=3, show_default=True,
+              help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
+                   ".failed forensics: --keep 2 leaves CURRENT plus two.")
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes):
     """Build a candidate, run gate v2, publish atomically."""
@@ -2470,8 +2507,12 @@ def epoch_status_cmd():
 
 
 @epoch.command("prune")
-@click.option("--keep", default=3, show_default=True)
-@click.option("--max-bytes", default=None, type=int)
+# A5 (CSO run 2026-09-11): the help said only "[default: 3]" and an operator following it would expect
+# --keep 2 to leave two directories; it leaves three, because keep counts PRIOR epochs. Say so.
+@click.option("--keep", default=3, show_default=True,
+              help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
+                   ".failed forensics: --keep 2 leaves CURRENT plus two.")
+@click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 def epoch_prune_cmd(keep, max_bytes):
     """Remove old epochs (never CURRENT, leased, or .failed forensics)."""
     from .epoch import BuilderBusy, prune

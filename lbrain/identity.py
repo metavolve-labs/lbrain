@@ -105,6 +105,40 @@ def _identity_note(ident) -> str:
     return ""
 
 
+def _coverage(cfg) -> tuple[int | None, str]:
+    """Measured index coverage from the SERVING epoch (A-576), or (None, "") when
+    this epoch predates the measurement.
+
+    Read, never computed here: `whoami` is called on every mount and a real
+    coverage survey parses and hashes the whole corpus. `epoch build` already
+    walks everything, so it stamps the number in and this only reads it back.
+
+    Absence is reported as absence. An epoch built before this key existed is
+    NOT assumed to have full coverage — that assumption is the defect this
+    function exists to remove.
+    """
+    import sqlite3
+    db = _serving_db(cfg)
+    if not db:
+        return None, ""
+    try:
+        con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+        try:
+            rows = dict(con.execute(
+                "SELECT key, value FROM meta WHERE key IN "
+                "('coverage_unscanned','coverage_checked_at')"))
+        finally:
+            con.close()
+    except Exception:
+        return None, ""
+    if "coverage_unscanned" not in rows:
+        return None, ""
+    try:
+        return int(rows["coverage_unscanned"]), rows.get("coverage_checked_at", "")
+    except (TypeError, ValueError):
+        return None, ""
+
+
 def describe(cfg, stats: dict | None = None) -> dict:
     """The structured answer to 'who am I and what am I trusted for?'.
 
@@ -112,6 +146,8 @@ def describe(cfg, stats: dict | None = None) -> dict:
     surfaces must not be able to disagree about identity.
     """
     ident = Identity.load()
+    _marking = bool(getattr(cfg, "serve_staleness", True))
+    _unscanned, _checked_at = _coverage(cfg)
     return {
         "identity": {
             "registered": ident is not None,
@@ -144,7 +180,23 @@ def describe(cfg, stats: dict | None = None) -> dict:
             "mode": getattr(cfg, "serve_mode", "structured"),
             "provider": getattr(cfg, "embedding_provider", "?"),
             "attribution": "every served record carries source, chunk and an honest date label",
-            "staleness_marked": bool(getattr(cfg, "serve_staleness", True)),
+            # A-576: this reported `serve_staleness` — a CONFIGURED INTENT — as
+            # though it were a measured property. A doc indexed from outside every
+            # configured source root is never rescanned, so the build cannot mark
+            # it stale no matter what the flag says, and the contract was promising
+            # something the mechanism could not deliver (doctrine: default-value is
+            # not configured-on is not measured). The flag and the measurement are
+            # now reported as two different facts, and an unmeasured epoch says so.
+            "staleness_marking_enabled": _marking,
+            "staleness_marked": (_marking if _unscanned is None else
+                                 bool(_marking and _unscanned == 0)),
+            "coverage": ("unverified — this epoch predates the coverage measurement; "
+                         "rebuild to measure" if _unscanned is None else
+                         {"unscanned_docs": _unscanned, "checked_at": _checked_at,
+                          "note": ("every indexed doc is under a configured source root"
+                                   if _unscanned == 0 else
+                                   f"{_unscanned} indexed doc(s) are under NO configured source "
+                                   "root: served, never rescanned, staleness undetectable")}),
             "untrusted_data_fenced": True,
         },
     }

@@ -116,6 +116,29 @@ def _inventory(db_path: Path, sources: list[str]) -> dict[str, dict[str, str]]:
     return inv
 
 
+def _unscanned_count(db_path: Path, sources: list[str]) -> int:
+    """How many indexed docs lie under NO configured source root (A-576).
+
+    These are served to every query, but `epoch build` walks `sources`, so their
+    content can never be refreshed and their staleness can never be detected.
+    `index_currency.survey()` already names this class UNREACHABLE; this records
+    the same fact INTO the epoch at build time, so the serving contract can
+    report measured coverage instead of a configuration flag.
+
+    Uses store._under_roots deliberately: on a case-insensitive filesystem a root
+    spelled in different case is the same directory, and a byte comparison would
+    call a reachable doc unreachable.
+    """
+    from .store import _norm_path, _under_roots
+    roots = [_norm_path(s) for s in sources]
+    con = sqlite3.connect(str(db_path))
+    try:
+        return sum(1 for (ap,) in con.execute("SELECT abs_path FROM docs")
+                   if not _under_roots(ap, roots))
+    finally:
+        con.close()
+
+
 def _source_digest(docs: dict[str, str]) -> str:
     """Content digest of one source's inventory — (rel_path, doc_hash) lines,
     sorted. Deliberately mtime-free (rescope rule 5)."""
@@ -405,6 +428,13 @@ def build(
                 digests = {s: _source_digest(d) for s, d in new_inv.items()}
                 con.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                             ("watermark_source_digests", json.dumps(digests, sort_keys=True)))
+                # A-576: measured coverage, stamped into the candidate. An epoch
+                # without these keys predates the measurement and the contract
+                # must report coverage as unverified rather than assume zero.
+                con.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                            ("coverage_unscanned", str(_unscanned_count(staging_db, sources))))
+                con.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                            ("coverage_checked_at", scan_end))
                 con.commit()
                 # publication: checkpointed SINGLE FILE on the destination fs (panel #1)
                 dest = epoch_db(home, eid)

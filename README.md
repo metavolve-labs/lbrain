@@ -16,7 +16,8 @@
 > **WORKER**, not a more personable chatbot.
 
 > **Beta.** Early software from a small team, with no independent security audit yet. Keep backups, as
-> you would with any beta.
+> you would with any beta; [`docs/BACKUP-AND-RESTORE.md`](docs/BACKUP-AND-RESTORE.md) says what to copy,
+> how to prove the copy readable, and the two restore routes.
 
 **Local memory for AI that knows which record to trust.**
 
@@ -151,10 +152,12 @@ lbrain embed --stale
 lbrain query "what did we decide about the deploy flag?"
 ```
 
-Rather kick the tires before pointing it at your own notes? Both examples above run against the
-bundled corpus:
+Want to try the sample notes first? They live in this repository and are not installed by pip.
+With Git installed, fetch the repository and enter its root before running the demo:
 
 ```bash
+git clone https://github.com/metavolve-labs/lbrain.git lbrain-demo
+cd lbrain-demo
 lbrain init --source examples/demo-corpus
 lbrain import && lbrain embed --stale
 lbrain query "what flag do deploys use?"
@@ -176,12 +179,19 @@ the model coming *down*, not your notes going *up*); after that, embedding is fu
 cleanly for its human, and the contract for consuming what it serves.
 
 ```bash
-# Claude Code
-claude mcp add lbrain -- lbrain mcp
+# Claude Code — pin the brain home in the server's own environment
+claude mcp add lbrain -e LBRAIN_HOME="$HOME/.lbrain" -- lbrain mcp
 
 # Any client that speaks streamable HTTP
-lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
+LBRAIN_HOME="$HOME/.lbrain" lbrain mcp --transport streamable-http --host 127.0.0.1 --port 7370
 ```
+
+**Pin `LBRAIN_HOME` in the server entry, not only in your shell.** An MCP server inherits the environment
+of the client that launched it, not of the terminal you set the variable in. If you run more than one
+brain on a machine (one per agent, one per project) and the client's config carries no `env`, the server
+silently opens the default `~/.lbrain` and answers from the wrong memory. Measured 2026-09-11: a second
+agent's server reported the first agent's identity. Check with the `lair_whoami` tool after connecting;
+for Codex, give the `[mcp_servers.lbrain]` table an `env = { LBRAIN_HOME = "/path/to/that/brain" }` line.
 
 Five tools over MCP: semantic recall, exact-phrase search, a save-worthiness check, an action check
 against your recorded corrections, and corpus statistics. Everything also works from the shell —
@@ -352,12 +362,15 @@ can be claimed at [lbrain.ai/claim.html](https://lbrain.ai/claim.html).
 ## More
 
 - [`docs/DESIGN-binding-aware-serving.md`](docs/DESIGN-binding-aware-serving.md) — the serving design and its review record
+- [`docs/BACKUP-AND-RESTORE.md`](docs/BACKUP-AND-RESTORE.md) — what to copy, how to verify it, how to restore, what prune makes unrecoverable
 - [`docs/lair-framework/`](docs/lair-framework/) — the organizing convention LBrain reads
 - [`contrib/`](contrib/) — session-capture hooks, a shared-key proxy
 - [`Dockerfile`](Dockerfile), [`docker-compose.kite.yml`](docker-compose.kite.yml) — containerized deployment
 
 **Truth hierarchy:** your source files are authoritative; the index is a derivative cache. If they
-disagree, trust the file and re-run `lbrain import && lbrain embed --stale`.
+disagree, trust the file and re-sync: `lbrain epoch build` on an epoch-managed home (one with
+`epochs/CURRENT`; direct writes are refused there by design), or `lbrain import && lbrain embed --stale`
+on a legacy home. After an upgrade, restart any running MCP server: see `docs/UPGRADING.md`.
 
 If LBrain earns a place in your setup, a ⭐ on this repo is the signal that helps the next person
 find it.

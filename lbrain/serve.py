@@ -154,8 +154,24 @@ def record_date(h: Hit) -> tuple[str, str]:
     - else → ("file-dated", mtime): named for what it is, a file timestamp.
     """
     def _iso(ts: float) -> str:
+        # UTC, not the host's zone (CSO A2 run, 2026-09-11, predicted from this line before the run and
+        # confirmed against a planted record). `date.fromtimestamp` with no tzinfo resolves locally; on a
+        # PDT host a file written in the last seven hours of a UTC day served a label one day EARLY, which
+        # is the window this team's records land in. FIRST, not last: on a UTC-7 host the UTC hours that
+        # resolve to the previous local date are 00:00-06:59 UTC, which is 17:00-23:59 local, the evening.
+        # The CSO's run report said "last seven hours" and the CTO repeated it into this comment, a commit
+        # message and a report before the CCO checked the arithmetic. Verified here: on UTC-7 exactly hours
+        # 0 through 6 read a day early, and the run's own instant, 05:26:18Z, is 22:26 local the day before.
+        # The direction of the skew is a property of the host's offset sign, so a UTC+N host would show the
+        # mirror case at the END of the day; stating it as a fixed window at all was the error. The `file-dated` label
+        # exists so a filesystem timestamp is not read as a claim date; resolving it in a different frame
+        # from every other date in the corpus is that same failure one level down — honest about which
+        # clock, silent about which frame. Commits, _COLLAB mail, board rows and front matter are all UTC,
+        # and lbrain already uses timezone.utc in dialin, spool and write_gates, so this is the codebase's
+        # own convention rather than a new policy. Disclosing the frame instead was the alternative and was
+        # rejected: a label a reader must convert before comparing is a label a reader will not convert.
         try:
-            return datetime.date.fromtimestamp(ts).isoformat()
+            return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc).date().isoformat()
         except (OverflowError, OSError, ValueError):
             return ""
 
@@ -539,6 +555,11 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
             parts.append(mark)
     if "superseded" in h.boosts:
         parts.append("SUPERSEDED")
+    elif "retired" in h.boosts:
+        # A3 (2026-09-11): self-declared retirement (frontmatter status / path marker) had no
+        # reader-visible token; the record rendered exactly like a live one. No link here: a
+        # status cannot name its correction, only an edge can, and the header does not pretend.
+        parts.append("RETIRED")
     # Belief lifecycle (lbrain/beliefs.py). The DRAFT wording is load-bearing, not
     # decoration: a model cannot tell its own prior speculation from an observed
     # fact once both are tokens in context — the attention mechanism blends them.
