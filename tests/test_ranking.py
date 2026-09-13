@@ -144,28 +144,51 @@ def test_priority_only_filter_excludes_everything_else(tmp_path):
 
 # --- wikilink graph boost (A-423 regression) --------------------------------
 
+def _filler(prefix, n=9):
+    """Enough linked documents that a distribution-relative boost has a population to rank
+    against. A-584 put a floor under the wikilink boost: below a handful of linked documents a
+    percentile is not an estimate, so the boost is OFF. These fillers link to each other and
+    never to the fixture's target, so they change the population WITHOUT changing what is under
+    test. They do not mention the query text, so they do not compete for retrieval."""
+    return {f"z/{prefix}{i}.md":
+            f"---\nname: {prefix}{i}\n---\nsee [[{prefix}{(i + 1) % n}]] unrelated filler prose\n"
+            for i in range(n)}
+
 def test_wikilink_inbound_boost_lifts_a_linked_document(tmp_path):
     """A doc other docs point at is lifted. Inert for two-thirds of the live
     corpus until 2026-07-30 because targets are written as relative paths."""
-    cfg, store, emb = _brain(tmp_path, {
+    docs = {
         "target/notes.md": "---\nname: notes\n---\n# Topic\n\nwidget calibration procedure\n",
         "other/decoy.md": "---\nname: decoy\n---\n# Topic\n\nwidget calibration procedure\n",
         "a/one.md": "---\nname: one\n---\nsee [[notes]] for widget calibration procedure\n",
         "b/two.md": "---\nname: two\n---\nalso [[notes]] on widget calibration procedure\n",
-    })
+    }
+    docs.update(_filler("f"))
+    cfg, store, emb = _brain(tmp_path, docs)
     hits = search(cfg, store, emb, "widget calibration procedure", k=6)
     tgt = next((h for h in hits if "target/notes.md" in h.rel_path), None)
+    dec = next((h for h in hits if "other/decoy.md" in h.rel_path), None)
     assert tgt is not None, "linked doc not retrieved"
+    # Assert what the boost MEANS, not merely that it fired. `> 1.0` alone passed under the old
+    # absolute-count form, under this distribution-relative one, and would pass under a broken fix
+    # that saturated every document -- an accidental pass. The linked target must outrank an
+    # otherwise identical unlinked decoy.
     assert tgt.boosts.get("wikilink_inbound", 1.0) > 1.0, "inbound links did not lift it"
+    if dec is not None:
+        assert dec.boosts.get("wikilink_inbound", 1.0) < tgt.boosts["wikilink_inbound"], \
+            "an unlinked decoy was lifted as much as the linked target"
+        assert tgt.score > dec.score, "the linked target did not outrank an identical unlinked decoy"
     store.close()
 
 
 def test_relative_path_wikilinks_still_count(tmp_path):
     """The A-423 dominant cause: Obsidian-style relative targets."""
-    cfg, store, emb = _brain(tmp_path, {
+    docs = {
         "deep/target/notes.md": "---\nname: notes\n---\nwidget calibration procedure\n",
         "a/one.md": "---\nname: one\n---\nsee [[../../deep/target/notes]] widget calibration procedure\n",
-    })
+    }
+    docs.update(_filler("r"))  # A-584 floor: give the percentile a population to rank against
+    cfg, store, emb = _brain(tmp_path, docs)
     hits = search(cfg, store, emb, "widget calibration procedure", k=6)
     tgt = next((h for h in hits if "deep/target/notes.md" in h.rel_path), None)
     assert tgt is not None
@@ -176,10 +199,12 @@ def test_relative_path_wikilinks_still_count(tmp_path):
 
 def test_a_lair_is_linkable_by_its_directory_name(tmp_path):
     """164 of 167 lairs shared the slug `LAIR` before A-423."""
-    cfg, store, emb = _brain(tmp_path, {
+    docs = {
         "000-PRIORITY-REGISTER/LAIR.md": "---\nname: reg\n---\nwidget calibration procedure\n",
         "a/one.md": "---\nname: one\n---\nsee [[000-PRIORITY-REGISTER]] widget calibration procedure\n",
-    })
+    }
+    docs.update(_filler("d"))  # A-584 floor: give the percentile a population to rank against
+    cfg, store, emb = _brain(tmp_path, docs)
     hits = search(cfg, store, emb, "widget calibration procedure", k=6)
     tgt = next((h for h in hits if "000-PRIORITY-REGISTER" in h.rel_path), None)
     assert tgt is not None
