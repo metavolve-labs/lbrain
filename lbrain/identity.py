@@ -16,6 +16,7 @@ secret store — it holds a key).
 from __future__ import annotations
 
 import json
+import datetime as _dt
 import os
 import sys
 from dataclasses import asdict, dataclass, field
@@ -175,6 +176,24 @@ def describe(cfg, stats: dict | None = None) -> dict:
             "chunks": (stats or {}).get("chunks"),
             "embedded": (stats or {}).get("embedded"),
         },
+        # A-585 (2026-09-13): a receipt taken from a LONG-RUNNING process measures the code that
+        # process LOADED, not the code on disk. Measured that day: all five live seat MCP children
+        # predated the fix they were being formally receipted against -- one by 37 hours -- so every
+        # per-seat receipt collected described a process vintage. The trap is that the only way to make
+        # such a receipt PASS is to restart the process, which is exactly what an honest seat must not
+        # do, because restarting to obtain a pass manufactures the result.
+        #
+        # The repair is not another rule in a file read at session start: it is that the surface a
+        # receipt QUOTES carries its own vintage, so a receipt cannot silently describe the wrong one.
+        # A reader comparing `started` against a fix's commit time can see, without asking, whether
+        # this process could possibly contain it.
+        "runtime": {
+            "engine": _engine_stamp_safe(),
+            "pid": os.getpid(),
+            "started": _proc_started(),
+            "note": ("this process loaded its code at 'started'; a fix committed after that time is "
+                     "NOT in this process, however current the working tree is"),
+        },
         "serving_contract": {
             # What a consumer may rely on when reading this brain's output.
             "mode": getattr(cfg, "serve_mode", "structured"),
@@ -200,3 +219,37 @@ def describe(cfg, stats: dict | None = None) -> dict:
             "untrusted_data_fenced": True,
         },
     }
+
+
+def _proc_started() -> str:
+    """UTC ISO start time of THIS process, read from the kernel rather than guessed.
+
+    /proc/self/stat field 22 is start time in clock ticks since boot; boot time comes from
+    /proc/stat btime. Falls back to empty rather than to a plausible wrong value -- an invented
+    vintage would be worse than none, since the whole point is that a reader can trust it.
+    """
+    try:
+        with open("/proc/self/stat", "rb") as f:
+            fields = f.read().rsplit(b")", 1)[1].split()
+        ticks = int(fields[19])
+        btime = 0
+        with open("/proc/stat", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("btime "):
+                    btime = int(line.split()[1]); break
+        if not btime:
+            return ""
+        hz = os.sysconf("SC_CLK_TCK")
+        return _dt.datetime.fromtimestamp(btime + ticks / hz,
+                                          _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        return ""
+
+
+def _engine_stamp_safe() -> str:
+    try:
+        from lbrain.amp import engine_stamp
+        return engine_stamp()
+    except Exception:
+        return ""
+
