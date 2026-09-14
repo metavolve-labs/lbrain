@@ -369,8 +369,14 @@ def build(
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
             (staging / "config.toml").write_text(raw, encoding="utf-8")
 
-            _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else []),
-                     staging, lbrain_bin, lock=lock)
+            import_out = _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else []),
+                                  staging, lbrain_bin, lock=lock)
+            # A-591: the staging import NAMES files that vanished between discovery and read
+            # (moved by a concurrent claim). Its stdout was discarded here, so the build's own
+            # summary could not say so and a reader could not tell a complete scan from one
+            # missing a file. Lift them into the report; the CLI prints them beside `pruned`.
+            report["vanished"] = [ln.split(": ", 1)[1].strip() for ln in import_out.splitlines()
+                                  if "vanished between discovery and read" in ln and ": " in ln]
             lock.heartbeat()
             # A CONFIRMED-removed root's docs are purged deliberately here — prune's
             # own mount-gone guard (correctly) refuses to drop them, so intent has

@@ -583,6 +583,7 @@ class Store:
         source_roots: list | None = None,
         max_fraction: float = 0.5,
         force: bool = False,
+        keep_abs: set | None = None,
     ) -> list[str]:
         """Drop docs whose source file no longer exists on disk — and their
         chunks, vectors, FTS rows, and wikilinks. (vec_chunks has no FK, so we
@@ -605,6 +606,10 @@ class Store:
         from .index import is_excluded_path
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
+        if keep_abs:
+            # A-591: a file that vanished between discovery and read this build was MOVED,
+            # not deleted; pruning its row would omit content the next build re-indexes.
+            rows = [r for r in rows if r["abs_path"] not in keep_abs]
         # Scope the prune to docs UNDER the imported roots. A NARROW import
         # (`lbrain import <subdir>`) walks only that subtree, so it must never
         # prune docs from OTHER configured sources it never walked — those files

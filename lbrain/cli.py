@@ -885,12 +885,26 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     beliefs_seen = 0
     total_chunks = 0
 
+    vanished: list[tuple[str, str]] = []   # (abs_path, source) — A-591
     for src in sources:
         files = discover([src])
         click.echo(f"  scanning {src} → {len(files)} markdown files")
         with store.transaction():
             for path in files:
-                doc = parse(path, repo_root=src)
+                try:
+                    doc = parse(path, repo_root=src)
+                except FileNotFoundError:
+                    # A-591 (2026-09-14): discover() materialised this path, and a concurrent
+                    # rename — a mail claim, inbox/ → claimed/ — moved it before read_text().
+                    # Two CCO mounts aborted here inside the transaction. The scan is now
+                    # INCOMPLETE for this file, so it is neither indexed (its new path was
+                    # never discovered: no fresh-index claim) nor pruned (prune_missing gets
+                    # the list below: a moved file is not a missing one). It is NAMED in the
+                    # summary and re-discovered at its new path on the next build. Only
+                    # FileNotFoundError: a PermissionError or a real parse failure still
+                    # aborts loudly, exactly as before (CSO controls R6/R7).
+                    vanished.append((str(path), str(src)))
+                    continue
                 # MS-01: resolve row identity by FILE — a cross-source rel_path
                 # collision (e.g. three plates each with a root `_INDEX.md`)
                 # must not thrash one row on every import.
@@ -951,7 +965,8 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     if prune:
         try:
             with store.transaction():
-                pruned = store.prune_missing(source_roots=sources, force=force_prune)
+                pruned = store.prune_missing(source_roots=sources, force=force_prune,
+                                             keep_abs={a for a, _ in vanished})
         except RuntimeError as e:
             store.close()
             click.secho(f"✗ {e}", fg="red")
@@ -993,6 +1008,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     click.secho(
         f"✓ Imported in {dt:.1f}s — new: {new_docs}, updated: {updated_docs}, "
         f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
+        + (f", vanished: {len(vanished)}" if vanished else "")
         + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else "")
         + (f", beliefs: {beliefs_seen}" if beliefs_seen else "")
         + (f", identity-dupes collapsed: {len(deduped)}" if deduped else ""),
@@ -1007,6 +1023,9 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
             click.echo(f"    pruned (gone or no longer indexable): {rel}")
         if len(pruned) > 10:
             click.echo(f"    … +{len(pruned) - 10} more")
+    for abs_path, _src in vanished:
+        click.secho(f"    vanished between discovery and read (moved, not missing — not indexed, "
+                    f"kept out of the prune pass; re-discovered next build): {abs_path}", fg="yellow")
     click.echo(
         f"  brain stats — docs: {stats['docs']}, chunks: {stats['chunks']}, "
         f"embedded: {stats['embedded']}, wikilinks: {stats['wikilinks']}"
@@ -2495,8 +2514,12 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_b
     click.secho(
         f"✓ epoch {report['epoch_id']} PUBLISHED — docs: {report['docs']}, "
         f"scan {report['scan_start']} → {report['scan_end']}"
-        + (f", pruned: {len(report['pruned'])}" if report.get("pruned") else ""),
+        + (f", pruned: {len(report['pruned'])}" if report.get("pruned") else "")
+        + (f", vanished: {len(report['vanished'])}" if report.get("vanished") else ""),
         fg="green")
+    for p in report.get("vanished") or []:
+        click.secho(f"    vanished between discovery and read (moved, not missing — not indexed, "
+                    f"kept out of the prune pass; re-discovered next build): {p}", fg="yellow")
     if report.get("durability_caveat"):
         click.secho(f"  ⚠ {report['durability_caveat']}", fg="yellow")
 
