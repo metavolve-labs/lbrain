@@ -92,17 +92,65 @@ else
   DUMP="${LBRAIN_HOME:-$HOME/.lbrain}/compaction-watcher/${SESSION:-unknown}.precompact-chat.md"
   mkdir -p "$(dirname "$DUMP")" 2>/dev/null
   python3 - "$TRANSCRIPT" "$DUMP" "$SESSION" <<'PY' >>"$LOG" 2>&1 || true
+import json
 import sys
 from pathlib import Path
+
+# Keep TEXT, not bytes. Measured 2026-09-13 on a live seat: a raw byte tail of the
+# .jsonl made 10.3% of that brain's indexed tokens base64 thinking/signature payload,
+# every chunk embedded, retrievable, and readable by nobody. Two defects came from
+# slicing bytes rather than lines: a cut that cannot land on a record boundary (so the
+# first entry was a truncated JSON fragment), and decode(errors="replace") indexing
+# U+FFFD. Both disappear once the unit is a parsed line.
+#
+# 29% of those chunks WERE real conversation text -- the pre-boundary record this
+# excerpt exists to hold -- so the repair extracts the prose rather than dropping the
+# capture.
 src, dest, sid = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-data = src.read_bytes()
-# keep the tail (newest turns); cap ~200 KiB
-cap = 200_000
-tail = data[-cap:] if len(data) > cap else data
+CAP = 200_000
+
+
+def texts(node):
+    """Yield human-readable strings from a transcript node, ignoring encoded fields."""
+    if isinstance(node, str):
+        yield node
+    elif isinstance(node, dict):
+        # `thinking` carries a base64 `signature` sibling; take neither.
+        if node.get("type") in ("text", "input_text", "output_text") and isinstance(node.get("text"), str):
+            yield node["text"]
+        elif node.get("type") in ("tool_result", "custom_tool_call_output", "function_call_output"):
+            yield from texts(node.get("content") or node.get("output"))
+        elif "content" in node:
+            yield from texts(node["content"])
+    elif isinstance(node, list):
+        for item in node:
+            yield from texts(item)
+
+
+lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
+kept, size = [], 0
+for raw in reversed(lines):           # newest first, stop at the cap
+    if size >= CAP:
+        break
+    try:
+        row = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        continue                      # a partial or non-JSON line is skipped, never emitted raw
+    msg = row.get("message") if isinstance(row, dict) else None
+    role = (msg or {}).get("role") or (row.get("type") if isinstance(row, dict) else "") or "?"
+    body = "\n".join(s.strip() for s in texts(msg if msg is not None else row) if s and s.strip())
+    if not body:
+        continue
+    entry = f"### {role}\n\n{body}\n"
+    kept.append(entry)
+    size += len(entry)
+kept.reverse()
+
 dest.write_text(
-    f"# PreCompact chat excerpt\n\nsession: `{sid}`\nsource: `{src}`\nbytes_kept: {len(tail)} / {len(data)}\n\n```\n"
-    + tail.decode("utf-8", "replace")
-    + "\n```\n",
+    f"# PreCompact chat excerpt\n\nsession: `{sid}`\nsource: `{src}`\n"
+    f"entries_kept: {len(kept)} / {len(lines)} lines\nchars_kept: {size}\n"
+    f"extraction: parsed JSONL, text fields only (no thinking/signature payload)\n\n"
+    + "\n".join(kept),
     encoding="utf-8",
 )
 PY
