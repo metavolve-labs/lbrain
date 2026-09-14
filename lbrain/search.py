@@ -86,6 +86,37 @@ def _basename_slug(rel_path: str) -> str:
     return stem
 
 
+def _a3_stage_trace(stage: str, hits, query: str) -> None:
+    """TEST-ONLY observability for A3's v3.1 gate, option (b).
+
+    The gate requires, per scored request, either a handling-disabled control OR an execution
+    trace showing that request's fixture candidate BEFORE the retirement stage. This emits the
+    second. It exists because the CSO's v3 OBS was shown non-probative by the CCO: a
+    distinctive-token known-item query can return a fixture while the SCORED question never
+    retrieves it, so observability must be recorded at the scored request's own scope.
+
+    Armed only by LBRAIN_A3_STAGE_TRACE naming a file. Unset -- the shipped path -- returns
+    before touching anything, so behaviour is byte-identical. Read at CALL time, never bound at
+    import, so an armed process cannot be created by an earlier environment (A-585's lesson).
+
+    Records paths only: no text, no scores. It answers one question -- was the candidate in
+    hand before the stage ran -- and nothing that could substitute for the scored output.
+    """
+    import os as _os
+    dest = _os.environ.get("LBRAIN_A3_STAGE_TRACE")
+    if not dest:
+        return
+    try:
+        import json as _j
+        rec = {"stage": stage, "query": query,
+               "candidates": [h.rel_path for h in hits],
+               "n": len(hits)}
+        with open(dest, "a", encoding="utf-8") as fh:
+            fh.write(_j.dumps(rec, sort_keys=True) + "\n")
+    except Exception:
+        return          # observability must never alter or fail the request it observes
+
+
 def _resolve_target(tgt: str, all_paths, by_slug, src_path: str) -> str | None:
     """Resolve an author-written reference to exactly ONE rel_path, or None.
 
@@ -690,6 +721,7 @@ def search(
         # A3 (2026-09-11): the status / path-marker retirement route, which reached the salience
         # boost and nothing else. Same treatment as the edge, minus the link it cannot carry.
         # Subtracting the edge set keeps a doubly-declared record penalised once, as SUPERSEDED.
+        _a3_stage_trace("hybrid.pre_retirement", out, query)
         retired_paths = _resolve_self_retired_paths(store) - (superseded_paths or set())
         _succ = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
         if retired_paths:
@@ -821,6 +853,7 @@ def keyword_only(
                     h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
     # A3 (2026-09-11): status / path-marker route on the keyword path too, flag only, so the
     # reader is told on BOTH retrieval paths (the A-410 lesson, one route over).
+    _a3_stage_trace("keyword.pre_retirement", hits, query)
     retired_paths = _resolve_self_retired_paths(store) - superseded_paths
     _succ_kw = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
     if retired_paths:
