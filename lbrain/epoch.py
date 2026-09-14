@@ -22,6 +22,7 @@ import os
 import shutil
 import socket
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 EPOCHS_DIRNAME = "epochs"
@@ -112,12 +113,73 @@ def serving_db_path(cfg) -> str:
         return f"{legacy}  (EPOCH ERROR: {e})"
 
 
+MARKER_NAME = "EPOCH-MANAGED.json"
+
+EPOCH, LEGACY, EPOCH_TREE_MISSING = "EPOCH", "LEGACY", "EPOCH_TREE_MISSING"
+
+
+def marker_path(home: Path) -> Path:
+    return Path(home) / MARKER_NAME
+
+
+def home_shape(home: Path) -> str:
+    """ONE answer to "what kind of home is this", shared by every read AND write path (A-592).
+
+    EPOCH               epochs/CURRENT is readable — the epoch tree is present.
+    EPOCH_TREE_MISSING  no readable pointer, but <home>/EPOCH-MANAGED.json says a publish happened here:
+                        the tree is gone (or a restore is mid-flight). Serving the root database now would
+                        be the silent "0 hits" the A5 row measured, and writing it would be buried by the
+                        next Route 1 restore. Every caller REFUSES, naming both routes.
+    LEGACY              neither pointer nor marker: a home that never published, served as it always was.
+    An absent pointer alone is never read as lost history; only the marker, written by a publish that
+    happened, distinguishes the second case from the third (CCO, 2026-09-14).
+    """
+    if current_epoch_id(home) is not None:
+        return EPOCH
+    if marker_path(home).exists():
+        return EPOCH_TREE_MISSING
+    return LEGACY
+
+
+def read_marker(home: Path) -> dict:
+    try:
+        return json.loads(marker_path(home).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def write_marker(home: Path, epoch_id: str, engine_version: str) -> None:
+    """Written by a SUCCESSFUL publish, after the swap, beside config.toml — outside the tree it describes.
+    first_epoch_id is preserved across publishes; the rest track the latest."""
+    prev = read_marker(home)
+    rec = {"first_epoch_id": prev.get("first_epoch_id") or epoch_id, "last_epoch_id": epoch_id,
+           "last_published_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "engine_version": engine_version}
+    tmp = marker_path(home).with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, marker_path(home))
+
+
+def refuse_tree_missing(home: Path) -> "EpochError":
+    m = read_marker(home)
+    return EpochError(
+        f"epochs/ is missing on an epoch-managed home (marker {MARKER_NAME}: last published "
+        f"{m.get('last_epoch_id', '?')} at {m.get('last_published_at', '?')}) — refusing to fall back to the "
+        f"root database. Route 1: restore a backup (scripts/lbrain-restore.sh <backup>); Route 2: "
+        f"`lbrain epoch build` to rebuild the epoch from sources; or remove {MARKER_NAME} deliberately to "
+        f"declare this a legacy home.")
+
+
 def resolve_db_path(home: Path, legacy_db_path: Path) -> Path:
     """The database a reader should open right now.
 
     Epoch layout wins only when CURRENT names an epoch whose db actually exists —
     a dangling pointer falls back loudly rather than silently serving nothing.
+    A-592: a MISSING tree on a marked home refuses too, instead of serving the root db.
     """
+    shape = home_shape(home)
+    if shape == EPOCH_TREE_MISSING:
+        raise refuse_tree_missing(home)
     eid = current_epoch_id(home)
     if eid is None:
         return Path(legacy_db_path)
@@ -414,6 +476,12 @@ def open_store(cfg, *, for_write: bool = False):
         # misdirected config deserves the more diagnostic refusal first).
         from .write_gates import check_write_target
         check_write_target(cfg, home)
+    # A-592: the SAME shape rule as resolve_db_path, for reads AND writes. Without this, `import`/`embed`/
+    # `capture` on a marked home whose tree is gone wrote the root database (CSO C8), and the next Route 1
+    # restore buried those writes silently. `epoch build` is unaffected: it imports inside a marker-less
+    # staging home and publishes by rename, never through this path on the live home.
+    if home_shape(home) == EPOCH_TREE_MISSING:
+        raise refuse_tree_missing(home)
     eid = current_epoch_id(home)
     if eid is None:
         return Store(cfg.db_path, embedding_dim=cfg.embedding_dim)

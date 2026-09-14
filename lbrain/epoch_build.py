@@ -481,6 +481,14 @@ def build(
             }, indent=2) + "\n", encoding="utf-8")
 
             caveat = publish(home, eid)
+            # A-592: the marker is written only after the swap succeeded, beside config.toml, outside the
+            # tree it describes; a crash between swap and marker leaves today's (unmarked, served) state.
+            try:
+                from . import __version__ as _v
+            except Exception:
+                _v = "unknown"
+            from .epoch import write_marker
+            write_marker(home, eid, str(_v))
             report.update({"published": True, "docs": sum(len(d) for d in new_inv.values()),
                            "durability_caveat": caveat, "scan_start": scan_start,
                            "scan_end": scan_end})
