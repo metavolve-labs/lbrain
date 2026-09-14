@@ -171,6 +171,16 @@ def _resolve_target(tgt: str, all_paths, by_slug, src_path: str) -> str | None:
         same_dir = [c for c in cands if _dir_of(c) == src_dir]
         if len(same_dir) == 1:
             return same_dir[0]
+        return None
+    # B4 (CSO, 2026-09-14T06:15Z): `superseded_by: B4-New` against `b4-new.md` resolved to
+    # UNRESOLVABLE -- canonical_slug folds separators, not case -- which under F1 (a named,
+    # existing record must LINK) is a miss. Linux filenames are case-sensitive, so "always
+    # fold" is wrong; "fold when the fold is UNIQUE, else ambiguous" is AX-06's collision rule
+    # applied to case. Exact match above always wins; this runs only when exact found nothing.
+    want = canonical_slug(tgt).lower()
+    folded = [rp for slug, rps in by_slug.items() if slug.lower() == want for rp in rps]
+    if len(folded) == 1:
+        return folded[0]
     return None
 
 
