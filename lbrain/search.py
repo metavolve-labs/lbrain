@@ -86,7 +86,7 @@ def _basename_slug(rel_path: str) -> str:
     return stem
 
 
-def _a3_stage_trace(stage: str, hits, query: str) -> None:
+def _a3_stage_trace(stage: str, hits, query: str, *, skipped_reason: str = "") -> None:
     """TEST-ONLY observability for A3's v3.1 gate, option (b).
 
     The gate requires, per scored request, either a handling-disabled control OR an execution
@@ -121,6 +121,18 @@ def _a3_stage_trace(stage: str, hits, query: str) -> None:
                "token": _os.environ.get("LBRAIN_A3_STAGE_TRACE_TOKEN", ""),
                "candidates": [h.rel_path for h in hits],
                "n": len(hits)}
+        if skipped_reason:
+            # CSO, 2026-09-14T05:05Z, and she is right. My position was that an absent
+            # pre_retirement line accurately records "the stage did not run". True, and
+            # absence was still doing load-bearing work: a consumer cannot tell it apart from
+            # the trace failing to write (this function swallows every exception by design),
+            # a truncated sidecar, or a process that died between the two writes. That is the
+            # OC4/OC5 class -- a verdict resting on something ABSENT -- which we had just
+            # closed. Now silence means only "no evidence", never "no stage".
+            rec["skipped"] = True
+            rec["reason"] = skipped_reason
+            rec["candidates"] = []
+            rec["n"] = 0
         with open(dest, "a", encoding="utf-8") as fh:
             fh.write(_j.dumps(rec, sort_keys=True) + "\n")
     except Exception:
@@ -713,6 +725,9 @@ def search(
     # disabled the trace, so the evidence vanished precisely when the control needed it
     # (CSO OC3, 2026-09-14). Observability must not be a function of the behaviour it observes.
     _a3_stage_trace("hybrid.pre_supersession", out, query)
+    if not (getattr(cfg, "supersede_aware", True) and out):
+        _a3_stage_trace("hybrid.pre_retirement", [], query,
+                        skipped_reason="supersede_aware=false or empty candidate set")
     if getattr(cfg, "supersede_aware", True) and out:
         # AX-06: resolve each edge to a SPECIFIC target path, not a bare slug that
         # buries every same-named doc across directories. A collision resolves to
