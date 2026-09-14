@@ -2510,7 +2510,16 @@ def epoch_status_cmd():
 
     cur = current_epoch_id(CONFIG_DIR)
     if cur is None:
-        click.echo("legacy layout — no epoch has been published for this home")
+        from .epoch import home_shape, EPOCH_TREE_MISSING, MARKER_NAME, read_marker
+        from .config import CONFIG_DIR as _cd
+        if home_shape(Path(_cd)) == EPOCH_TREE_MISSING:
+            m = read_marker(Path(_cd))
+            click.secho(f"✗ epochs/ is MISSING on an epoch-managed home ({MARKER_NAME}: last published "
+                        f"{m.get('last_epoch_id', '?')} at {m.get('last_published_at', '?')}) — reads and writes refuse; "
+                        f"Route 1: scripts/lbrain-restore.sh <backup>; Route 2: lbrain epoch build", fg="red")
+        else:
+            click.echo("legacy layout — no epoch marker; history unknown (no epoch has been published for this home, "
+                       "or the marker was removed deliberately)")
         return
     click.echo(f"CURRENT: {cur}")
     con = _sq.connect(str(epoch_db(CONFIG_DIR, cur)))

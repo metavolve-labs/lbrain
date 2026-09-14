@@ -30,7 +30,7 @@ fi
 mkdir -p "$B" || exit 2
 MAN="$B/BACKUP-MANIFEST.txt"
 { echo "lbrain-backup $TS"; echo "source_home=$H"; } > "$MAN"
-for f in config.toml identity.json CORE.md env; do
+for f in config.toml identity.json CORE.md env EPOCH-MANAGED.json; do   # A-592: the marker travels with config, before the tree
   [ -f "$H/$f" ] && cp -a "$H/$f" "$B/$f" && echo "copied=$f" >> "$MAN"
 done
 

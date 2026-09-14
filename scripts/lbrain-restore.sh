@@ -22,7 +22,7 @@ mkdir -p "$H" || exit 2
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
 # 1. config and identity FIRST, so every path below is resolved from the restored state, never the old one
-for f in config.toml identity.json CORE.md env; do
+for f in config.toml identity.json CORE.md env EPOCH-MANAGED.json; do   # A-592: the marker travels with config, before the tree
   if [ -f "$B/$f" ]; then
     [ -f "$H/$f" ] && cp -a "$H/$f" "$H/$f.pre-restore-$STAMP"
     cp -a "$B/$f" "$H/$f" || { echo "lbrain-restore: could not restore $f" >&2; exit 2; }
