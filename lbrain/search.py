@@ -99,6 +99,11 @@ def _a3_stage_trace(stage: str, hits, query: str) -> None:
     before touching anything, so behaviour is byte-identical. Read at CALL time, never bound at
     import, so an armed process cannot be created by an earlier environment (A-585's lesson).
 
+    Emitted at BOTH stages of each path -- pre_supersession then pre_retirement -- because the
+    edge stage EXCLUDES under current_only (search.py, `out = [h ... not in superseded_paths]`),
+    so a trace taken only before the self-retired stage cannot see a candidate the edge already
+    dropped. R2(a), CCO generation 56.
+
     Records paths only: no text, no scores. It answers one question -- was the candidate in
     hand before the stage ran -- and nothing that could substitute for the scored output.
     """
@@ -108,7 +113,12 @@ def _a3_stage_trace(stage: str, hits, query: str) -> None:
         return
     try:
         import json as _j
+        # R2(b), CCO generation 56: the sidecar is appended, so a STALE file from an earlier
+        # run is non-empty and satisfied a "trace present" test by existing. Every record now
+        # carries the caller's per-request token and the reader counts only its own -- an
+        # accidental pass closed at the source rather than by remembering to delete a file.
         rec = {"stage": stage, "query": query,
+               "token": _os.environ.get("LBRAIN_A3_STAGE_TRACE_TOKEN", ""),
                "candidates": [h.rel_path for h in hits],
                "n": len(hits)}
         with open(dest, "a", encoding="utf-8") as fh:
@@ -702,6 +712,7 @@ def search(
         # AX-06: resolve each edge to a SPECIFIC target path, not a bare slug that
         # buries every same-named doc across directories. A collision resolves to
         # the same-directory target; a still-ambiguous edge buries nothing.
+        _a3_stage_trace("hybrid.pre_supersession", out, query)
         superseded_paths = _resolve_superseded_paths(store)
         if superseded_paths:
             if current_only:
@@ -840,6 +851,7 @@ def keyword_only(
     # across directories, so `teamB/status.md` was marked SUPERSEDED by teamA's edge;
     # an ambiguous edge now buries nothing. Flag only (no score multiplier): keyword
     # search stays rank-by-FTS-relevance; this marks the record so the reader is told.
+    _a3_stage_trace("keyword.pre_supersession", hits, query)
     superseded_paths = _resolve_superseded_paths(store)
     if superseded_paths:
         if current_only:
