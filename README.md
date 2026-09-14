@@ -142,6 +142,20 @@ If that prints `False` — Apple's `/usr/bin/python3` and the python.org macOS i
 that way — use Homebrew's (`brew install python@3.12`). Linux distro packages normally have it
 enabled.
 
+You also need **`pip`** and **`git`** on your PATH. A clean Debian 12 or Ubuntu server image ships
+**neither** — `sudo apt install python3-pip python3-venv git` first. (Measured on a fresh Debian 12
+host, 2026-09-14: both steps below fail with `command not found` until you do.)
+
+**Debian 12+ / Ubuntu 23.04+ refuse `pip install` into the system Python** with
+`error: externally-managed-environment` (PEP 668). Install into a virtual environment instead —
+the commands are otherwise identical:
+
+```bash
+python3 -m venv ~/.lbrain-venv && source ~/.lbrain-venv/bin/activate
+```
+
+(or `pipx install "lbrain[local]"`, which manages the environment for you). Then:
+
 ```bash
 pip install "lbrain[local]"
 
@@ -311,6 +325,8 @@ Most reports land in one of these. Checking first is faster than waiting for us.
 |---|---|
 | **`TOMLDecodeError` on any command right after `init`, on Windows** | **You are on 0.1.0, which is yanked.** It wrote an unparseable `config.toml` on Windows paths. `pip install -U lbrain` (≥ 0.1.1), then delete `~/.lbrain/config.toml` and re-run `init`. |
 | **`UnicodeEncodeError` during `init`, on Windows** | Same fix — 0.1.0 wrote template files in the locale encoding. Fixed in 0.1.1. |
+| `error: externally-managed-environment` on `pip install` | PEP 668 — Debian 12+ / Ubuntu 23.04+ protect the system Python. Not an lbrain problem. Use a venv (`python3 -m venv ~/.lbrain-venv && source ~/.lbrain-venv/bin/activate`) or `pipx install "lbrain[local]"`. Measured on a clean Debian 12 host, 2026-09-14. |
+| `pip: command not found` / `git: command not found` | Clean Debian/Ubuntu server images ship neither. `sudo apt install python3-pip python3-venv git`. |
 | Build errors installing `[local]` (`fastembed` / `onnxruntime` / `sqlite-vec`) | Native wheels. Upgrade pip first (`pip install -U pip`), which resolves nearly all of these. On Windows a wheel may be missing for a very new Python — 3.10–3.13 are supported; 3.14+ may have no wheel yet. |
 | First `embed` pauses, then works | One-time ~67 MB model download. It is the model coming *down*, not your notes going *up*. Offline after that. |
 | "It says my provider is Gemini but I never set that" | Run `lbrain doctor`. It marks every setting `[config]` or `[DEFAULT]`. In **0.1.0** an API key in your environment silently selected a hosted provider; 0.1.1 refuses to treat an ambient key as consent. |

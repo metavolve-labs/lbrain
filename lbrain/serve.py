@@ -554,12 +554,40 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
         if mark:
             parts.append(mark)
     if "superseded" in h.boosts:
-        parts.append("SUPERSEDED")
+        # Annex s6 / ruling s3 (2026-09-14): the dual-declaration record used to render LESS
+        # than the self-only one -- bare SUPERSEDED, no address -- although both sides agreed.
+        # Same three states as RETIRED below, plus the corroboration mark when the successor
+        # this record names is the very document whose edge retired it.
+        succ = getattr(h, "retired_successor", "") or ""
+        if succ.startswith("?"):
+            parts.append(f"SUPERSEDED (successor named but UNRESOLVABLE: {succ[1:]})")
+        elif succ and getattr(h, "retired_corroborated", False):
+            parts.append(f"SUPERSEDED \u2192 corrected by: {succ} (corroborated)")
+        elif succ:
+            parts.append(f"SUPERSEDED \u2192 corrected by: {succ}")
+        else:
+            parts.append("SUPERSEDED")
     elif "retired" in h.boosts:
-        # A3 (2026-09-11): self-declared retirement (frontmatter status / path marker) had no
-        # reader-visible token; the record rendered exactly like a live one. No link here: a
-        # status cannot name its correction, only an edge can, and the header does not pretend.
-        parts.append("RETIRED")
+        # A3 (2026-09-11): self-declared retirement had no reader-visible token; the record
+        # rendered exactly like a live one.
+        #
+        # 2026-09-14: the old comment here said "a status cannot name its correction, only an
+        # edge can". That was a CONVENTION mistaken for a constraint -- this estate declares
+        # supersession on the NEW document, so the format had simply never asked a dead record
+        # to name its successor. It can. THREE states, never two, and the address is rendered
+        # in the retired record's OWN block because a reader may be served it alone (CSO
+        # predicate s1.1, location axis).
+        #
+        # LIMIT, to be stated wherever a pass is reported: this establishes REACHABILITY, not
+        # AUTHORITY. That a successor is named and resolves does not establish that it
+        # supersedes this record; that is adjudication, and A3 tests none of it.
+        succ = getattr(h, "retired_successor", "") or ""
+        if succ.startswith("?"):
+            parts.append(f"RETIRED (successor named but UNRESOLVABLE: {succ[1:]})")
+        elif succ:
+            parts.append(f"RETIRED \u2192 corrected by: {succ}")
+        else:
+            parts.append("RETIRED (no successor named)")
     # Belief lifecycle (lbrain/beliefs.py). The DRAFT wording is load-bearing, not
     # decoration: a model cannot tell its own prior speculation from an observed
     # fact once both are tokens in context — the attention mechanism blends them.

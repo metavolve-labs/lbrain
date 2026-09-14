@@ -3,6 +3,8 @@ then a few cheap, bounded signal boosts (priority, wikilink graph, supersession)
 
 from __future__ import annotations
 
+import bisect
+
 import json
 import re
 import sys
@@ -30,6 +32,19 @@ class Hit:
     # Evidence class from the doc (lbrain/grading.py). The credibility axis of
     # the served grade; '' = UNGRADED and renders nothing.
     evidence: str = ""
+    # A3: where a self-retired record NAMES its correction. Three states, never two:
+    #   "<rel_path>"           a resolvable address  -> rendered as a link
+    #   "?<target-as-written>" named but unresolvable -> rendered as NOT a link
+    #   ""                     no successor named     -> rendered as such
+    # Populated only from the retired record's OWN frontmatter. An incoming `Supersedes:`
+    # edge from the successor is deliberately NOT a substitute (CSO falsification F4): it
+    # satisfies an easier property -- reachability of the pair -- not "this record names
+    # where its correction is".
+    retired_successor: str = ""
+    # True only when the successor THIS record names is also the source of an incoming
+    # `Supersedes:` edge -- both sides agree. Ruling s3 (2026-09-14): mutual confirmation,
+    # render the corroborated form. False for self-only; meaningless when no successor.
+    retired_corroborated: bool = False
     # Frontmatter `date:` from the doc. The serve path cannot re-derive this from
     # chunk text — the frontmatter is stripped before chunking.
     doc_date: str = ""
@@ -41,6 +56,13 @@ _TEMPORAL_RE = __import__("re").compile(
     r"state of|up[- ]?to[- ]?date|this (week|month)|what changed|updated?)\b",
     __import__("re").IGNORECASE,
 )
+
+
+# The wikilink boost's shape. Named constants because the previous values were bare literals inside
+# the ranking loop -- there was no knob to review, which is why no config audit ever surfaced them.
+WIKILINK_MAX_LIFT = 0.25        # top of range; a doc at the 100th percentile of its own corpus scores x1.25
+WIKILINK_MIN_POPULATION = 8     # below this many linked docs, a percentile is not an estimate: boost OFF
+WIKILINK_RULE = "pctl-linked-v1"  # ranker epoch marker; brains built before this carry no such key
 
 
 def _basename_slug(rel_path: str) -> str:
@@ -68,9 +90,112 @@ def _basename_slug(rel_path: str) -> str:
     return stem
 
 
+def _a3_stage_trace(stage: str, hits, query: str, *, skipped_reason: str = "") -> None:
+    """TEST-ONLY observability for A3's v3.1 gate, option (b).
+
+    The gate requires, per scored request, either a handling-disabled control OR an execution
+    trace showing that request's fixture candidate BEFORE the retirement stage. This emits the
+    second. It exists because the CSO's v3 OBS was shown non-probative by the CCO: a
+    distinctive-token known-item query can return a fixture while the SCORED question never
+    retrieves it, so observability must be recorded at the scored request's own scope.
+
+    Armed only by LBRAIN_A3_STAGE_TRACE naming a file. Unset -- the shipped path -- returns
+    before touching anything, so behaviour is byte-identical. Read at CALL time, never bound at
+    import, so an armed process cannot be created by an earlier environment (A-585's lesson).
+
+    Emitted at BOTH stages of each path -- pre_supersession then pre_retirement -- because the
+    edge stage EXCLUDES under current_only (search.py, `out = [h ... not in superseded_paths]`),
+    so a trace taken only before the self-retired stage cannot see a candidate the edge already
+    dropped. R2(a), CCO generation 56.
+
+    Records paths only: no text, no scores. It answers one question -- was the candidate in
+    hand before the stage ran -- and nothing that could substitute for the scored output.
+    """
+    import os as _os
+    dest = _os.environ.get("LBRAIN_A3_STAGE_TRACE")
+    if not dest:
+        return
+    try:
+        import json as _j
+        # R2(b), CCO generation 56: the sidecar is appended, so a STALE file from an earlier
+        # run is non-empty and satisfied a "trace present" test by existing. Every record now
+        # carries the caller's per-request token and the reader counts only its own -- an
+        # accidental pass closed at the source rather than by remembering to delete a file.
+        rec = {"stage": stage, "query": query,
+               "token": _os.environ.get("LBRAIN_A3_STAGE_TRACE_TOKEN", ""),
+               "candidates": [h.rel_path for h in hits],
+               "n": len(hits)}
+        if skipped_reason:
+            # CSO, 2026-09-14T05:05Z, and she is right. My position was that an absent
+            # pre_retirement line accurately records "the stage did not run". True, and
+            # absence was still doing load-bearing work: a consumer cannot tell it apart from
+            # the trace failing to write (this function swallows every exception by design),
+            # a truncated sidecar, or a process that died between the two writes. That is the
+            # OC4/OC5 class -- a verdict resting on something ABSENT -- which we had just
+            # closed. Now silence means only "no evidence", never "no stage".
+            rec["skipped"] = True
+            rec["reason"] = skipped_reason
+            rec["candidates"] = []
+            rec["n"] = 0
+        with open(dest, "a", encoding="utf-8") as fh:
+            fh.write(_j.dumps(rec, sort_keys=True) + "\n")
+    except Exception:
+        return          # observability must never alter or fail the request it observes
+
+
+def _resolve_target(tgt: str, all_paths, by_slug, src_path: str) -> str | None:
+    """Resolve an author-written reference to exactly ONE rel_path, or None.
+
+    Extracted 2026-09-14 so the BACKWARD supersession declaration (a retired record naming
+    its successor) resolves by the identical rules as the forward edge. A3's predicate turns
+    on the word "resolvable"; two resolvers would make it mean two things, and the weaker one
+    would set the bar.
+
+    Ambiguity resolves to None on purpose -- "bury nothing" for the forward direction, and for
+    the backward direction an ambiguous successor is NOT a resolvable address, so it must not
+    render as a link.
+    """
+    if ("/" in tgt) or ("\\" in tgt):  # author wrote a path — match it exactly
+        norm = tgt[:-3] if tgt.endswith(".md") else tgt
+        exact = [rp for rp in all_paths
+                 if rp == tgt or (rp[:-3] if rp.endswith(".md") else rp) == norm
+                 or rp.endswith("/" + tgt) or rp.endswith("/" + norm + ".md")]
+        if len(exact) == 1:
+            return exact[0]
+        # fall through to slug resolution if the path form was not unique
+    cands = by_slug.get(canonical_slug(tgt), [])
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) > 1:
+        src_dir = _dir_of(src_path)
+        same_dir = [c for c in cands if _dir_of(c) == src_dir]
+        if len(same_dir) == 1:
+            return same_dir[0]
+        return None
+    # B4 (CSO, 2026-09-14T06:15Z): `superseded_by: B4-New` against `b4-new.md` resolved to
+    # UNRESOLVABLE -- canonical_slug folds separators, not case -- which under F1 (a named,
+    # existing record must LINK) is a miss. Linux filenames are case-sensitive, so "always
+    # fold" is wrong; "fold when the fold is UNIQUE, else ambiguous" is AX-06's collision rule
+    # applied to case. Exact match above always wins; this runs only when exact found nothing.
+    want = canonical_slug(tgt).lower()
+    folded = [rp for slug, rps in by_slug.items() if slug.lower() == want for rp in rps]
+    if len(folded) == 1:
+        return folded[0]
+    return None
+
+
 def _dir_of(rel_path: str) -> str:
     parts = [x for x in re.split(r"[\\/]", rel_path) if x]
     return "/".join(parts[:-1])
+
+
+# target rel_path -> {superseding src rel_paths}, filled by _resolve_superseded_paths for the
+# store it last ran on. Keyed by id(store) so two stores in one process cannot cross-talk.
+_EDGE_SOURCES: dict[int, dict[str, set[str]]] = {}
+
+
+def _edge_sources(store) -> dict[str, set[str]]:
+    return _EDGE_SOURCES.get(id(store), {})
 
 
 def _resolve_superseded_paths(store) -> set[str]:
@@ -93,25 +218,61 @@ def _resolve_superseded_paths(store) -> set[str]:
 
     resolved: set[str] = set()
     for src_path, tgt in edges:
-        if ("/" in tgt) or ("\\" in tgt):  # author wrote a path — match it exactly
-            norm = tgt[:-3] if tgt.endswith(".md") else tgt
-            exact = [rp for rp in all_paths
-                     if rp == tgt or (rp[:-3] if rp.endswith(".md") else rp) == norm
-                     or rp.endswith("/" + tgt) or rp.endswith("/" + norm + ".md")]
-            if len(exact) == 1:
-                resolved.add(exact[0])
-                continue
-            # fall through to slug resolution if the path form was not unique
-        cands = by_slug.get(canonical_slug(tgt), [])
-        if len(cands) == 1:
-            resolved.add(cands[0])
-        elif len(cands) > 1:
-            src_dir = _dir_of(src_path)
-            same_dir = [c for c in cands if _dir_of(c) == src_dir]
-            if len(same_dir) == 1:
-                resolved.add(same_dir[0])
-            # else: genuinely ambiguous — bury nothing
+        hit = _resolve_target(tgt, all_paths, by_slug, src_path)
+        if hit:
+            resolved.add(hit)
+            _EDGE_SOURCES.setdefault(id(store), {}).setdefault(hit, set()).add(src_path)
     return resolved
+
+
+# Frontmatter keys by which a record names its own correction. The direction that matters is
+# TRAVERSAL: from the retired record TO its correction (CSO, 2026-09-14: her predicate's FORWARD
+# case). The successor's own `Supersedes:` edge traverses the other way and she ruled it
+# insufficient on 09-12 -- a reader served the dead record alone never reaches it.
+_SUCCESSOR_KEYS = ("superseded_by", "superseded-by", "retired_by", "retired-by",
+                   "replaced_by", "replaced-by", "correction", "see_instead")
+
+
+def _resolve_retired_successors(store, retired_paths: set[str]) -> dict[str, str]:
+    """Map each self-retired path to its NAMED successor, resolved or flagged unresolvable.
+
+    Returns "" for a record naming none -- the honest and currently common case. A dangling
+    target is returned as "?<as-written>" and must never render as a link: an address that
+    goes nowhere would let the predicate be satisfied by an invented one.
+    """
+    import json as _json
+    if not retired_paths:
+        return {}
+    all_paths = [r["rel_path"] for r in store.db.execute("SELECT rel_path FROM docs")]
+    by_slug: dict[str, list[str]] = {}
+    for rp in all_paths:
+        by_slug.setdefault(canonical_slug(_basename_slug(rp)), []).append(rp)
+
+    out: dict[str, str] = {}
+    for r in store.db.execute("SELECT rel_path, metadata FROM docs"):
+        rp = r["rel_path"]
+        if rp not in retired_paths:
+            continue
+        try:
+            meta = _json.loads(r["metadata"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        tgt = ""
+        for k in _SUCCESSOR_KEYS:
+            v = meta.get(k)
+            if isinstance(v, str) and v.strip():
+                tgt = v.strip().strip("[]")     # tolerate [[wikilink]] form
+                break
+        if not tgt:
+            continue
+        hit = _resolve_target(tgt, all_paths, by_slug, rp)
+        if hit and hit != rp:                   # F5: a record is not its own correction
+            out[rp] = hit
+        else:
+            out[rp] = "?" + tgt
+    return out
 
 
 def _resolve_self_retired_paths(store) -> set[str]:
@@ -540,19 +701,57 @@ def search(
             cs = canonical_slug(r["tgt_slug"])
             if cs:
                 counts[cs] = counts.get(cs, 0) + 1
+        # Scale-adaptive connectedness. A previous form used an ABSOLUTE inbound count
+        # (1.0 + 0.05 * min(n, 5)), which made the same document earn a larger lift in a larger
+        # corpus: the constant silently asserted a corpus size. It degenerated at both ends --
+        # in a small brain almost nothing reached the threshold so the boost never fired, and in
+        # a very large one most linked documents saturated so it stopped discriminating.
+        #
+        # Now: a document's position within THIS brain's own linked subpopulation, so
+        # "well-connected" means the same thing at any corpus size. Each choice is measured:
+        #   * POPULATION = linked documents only. In practice the overwhelming majority of
+        #     documents have zero inbound links (measured: 97%), so a percentile over ALL
+        #     documents would place every linked document in the top few percent and make the
+        #     boost MORE aggressive -- the opposite of the intent.
+        #   * MIDRANK ties. A large block of documents shares the lowest non-zero count
+        #     (measured: 44% of linked documents have exactly one), so a tie rule is not
+        #     optional; min or max would hand that block either nothing or a near-cap lift.
+        #   * FLOOR. Below a handful of linked documents a percentile is not an estimate, so the
+        #     boost is OFF rather than extrapolated.
+        #   * RANGE UNCHANGED at [1.0, 1.25] -- this adapts the boost to scale, it does not
+        #     strengthen it.
+        # A log-count-over-corpus-reference alternative was implemented and rejected on
+        # measurement, not taste: it scored a 0.027 scale gap against this form's 0.002 on a
+        # realistically skewed distribution scaled 3x (the absolute-count form scored 0.150).
+        linked = sorted(counts.values())
         for h in out:
             slug = _basename_slug(h.rel_path)
             in_links = counts.get(slug, 0)
-            if in_links:
-                lift = 1.0 + 0.05 * min(in_links, 5)  # cap influence
+            if in_links and len(linked) >= WIKILINK_MIN_POPULATION:
+                below = bisect.bisect_left(linked, in_links)
+                ties = bisect.bisect_right(linked, in_links) - below
+                pctl = (below + 0.5 * ties) / len(linked)          # midrank
+                lift = 1.0 + WIKILINK_MAX_LIFT * pctl
                 h.score *= lift
                 h.boosts["wikilink_inbound"] = lift
+                # Ranker epoch: results produced before this change are not comparable with results
+                # after it. A version marker in the boost makes the two separable rather than
+                # silently mixed.
+                h.boosts["wikilink_rule"] = WIKILINK_RULE
 
     # 5.5 Supersession-aware de-ranking (Zep-inspired). A doc that another doc
     #     explicitly supersedes is BURIED, not deleted — the live truth surfaces
     #     while the original stays retrievable for provenance/audit. This turns
     #     the "amendable, supersede-not-overwrite" convention into actual ranking
     #     behavior: "permanence at the substrate, selectivity at the surface."
+    # A3 observability is emitted OUTSIDE the `supersede_aware` gate on purpose. Inside it,
+    # disabling handling -- which is exactly the v3.1 gate option (a) condition -- also
+    # disabled the trace, so the evidence vanished precisely when the control needed it
+    # (CSO OC3, 2026-09-14). Observability must not be a function of the behaviour it observes.
+    _a3_stage_trace("hybrid.pre_supersession", out, query)
+    if not (getattr(cfg, "supersede_aware", True) and out):
+        _a3_stage_trace("hybrid.pre_retirement", [], query,
+                        skipped_reason="supersede_aware=false or empty candidate set")
     if getattr(cfg, "supersede_aware", True) and out:
         # AX-06: resolve each edge to a SPECIFIC target path, not a bare slug that
         # buries every same-named doc across directories. A collision resolves to
@@ -576,7 +775,26 @@ def search(
         # A3 (2026-09-11): the status / path-marker retirement route, which reached the salience
         # boost and nothing else. Same treatment as the edge, minus the link it cannot carry.
         # Subtracting the edge set keeps a doubly-declared record penalised once, as SUPERSEDED.
-        retired_paths = _resolve_self_retired_paths(store) - (superseded_paths or set())
+        # This trace stays INSIDE the gate deliberately: with handling disabled there is no
+        # retirement stage to be "pre", so its absence is an accurate record that the stage did
+        # not run, not missing observability. The ungated pre_supersession above is what proves
+        # the candidate was in hand under BOTH conditions.
+        _a3_stage_trace("hybrid.pre_retirement", out, query)
+        # Annex s6 (CSO, 2026-09-14T05:10Z): a record carrying BOTH `superseded_by:` and an
+        # incoming `Supersedes:` edge rendered bare SUPERSEDED with no address, because the
+        # successor resolver only ever saw the post-subtraction set. Ruling s3 says the
+        # corroborated case is mutual confirmation and must render the corroborated form; F1
+        # requires the address on the old record. So: resolve over EVERY self-retired record,
+        # subtract the edge set only for the penalty (still applied once), and let the dual
+        # record carry its own address plus the corroboration mark.
+        self_retired = _resolve_self_retired_paths(store)
+        retired_paths = self_retired - (superseded_paths or set())
+        _succ = _resolve_retired_successors(store, self_retired) if self_retired else {}
+        _edges = _edge_sources(store)
+        for h in out:
+            if "superseded" in h.boosts and h.rel_path in _succ:
+                h.retired_successor = _succ[h.rel_path]
+                h.retired_corroborated = _succ[h.rel_path] in _edges.get(h.rel_path, set())
         if retired_paths:
             if current_only:
                 out = [h for h in out if h.rel_path not in retired_paths]
@@ -586,6 +804,7 @@ def search(
                     if h.rel_path in retired_paths:
                         h.score *= pen
                         h.boosts["retired"] = pen
+                        h.retired_successor = _succ.get(h.rel_path, "")
         if current_only and out:
             # Claim-span exclusion (grain mismatch): drop chunks whose text contains a
             # CLOSED claim, even in an otherwise-current doc — a fresh file can carry a
@@ -692,6 +911,7 @@ def keyword_only(
     # across directories, so `teamB/status.md` was marked SUPERSEDED by teamA's edge;
     # an ambiguous edge now buries nothing. Flag only (no score multiplier): keyword
     # search stays rank-by-FTS-relevance; this marks the record so the reader is told.
+    _a3_stage_trace("keyword.pre_supersession", hits, query)
     superseded_paths = _resolve_superseded_paths(store)
     if superseded_paths:
         if current_only:
@@ -705,7 +925,15 @@ def keyword_only(
                     h.boosts["superseded"] = 1.0   # flag only, not a score multiplier
     # A3 (2026-09-11): status / path-marker route on the keyword path too, flag only, so the
     # reader is told on BOTH retrieval paths (the A-410 lesson, one route over).
-    retired_paths = _resolve_self_retired_paths(store) - superseded_paths
+    _a3_stage_trace("keyword.pre_retirement", hits, query)
+    self_retired_kw = _resolve_self_retired_paths(store)
+    retired_paths = self_retired_kw - superseded_paths
+    _succ_kw = _resolve_retired_successors(store, self_retired_kw) if self_retired_kw else {}
+    _edges_kw = _edge_sources(store)
+    for h in hits:
+        if "superseded" in h.boosts and h.rel_path in _succ_kw:
+            h.retired_successor = _succ_kw[h.rel_path]
+            h.retired_corroborated = _succ_kw[h.rel_path] in _edges_kw.get(h.rel_path, set())
     if retired_paths:
         if current_only:
             hits = [h for h in hits if h.rel_path not in retired_paths]
@@ -713,6 +941,7 @@ def keyword_only(
             for h in hits:
                 if h.rel_path in retired_paths:
                     h.boosts["retired"] = 1.0
+                    h.retired_successor = _succ_kw.get(h.rel_path, "")
     if current_only and hits:
         # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
         # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.

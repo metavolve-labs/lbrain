@@ -1969,6 +1969,27 @@ def whoami(as_json: bool):
                f"  ({_q})")
     click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")
 
+    # A-585 part 2: the vintage belongs on the surface a receipt is actually read from.
+    # The runtime block shipped in describe() and was rendered on no RECEIPT surface -- visible
+    # only behind --json, which no receipt route uses, and absent from a pinned MCP server's
+    # lair_whoami. (An earlier version of this comment said "rendered NOWHERE", which was a
+    # scope-limited negative stated as an absolute: engine_stamp() lives in amp.py, which no
+    # server was stale on, so the vintage HAS ridden the [AMP] footer of every structured serve
+    # all along -- and on 2026-09-13T16:32Z that footer produced the first live catch, a seat's
+    # own server self-reporting 5b7ca5a, seven commits and one ranking fix behind HEAD. The
+    # instrument was working on the serve path and blind on the receipt path; this closes the
+    # second.)
+    rt = info.get("runtime") or {}
+    if rt:
+        _started = rt.get("started") or "unknown"
+        click.echo()
+        click.secho("  this process", fg="cyan")
+        click.echo(f"    engine:   {rt.get('engine', 'unknown')}")
+        click.echo(f"    started:  {_started}"
+                   f"{'  (start time unavailable)' if _started == 'unknown' else ''}")
+        click.secho("    a fix committed after 'started' is NOT in this process, however "
+                    "current the tree is", fg="yellow")
+
 
 @main.command()
 @click.option("--name", required=True, help="The gcx:// label you own (without the scheme), e.g. jarvis")
