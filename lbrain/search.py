@@ -32,6 +32,15 @@ class Hit:
     # Evidence class from the doc (lbrain/grading.py). The credibility axis of
     # the served grade; '' = UNGRADED and renders nothing.
     evidence: str = ""
+    # A3: where a self-retired record NAMES its correction. Three states, never two:
+    #   "<rel_path>"           a resolvable address  -> rendered as a link
+    #   "?<target-as-written>" named but unresolvable -> rendered as NOT a link
+    #   ""                     no successor named     -> rendered as such
+    # Populated only from the retired record's OWN frontmatter. An incoming `Supersedes:`
+    # edge from the successor is deliberately NOT a substitute (CSO falsification F4): it
+    # satisfies an easier property -- reachability of the pair -- not "this record names
+    # where its correction is".
+    retired_successor: str = ""
     # Frontmatter `date:` from the doc. The serve path cannot re-derive this from
     # chunk text — the frontmatter is stripped before chunking.
     doc_date: str = ""
@@ -137,6 +146,56 @@ def _resolve_superseded_paths(store) -> set[str]:
         if hit:
             resolved.add(hit)
     return resolved
+
+
+# Frontmatter keys by which a record names its own correction. The direction that matters is
+# TRAVERSAL: from the retired record TO its correction (CSO, 2026-09-14: her predicate's FORWARD
+# case). The successor's own `Supersedes:` edge traverses the other way and she ruled it
+# insufficient on 09-12 -- a reader served the dead record alone never reaches it.
+_SUCCESSOR_KEYS = ("superseded_by", "superseded-by", "retired_by", "retired-by",
+                   "replaced_by", "replaced-by", "correction", "see_instead")
+
+
+def _resolve_retired_successors(store, retired_paths: set[str]) -> dict[str, str]:
+    """Map each self-retired path to its NAMED successor, resolved or flagged unresolvable.
+
+    Returns "" for a record naming none -- the honest and currently common case. A dangling
+    target is returned as "?<as-written>" and must never render as a link: an address that
+    goes nowhere would let the predicate be satisfied by an invented one.
+    """
+    import json as _json
+    if not retired_paths:
+        return {}
+    all_paths = [r["rel_path"] for r in store.db.execute("SELECT rel_path FROM docs")]
+    by_slug: dict[str, list[str]] = {}
+    for rp in all_paths:
+        by_slug.setdefault(canonical_slug(_basename_slug(rp)), []).append(rp)
+
+    out: dict[str, str] = {}
+    for r in store.db.execute("SELECT rel_path, metadata FROM docs"):
+        rp = r["rel_path"]
+        if rp not in retired_paths:
+            continue
+        try:
+            meta = _json.loads(r["metadata"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        tgt = ""
+        for k in _SUCCESSOR_KEYS:
+            v = meta.get(k)
+            if isinstance(v, str) and v.strip():
+                tgt = v.strip().strip("[]")     # tolerate [[wikilink]] form
+                break
+        if not tgt:
+            continue
+        hit = _resolve_target(tgt, all_paths, by_slug, rp)
+        if hit and hit != rp:                   # F5: a record is not its own correction
+            out[rp] = hit
+        else:
+            out[rp] = "?" + tgt
+    return out
 
 
 def _resolve_self_retired_paths(store) -> set[str]:
@@ -632,6 +691,7 @@ def search(
         # boost and nothing else. Same treatment as the edge, minus the link it cannot carry.
         # Subtracting the edge set keeps a doubly-declared record penalised once, as SUPERSEDED.
         retired_paths = _resolve_self_retired_paths(store) - (superseded_paths or set())
+        _succ = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
         if retired_paths:
             if current_only:
                 out = [h for h in out if h.rel_path not in retired_paths]
@@ -641,6 +701,7 @@ def search(
                     if h.rel_path in retired_paths:
                         h.score *= pen
                         h.boosts["retired"] = pen
+                        h.retired_successor = _succ.get(h.rel_path, "")
         if current_only and out:
             # Claim-span exclusion (grain mismatch): drop chunks whose text contains a
             # CLOSED claim, even in an otherwise-current doc — a fresh file can carry a
@@ -761,6 +822,7 @@ def keyword_only(
     # A3 (2026-09-11): status / path-marker route on the keyword path too, flag only, so the
     # reader is told on BOTH retrieval paths (the A-410 lesson, one route over).
     retired_paths = _resolve_self_retired_paths(store) - superseded_paths
+    _succ_kw = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
     if retired_paths:
         if current_only:
             hits = [h for h in hits if h.rel_path not in retired_paths]
@@ -768,6 +830,7 @@ def keyword_only(
             for h in hits:
                 if h.rel_path in retired_paths:
                     h.boosts["retired"] = 1.0
+                    h.retired_successor = _succ_kw.get(h.rel_path, "")
     if current_only and hits:
         # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
         # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.
