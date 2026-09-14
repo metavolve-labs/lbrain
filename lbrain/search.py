@@ -41,6 +41,10 @@ class Hit:
     # satisfies an easier property -- reachability of the pair -- not "this record names
     # where its correction is".
     retired_successor: str = ""
+    # True only when the successor THIS record names is also the source of an incoming
+    # `Supersedes:` edge -- both sides agree. Ruling s3 (2026-09-14): mutual confirmation,
+    # render the corroborated form. False for self-only; meaningless when no successor.
+    retired_corroborated: bool = False
     # Frontmatter `date:` from the doc. The serve path cannot re-derive this from
     # chunk text — the frontmatter is stripped before chunking.
     doc_date: str = ""
@@ -175,6 +179,15 @@ def _dir_of(rel_path: str) -> str:
     return "/".join(parts[:-1])
 
 
+# target rel_path -> {superseding src rel_paths}, filled by _resolve_superseded_paths for the
+# store it last ran on. Keyed by id(store) so two stores in one process cannot cross-talk.
+_EDGE_SOURCES: dict[int, dict[str, set[str]]] = {}
+
+
+def _edge_sources(store) -> dict[str, set[str]]:
+    return _EDGE_SOURCES.get(id(store), {})
+
+
 def _resolve_superseded_paths(store) -> set[str]:
     """Map each supersession edge to the specific rel_path(s) it retires.
 
@@ -198,6 +211,7 @@ def _resolve_superseded_paths(store) -> set[str]:
         hit = _resolve_target(tgt, all_paths, by_slug, src_path)
         if hit:
             resolved.add(hit)
+            _EDGE_SOURCES.setdefault(id(store), {}).setdefault(hit, set()).add(src_path)
     return resolved
 
 
@@ -756,8 +770,21 @@ def search(
         # not run, not missing observability. The ungated pre_supersession above is what proves
         # the candidate was in hand under BOTH conditions.
         _a3_stage_trace("hybrid.pre_retirement", out, query)
-        retired_paths = _resolve_self_retired_paths(store) - (superseded_paths or set())
-        _succ = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
+        # Annex s6 (CSO, 2026-09-14T05:10Z): a record carrying BOTH `superseded_by:` and an
+        # incoming `Supersedes:` edge rendered bare SUPERSEDED with no address, because the
+        # successor resolver only ever saw the post-subtraction set. Ruling s3 says the
+        # corroborated case is mutual confirmation and must render the corroborated form; F1
+        # requires the address on the old record. So: resolve over EVERY self-retired record,
+        # subtract the edge set only for the penalty (still applied once), and let the dual
+        # record carry its own address plus the corroboration mark.
+        self_retired = _resolve_self_retired_paths(store)
+        retired_paths = self_retired - (superseded_paths or set())
+        _succ = _resolve_retired_successors(store, self_retired) if self_retired else {}
+        _edges = _edge_sources(store)
+        for h in out:
+            if "superseded" in h.boosts and h.rel_path in _succ:
+                h.retired_successor = _succ[h.rel_path]
+                h.retired_corroborated = _succ[h.rel_path] in _edges.get(h.rel_path, set())
         if retired_paths:
             if current_only:
                 out = [h for h in out if h.rel_path not in retired_paths]
@@ -889,8 +916,14 @@ def keyword_only(
     # A3 (2026-09-11): status / path-marker route on the keyword path too, flag only, so the
     # reader is told on BOTH retrieval paths (the A-410 lesson, one route over).
     _a3_stage_trace("keyword.pre_retirement", hits, query)
-    retired_paths = _resolve_self_retired_paths(store) - superseded_paths
-    _succ_kw = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
+    self_retired_kw = _resolve_self_retired_paths(store)
+    retired_paths = self_retired_kw - superseded_paths
+    _succ_kw = _resolve_retired_successors(store, self_retired_kw) if self_retired_kw else {}
+    _edges_kw = _edge_sources(store)
+    for h in hits:
+        if "superseded" in h.boosts and h.rel_path in _succ_kw:
+            h.retired_successor = _succ_kw[h.rel_path]
+            h.retired_corroborated = _succ_kw[h.rel_path] in _edges_kw.get(h.rel_path, set())
     if retired_paths:
         if current_only:
             hits = [h for h in hits if h.rel_path not in retired_paths]

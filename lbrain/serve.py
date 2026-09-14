@@ -554,7 +554,19 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
         if mark:
             parts.append(mark)
     if "superseded" in h.boosts:
-        parts.append("SUPERSEDED")
+        # Annex s6 / ruling s3 (2026-09-14): the dual-declaration record used to render LESS
+        # than the self-only one -- bare SUPERSEDED, no address -- although both sides agreed.
+        # Same three states as RETIRED below, plus the corroboration mark when the successor
+        # this record names is the very document whose edge retired it.
+        succ = getattr(h, "retired_successor", "") or ""
+        if succ.startswith("?"):
+            parts.append(f"SUPERSEDED (successor named but UNRESOLVABLE: {succ[1:]})")
+        elif succ and getattr(h, "retired_corroborated", False):
+            parts.append(f"SUPERSEDED \u2192 corrected by: {succ} (corroborated)")
+        elif succ:
+            parts.append(f"SUPERSEDED \u2192 corrected by: {succ}")
+        else:
+            parts.append("SUPERSEDED")
     elif "retired" in h.boosts:
         # A3 (2026-09-11): self-declared retirement had no reader-visible token; the record
         # rendered exactly like a live one.
