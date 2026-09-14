@@ -77,6 +77,37 @@ def _basename_slug(rel_path: str) -> str:
     return stem
 
 
+def _resolve_target(tgt: str, all_paths, by_slug, src_path: str) -> str | None:
+    """Resolve an author-written reference to exactly ONE rel_path, or None.
+
+    Extracted 2026-09-14 so the BACKWARD supersession declaration (a retired record naming
+    its successor) resolves by the identical rules as the forward edge. A3's predicate turns
+    on the word "resolvable"; two resolvers would make it mean two things, and the weaker one
+    would set the bar.
+
+    Ambiguity resolves to None on purpose -- "bury nothing" for the forward direction, and for
+    the backward direction an ambiguous successor is NOT a resolvable address, so it must not
+    render as a link.
+    """
+    if ("/" in tgt) or ("\\" in tgt):  # author wrote a path — match it exactly
+        norm = tgt[:-3] if tgt.endswith(".md") else tgt
+        exact = [rp for rp in all_paths
+                 if rp == tgt or (rp[:-3] if rp.endswith(".md") else rp) == norm
+                 or rp.endswith("/" + tgt) or rp.endswith("/" + norm + ".md")]
+        if len(exact) == 1:
+            return exact[0]
+        # fall through to slug resolution if the path form was not unique
+    cands = by_slug.get(canonical_slug(tgt), [])
+    if len(cands) == 1:
+        return cands[0]
+    if len(cands) > 1:
+        src_dir = _dir_of(src_path)
+        same_dir = [c for c in cands if _dir_of(c) == src_dir]
+        if len(same_dir) == 1:
+            return same_dir[0]
+    return None
+
+
 def _dir_of(rel_path: str) -> str:
     parts = [x for x in re.split(r"[\\/]", rel_path) if x]
     return "/".join(parts[:-1])
@@ -102,24 +133,9 @@ def _resolve_superseded_paths(store) -> set[str]:
 
     resolved: set[str] = set()
     for src_path, tgt in edges:
-        if ("/" in tgt) or ("\\" in tgt):  # author wrote a path — match it exactly
-            norm = tgt[:-3] if tgt.endswith(".md") else tgt
-            exact = [rp for rp in all_paths
-                     if rp == tgt or (rp[:-3] if rp.endswith(".md") else rp) == norm
-                     or rp.endswith("/" + tgt) or rp.endswith("/" + norm + ".md")]
-            if len(exact) == 1:
-                resolved.add(exact[0])
-                continue
-            # fall through to slug resolution if the path form was not unique
-        cands = by_slug.get(canonical_slug(tgt), [])
-        if len(cands) == 1:
-            resolved.add(cands[0])
-        elif len(cands) > 1:
-            src_dir = _dir_of(src_path)
-            same_dir = [c for c in cands if _dir_of(c) == src_dir]
-            if len(same_dir) == 1:
-                resolved.add(same_dir[0])
-            # else: genuinely ambiguous — bury nothing
+        hit = _resolve_target(tgt, all_paths, by_slug, src_path)
+        if hit:
+            resolved.add(hit)
     return resolved
 
 
