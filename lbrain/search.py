@@ -708,11 +708,15 @@ def search(
     #     while the original stays retrievable for provenance/audit. This turns
     #     the "amendable, supersede-not-overwrite" convention into actual ranking
     #     behavior: "permanence at the substrate, selectivity at the surface."
+    # A3 observability is emitted OUTSIDE the `supersede_aware` gate on purpose. Inside it,
+    # disabling handling -- which is exactly the v3.1 gate option (a) condition -- also
+    # disabled the trace, so the evidence vanished precisely when the control needed it
+    # (CSO OC3, 2026-09-14). Observability must not be a function of the behaviour it observes.
+    _a3_stage_trace("hybrid.pre_supersession", out, query)
     if getattr(cfg, "supersede_aware", True) and out:
         # AX-06: resolve each edge to a SPECIFIC target path, not a bare slug that
         # buries every same-named doc across directories. A collision resolves to
         # the same-directory target; a still-ambiguous edge buries nothing.
-        _a3_stage_trace("hybrid.pre_supersession", out, query)
         superseded_paths = _resolve_superseded_paths(store)
         if superseded_paths:
             if current_only:
@@ -732,6 +736,10 @@ def search(
         # A3 (2026-09-11): the status / path-marker retirement route, which reached the salience
         # boost and nothing else. Same treatment as the edge, minus the link it cannot carry.
         # Subtracting the edge set keeps a doubly-declared record penalised once, as SUPERSEDED.
+        # This trace stays INSIDE the gate deliberately: with handling disabled there is no
+        # retirement stage to be "pre", so its absence is an accurate record that the stage did
+        # not run, not missing observability. The ungated pre_supersession above is what proves
+        # the candidate was in hand under BOTH conditions.
         _a3_stage_trace("hybrid.pre_retirement", out, query)
         retired_paths = _resolve_self_retired_paths(store) - (superseded_paths or set())
         _succ = _resolve_retired_successors(store, retired_paths) if retired_paths else {}
