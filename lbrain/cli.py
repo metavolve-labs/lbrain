@@ -888,9 +888,38 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     for src in sources:
         files = discover([src])
         click.echo(f"  scanning {src} → {len(files)} markdown files")
+        # A-591 shape (2026-09-16, CCO): a scan is COMPLETE or the build ABORTS. A file discovered but gone at parse time
+        # (a seat renamed a mail in a source root) triggers ONE bounded re-discovery of that root: whatever the root holds
+        # NOW is the set (a renamed file enters at its new path; a removed one leaves). A file the re-discovery still lists
+        # but that cannot be read is UNREADABLE, not gone -> abort. More than RECONCILE_BOUND reconciliations per root is
+        # churn -> abort. PermissionError always aborts. Publication never carries a scan it could not complete.
+        RECONCILE_BOUND = 3
+        queue = list(files); done: set = set(); retried: set = set(); reconciles = 0
         with store.transaction():
-            for path in files:
-                doc = parse(path, repo_root=src)
+            while queue:
+                path = queue.pop(0)
+                if path in done:
+                    continue
+                try:
+                    doc = parse(path, repo_root=src)
+                except PermissionError as _e:
+                    raise click.ClickException(f"import ABORTED: {path} is not readable ({_e}); a scan that cannot read a discovered file is not complete")
+                except FileNotFoundError:
+                    reconciles += 1
+                    if reconciles > RECONCILE_BOUND:
+                        raise click.ClickException(f"import ABORTED: {src} changed under the scan more than {RECONCILE_BOUND} times (last: {path}); a churning root cannot be published as complete")
+                    now = discover([src])
+                    added = [f for f in now if f not in done and f not in queue and f != path]
+                    if path in now:
+                        if path in retried:
+                            raise click.ClickException(f"import ABORTED: {path} is discovered but cannot be read (twice); unreadable is not gone")
+                        retried.add(path); queue.insert(0, path)
+                        click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} vanished then reappeared; retrying once", fg="yellow")
+                    else:
+                        click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} left {src} during the scan; {len(added)} new path(s) picked up", fg="yellow")
+                    queue.extend(added)
+                    continue
+                done.add(path)
                 # MS-01: resolve row identity by FILE — a cross-source rel_path
                 # collision (e.g. three plates each with a root `_INDEX.md`)
                 # must not thrash one row on every import.
