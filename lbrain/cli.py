@@ -885,17 +885,19 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     beliefs_seen = 0
     total_chunks = 0
 
-    for src in sources:
-        files = discover([src])
-        click.echo(f"  scanning {src} → {len(files)} markdown files")
-        # A-591 shape (2026-09-16, CCO): a scan is COMPLETE or the build ABORTS. A file discovered but gone at parse time
-        # (a seat renamed a mail in a source root) triggers ONE bounded re-discovery of that root: whatever the root holds
-        # NOW is the set (a renamed file enters at its new path; a removed one leaves). A file the re-discovery still lists
-        # but that cannot be read is UNREADABLE, not gone -> abort. More than RECONCILE_BOUND reconciliations per root is
-        # churn -> abort. PermissionError always aborts. Publication never carries a scan it could not complete.
-        RECONCILE_BOUND = 3
-        queue = list(files); done: set = set(); retried: set = set(); reconciles = 0
-        with store.transaction():
+    # Y2 (CSO 2026-09-16): ONE transaction across every root. An abort on a later root rolls back the earlier ones;
+    # a non-epoch home never keeps a partial scan, and an epoch candidate never carries one.
+    with store.transaction():
+        for src in sources:
+            files = discover([src])
+            click.echo(f"  scanning {src} → {len(files)} markdown files")
+            # A-591 shape (2026-09-16, CCO): a scan is COMPLETE or the build ABORTS. A file discovered but gone at parse time
+            # (a seat renamed a mail in a source root) triggers ONE bounded re-discovery of that root: whatever the root holds
+            # NOW is the set (a renamed file enters at its new path; a removed one leaves). A file the re-discovery still lists
+            # but that cannot be read is UNREADABLE, not gone -> abort. More than RECONCILE_BOUND reconciliations per root is
+            # churn -> abort. PermissionError always aborts. Publication never carries a scan it could not complete.
+            RECONCILE_BOUND = 3
+            queue = list(files); done: set = set(); retried: set = set(); reconciles = 0
             while queue:
                 path = queue.pop(0)
                 if path in done:
@@ -916,9 +918,14 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
                         retried.add(path); queue.insert(0, path)
                         click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} vanished then reappeared; retrying once", fg="yellow")
                     else:
-                        click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} left {src} during the scan; {len(added)} new path(s) picked up", fg="yellow")
+                        retired = store.retire_doc_by_abs_path(str(path))   # Y1: the row of a path that left the set goes with it, here, not in a later prune
+                        click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} left {src} during the scan; {len(added)} new path(s) picked up; {len(retired)} stale row(s) retired", fg="yellow")
                     queue.extend(added)
                     continue
+                except click.ClickException:
+                    raise
+                except Exception as _e:   # N5 (CSO): ANY other parse failure is an incomplete scan -> abort, never skip
+                    raise click.ClickException(f"import ABORTED: {path} failed to parse ({type(_e).__name__}: {str(_e)[:160]}); a scan that cannot parse a discovered file is not complete")
                 done.add(path)
                 # MS-01: resolve row identity by FILE — a cross-source rel_path
                 # collision (e.g. three plates each with a root `_INDEX.md`)

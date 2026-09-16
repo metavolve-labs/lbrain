@@ -94,3 +94,54 @@ def test_r5_nonzero_import_exit_raises_epoch_error_in_the_build_runner(tmp_path)
     with pytest.raises(eb.EpochError) as ei:
         eb._run_cli(["import", "--prune"], tmp_path, str(bad))
     assert "import ABORTED" in str(ei.value)
+
+
+def test_r6_indexed_then_renamed_mid_rescan_old_row_retired_by_the_reconcile_not_by_prune(tmp_path, monkeypatch):
+    """Y1: the case A-591 is about -- doc1.md already indexed, renamed during the RE-scan; with --no-prune the old row is
+    gone anyway because the reconcile retired it, and the new path is present."""
+    src = _home(tmp_path, monkeypatch)
+    res0 = CliRunner().invoke(cli.main, ["import"]); assert res0.exit_code == 0, res0.output
+    assert any(r.endswith("doc1.md") for r in _rels())
+    real = cli.parse
+    def racing(path, repo_root=None):
+        if path.name == "doc1.md" and path.exists():
+            path.rename(path.with_name("claimed-doc1.md"))
+        return real(path, repo_root=repo_root)
+    monkeypatch.setattr(cli, "parse", racing)
+    res = CliRunner().invoke(cli.main, ["import", "--no-prune"])
+    assert res.exit_code == 0, res.output
+    assert "1 stale row(s) retired" in res.output
+    rels = _rels()
+    assert any(r.endswith("claimed-doc1.md") for r in rels) and not any(r.endswith("/doc1.md") or r == "doc1.md" for r in rels)
+
+
+def test_r7_abort_on_a_later_root_leaves_nothing_from_an_earlier_root(tmp_path, monkeypatch):
+    """Y2: one transaction across roots -- a PermissionError in root B rolls back root A on a non-epoch home."""
+    src_a = tmp_path / "rootA"; src_b = tmp_path / "rootB"; src_a.mkdir(); src_b.mkdir()
+    (src_a / "a1.md").write_text("# A1\n\nbody\n"); (src_a / "a2.md").write_text("# A2\n\nbody\n"); (src_b / "b1.md").write_text("# B1\n\nbody\n")
+    home = tmp_path / "h"; home.mkdir()
+    (home / "config.toml").write_text(f'embedding_provider = "local"\nsources = ["{src_a}", "{src_b}"]\n', encoding="utf-8")
+    monkeypatch.setenv("LBRAIN_HOME", str(home))
+    import lbrain.config; importlib.reload(lbrain.config)
+    real = cli.parse
+    def denied(path, repo_root=None):
+        if path.name == "b1.md":
+            raise PermissionError(str(path))
+        return real(path, repo_root=repo_root)
+    monkeypatch.setattr(cli, "parse", denied)
+    res = CliRunner().invoke(cli.main, ["import"])
+    assert res.exit_code != 0 and "is not readable" in res.output
+    assert _rels() == set()   # nothing from root A survived the abort
+
+
+def test_r8_any_other_parse_error_aborts(tmp_path, monkeypatch):
+    """N5: a parse failure that is neither missing nor permission (a broken symlink's OSError, a decode error) aborts."""
+    _home(tmp_path, monkeypatch)
+    real = cli.parse
+    def broken(path, repo_root=None):
+        if path.name == "doc0.md":
+            raise OSError("broken symlink")
+        return real(path, repo_root=repo_root)
+    monkeypatch.setattr(cli, "parse", broken)
+    res = CliRunner().invoke(cli.main, ["import"])
+    assert res.exit_code != 0 and "failed to parse" in res.output and "OSError" in res.output
