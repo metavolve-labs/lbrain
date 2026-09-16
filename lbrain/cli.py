@@ -890,7 +890,14 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
         click.echo(f"  scanning {src} → {len(files)} markdown files")
         with store.transaction():
             for path in files:
-                doc = parse(path, repo_root=src)
+                try:
+                    doc = parse(path, repo_root=src)
+                except (FileNotFoundError, PermissionError) as _e:
+                    # 2026-09-16 (live build crash): a discovered file can vanish or move between discover() and
+                    # parse() -- seats claim mail (rename) in source roots constantly. Skip it, say so, keep going;
+                    # the next build sees the new location. A crash here aborted an epoch build mid-import.
+                    click.secho(f"  · vanished before parse, skipped: {path} ({type(_e).__name__})", fg="yellow")
+                    continue
                 # MS-01: resolve row identity by FILE — a cross-source rel_path
                 # collision (e.g. three plates each with a root `_INDEX.md`)
                 # must not thrash one row on every import.
