@@ -103,17 +103,20 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
     # yet, so triggering a build on staged>0 today would loop a useless
     # minutes-long build every beat. When the inc-2 sweep ships, staged>0
     # becomes a build trigger alongside source drift.
-    local staged=0 m
+    # inc-2 shipped (2026-09-16): an entry with a .swept.json receipt is ARCHIVED, not staged (CSO P-D), and
+    # staged>0 is now a build trigger alongside source drift, as anticipated above.
+    local staged=0 swept=0 m
     for m in "$LBHOME"/capture-staging/*.meta.json; do
-      [ -f "$m" ] && [ -f "${m%.meta.json}.transcript" ] && staged=$((staged+1))
+      [ -f "$m" ] && [ -f "${m%.meta.json}.transcript" ] || continue
+      if [ -f "${m%.meta.json}.swept.json" ]; then swept=$((swept+1)); else staged=$((staged+1)); fi
     done
-    if [ -n "$drift" ]; then
-      printf '[%s] epoch home: source drift (%s; staged_captures=%s) — building delta epoch\n' \
-        "$(date -Is)" "$drift" "$staged" >>"$LOG" 2>&1
-      timeout 600 "$LB" epoch build >>"$LOG" 2>&1
+    if [ -n "$drift" ] || [ "$staged" -gt 0 ]; then
+      printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool)\n' \
+        "$(date -Is)" "${drift:-no source drift}" "$staged" "$swept" >>"$LOG" 2>&1
+      timeout 900 "$LB" epoch build >>"$LOG" 2>&1
     else
-      printf '[%s] epoch home: no source drift; staged_captures=%s awaiting sweep (inc-2) — no build\n' \
-        "$(date -Is)" "$staged" >>"$LOG" 2>&1
+      printf '[%s] epoch home: no source drift; staged_captures=0 swept=%s — no build\n' \
+        "$(date -Is)" "$swept" >>"$LOG" 2>&1
     fi
     return 0
   fi

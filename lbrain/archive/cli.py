@@ -8,6 +8,8 @@ omits these commands.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -243,6 +245,7 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
 
     if res.skipped:
         click.echo(f"· already captured: {label} ({res.txid[:16]}…)")
+        click.echo(f"LBRAIN-TXID {res.txid}")   # machine line, own line, last: the only thing the epoch sweep parses (CSO P-A/X7)
         return
     if quiet:
         click.echo(f"✓ captured {label} → {res.transport}:{res.txid[:16]}… ({res.n_bytes}B)")
@@ -250,6 +253,7 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
         click.secho(f"✓ Captured '{res.title}' → {res.transport}", fg="green")
         click.echo(f"  txid {res.txid}  ·  {res.n_bytes} bytes  ·  snapshot {res.snapshot_chars} chars indexed")
         click.echo(f"  recall: lbrain recall \"<query>\"   ·   full: lbrain retrieve --txid {res.txid}")
+    click.echo(f"LBRAIN-TXID {res.txid}")   # machine line, own line, last (CSO P-A/X7)
 
 
 @click.command(name="recall")
@@ -424,7 +428,55 @@ def archives_cmd(namespace, verify):
         )
 
 
-_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd]
+@click.command(name="sweep-status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
+def sweep_status(as_json):
+    """Dry-run of the capture-spool sweep (increment 2): what `lbrain epoch build` WOULD archive, and what already was.
+
+    Read-only. Reports staged (awaiting build), swept (receipted), bytes, the capture time range, and whether the
+    passphrase the sweep needs is available. Born of the 2026-09-15 finding that captures were staged and never read."""
+    from ..spool import STAGING_DIRNAME, staged_items, swept_items, sweep_receipt_path
+
+    home = Path(CONFIG_DIR)
+    try:
+        staged = staged_items(home); swept = swept_items(home)
+    except Exception as e:   # a status command answers even when the spool is unreadable
+        staged, swept = [], []; spool_err = f"{type(e).__name__}: {str(e)[:120]}"
+    else:
+        spool_err = None
+    def _meta(m):
+        try: return json.loads(m.read_text(encoding="utf-8"))
+        except Exception: return {}
+    ms = [_meta(m) for m in staged]
+    times = sorted(t for t in (m.get("captured_at") for m in ms) if t)
+    sessions = sorted({str(m.get("session_id")) for m in ms if m.get("session_id")})
+    total = sum(int(m.get("size") or 0) for m in ms)
+    # P-E (CSO 2026-09-16): read-only means read-only. Report whether a passphrase is CONFIGURED without resolving a
+    # `gcp-secret:` reference (that is a network call to a secret manager and can fail); never exit non-zero.
+    raw = os.environ.get("LBRAIN_ARCHIVE_PASSPHRASE", "").strip()
+    pp_state = "missing" if not raw else ("configured (gcp-secret reference, not resolved by status)" if raw.startswith(("gcp-secret:", "gcp:")) else "configured (literal)")
+    have_pass = bool(raw)
+    rep = {"home": str(home), "spool": str(home / STAGING_DIRNAME), "staged": len(staged), "staged_bytes": total,
+           "staged_sessions": len(sessions), "oldest": times[0] if times else None, "newest": times[-1] if times else None,
+           "swept": len(swept), "passphrase": pp_state, "passphrase_configured": have_pass,
+           "next_build_would": ("nothing to sweep" if not staged else
+                               ("skip the sweep: no archive passphrase (LBRAIN_ARCHIVE_PASSPHRASE)" if not have_pass else
+                                ("attempt to archive %d capture(s), %d bytes AFTER resolving the gcp-secret reference; if the resolver fails the captures stay staged (status does not resolve it)" % (len(staged), total)
+                                 if raw.startswith(("gcp-secret:", "gcp:")) else "archive %d capture(s), %d bytes" % (len(staged), total))))}
+    if spool_err: rep["spool_error"] = spool_err
+    if as_json:
+        click.echo(json.dumps(rep, indent=2)); return
+    click.secho("Capture-spool sweep status (dry-run)", fg="cyan")
+    click.echo(f"  spool:            {rep['spool']}")
+    click.echo(f"  staged:           {rep['staged']} capture(s), {total} bytes, {rep['staged_sessions']} session(s)"
+               + (f", {rep['oldest']} → {rep['newest']}" if times else ""))
+    click.echo(f"  swept:            {rep['swept']} (receipted; ciphertext under archive/)")
+    click.echo(f"  passphrase:       {pp_state}")
+    if spool_err: click.secho(f"  spool:            unreadable — {spool_err}", fg="yellow")
+    click.secho(f"  next epoch build: {rep['next_build_would']}", fg=("green" if have_pass or not staged else "yellow"))
+
+
+_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status]
 
 
 def register(main) -> None:

@@ -314,6 +314,11 @@ def make_snapshot(text: str, cfg, *, model: str | None = None, force_extractive:
     test suite — works fully offline. ``force_extractive`` skips the LLM entirely (used by
     hook-driven auto-capture so session-end is fast, free, and offline; the full record is
     stored intact, so a richer snapshot can be re-derived later)."""
+    # increment 3 (2026-09-16): a Claude Code JSONL transcript is rendered to readable turns first, so the
+    # extractive snapshot (and the LLM one) sees what was said, not the first JSON row. Non-transcripts pass through.
+    rendered = render_transcript_jsonl(text)
+    if rendered is not None:
+        text = rendered
     if force_extractive:
         return _extractive_snapshot(text)
     provider = getattr(cfg, "embedding_provider", "gemini")
@@ -376,6 +381,75 @@ def _llm_snapshot(text: str, key: str, provider: str, model: str | None) -> str:
         )
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def render_transcript_jsonl(text: str, *, cap: int = 1_000_000) -> str | None:
+    """Increment 3 (2026-09-16): turn a Claude Code session transcript (JSONL rows with ``type`` user/assistant/system)
+    into readable markdown turns for snapshotting. Returns None when the text is not such a transcript, so every other
+    payload takes the unchanged path.
+
+    What is kept: user text (string content or ``text`` blocks), assistant ``text`` blocks, and compaction boundaries as
+    landmarks. What is dropped: ``thinking`` blocks, ``tool_use`` inputs, ``tool_result`` payloads, attachments, hook
+    rows and every other row type -- they are the bulk of a transcript and none of it is what a person recalls a session
+    by. Text is copied verbatim (data, never instructions); the render is capped at ``cap`` characters (1 MB: a 34 MB
+    session renders to ~390 KB of turns and snapshots to ~100 KB) and says so.
+    Why: after increment 2 the swept sessions answered `lbrain recall` with their first JSON line, because the extractive
+    snapshot's "headings and lead lines" were braces."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return None
+    probe = lines[:20]
+    parsed = 0
+    for ln in probe:
+        if not ln.lstrip().startswith("{"):
+            continue
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+        if isinstance(d, dict) and d.get("type") in ("user", "assistant", "system", "summary", "attachment", "last-prompt"):
+            parsed += 1
+    if parsed < max(2, len(probe) // 2):
+        return None
+    out: list[str] = []
+    used = 0
+    truncated = False
+    for ln in lines:
+        try:
+            d = json.loads(ln)
+        except Exception:
+            continue
+        if not isinstance(d, dict):
+            continue
+        t = d.get("type")
+        piece = ""
+        if t == "system" and d.get("subtype") == "compact_boundary":
+            piece = f"## compact_boundary {str(d.get('timestamp') or '')[:19]}"
+        elif t in ("user", "assistant"):
+            m = d.get("message") or {}
+            c = m.get("content")
+            texts: list[str] = []
+            if isinstance(c, str):
+                texts.append(c)
+            elif isinstance(c, list):
+                for blk in c:
+                    if isinstance(blk, dict) and blk.get("type") == "text" and isinstance(blk.get("text"), str):
+                        texts.append(blk["text"])
+            body = "\n".join(x.strip() for x in texts if x and x.strip())
+            if not body:
+                continue
+            piece = f"## {t} {str(d.get('timestamp') or '')[11:19]}\n{body}"
+        else:
+            continue
+        if used + len(piece) > cap:
+            out.append("… [render truncated at cap — full session in the archived record]")
+            truncated = True
+            break
+        out.append(piece)
+        used += len(piece) + 2
+    if not out:
+        return None
+    return "\n\n".join(out)
 
 
 def _extractive_snapshot(text: str, target_ratio: float = 0.25) -> str:

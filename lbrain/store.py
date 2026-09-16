@@ -642,6 +642,26 @@ class Store:
             self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
         return gone
 
+    def retire_doc_by_abs_path(self, abs_path: str) -> list[str]:
+        """Retire the row(s) of ONE file that left a source root during a scan (import reconcile, 2026-09-16, CSO Y1):
+        the same per-row sequence prune_missing uses, applied to a path the scan itself watched vanish, inside the
+        scan's own transaction -- so the index never carries a document at a path that no longer exists, whether or
+        not a prune runs afterwards. Returns the retired rel_paths (a renamed file is re-indexed under its new path)."""
+        import os as _os
+        rels = [r["rel_path"] for r in self.db.execute("SELECT rel_path FROM docs WHERE abs_path = ?", (abs_path,))]
+        if not rels:
+            try:
+                rp = _os.path.realpath(abs_path)
+                rels = [r["rel_path"] for r in self.db.execute("SELECT rel_path FROM docs WHERE abs_path = ?", (rp,))]
+            except OSError:
+                rels = []
+        for rel in rels:
+            self.delete_doc_chunks(rel)
+            self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
+            self.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+        return rels
+
     def prune_unreachable(
         self,
         source_roots: list,

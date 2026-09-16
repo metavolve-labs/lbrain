@@ -885,12 +885,48 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     beliefs_seen = 0
     total_chunks = 0
 
-    for src in sources:
-        files = discover([src])
-        click.echo(f"  scanning {src} → {len(files)} markdown files")
-        with store.transaction():
-            for path in files:
-                doc = parse(path, repo_root=src)
+    # Y2 (CSO 2026-09-16): ONE transaction across every root. An abort on a later root rolls back the earlier ones;
+    # a non-epoch home never keeps a partial scan, and an epoch candidate never carries one.
+    with store.transaction():
+        for src in sources:
+            files = discover([src])
+            click.echo(f"  scanning {src} → {len(files)} markdown files")
+            # A-591 shape (2026-09-16, CCO): a scan is COMPLETE or the build ABORTS. A file discovered but gone at parse time
+            # (a seat renamed a mail in a source root) triggers ONE bounded re-discovery of that root: whatever the root holds
+            # NOW is the set (a renamed file enters at its new path; a removed one leaves). A file the re-discovery still lists
+            # but that cannot be read is UNREADABLE, not gone -> abort. More than RECONCILE_BOUND reconciliations per root is
+            # churn -> abort. PermissionError always aborts. Publication never carries a scan it could not complete.
+            RECONCILE_BOUND = 3
+            queue = list(files); done: set = set(); retried: set = set(); reconciles = 0
+            while queue:
+                path = queue.pop(0)
+                if path in done:
+                    continue
+                try:
+                    doc = parse(path, repo_root=src)
+                except PermissionError as _e:
+                    raise click.ClickException(f"import ABORTED: {path} is not readable ({_e}); a scan that cannot read a discovered file is not complete")
+                except FileNotFoundError:
+                    reconciles += 1
+                    if reconciles > RECONCILE_BOUND:
+                        raise click.ClickException(f"import ABORTED: {src} changed under the scan more than {RECONCILE_BOUND} times (last: {path}); a churning root cannot be published as complete")
+                    now = discover([src])
+                    added = [f for f in now if f not in done and f not in queue and f != path]
+                    if path in now:
+                        if path in retried:
+                            raise click.ClickException(f"import ABORTED: {path} is discovered but cannot be read (twice); unreadable is not gone")
+                        retried.add(path); queue.insert(0, path)
+                        click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} vanished then reappeared; retrying once", fg="yellow")
+                    else:
+                        retired = store.retire_doc_by_abs_path(str(path))   # Y1: the row of a path that left the set goes with it, here, not in a later prune
+                        click.secho(f"  · reconcile {reconciles}/{RECONCILE_BOUND}: {path} left {src} during the scan; {len(added)} new path(s) picked up; {len(retired)} stale row(s) retired", fg="yellow")
+                    queue.extend(added)
+                    continue
+                except click.ClickException:
+                    raise
+                except Exception as _e:   # N5 (CSO): ANY other parse failure is an incomplete scan -> abort, never skip
+                    raise click.ClickException(f"import ABORTED: {path} failed to parse ({type(_e).__name__}: {str(_e)[:160]}); a scan that cannot parse a discovered file is not complete")
+                done.add(path)
                 # MS-01: resolve row identity by FILE — a cross-source rel_path
                 # collision (e.g. three plates each with a root `_INDEX.md`)
                 # must not thrash one row on every import.
@@ -2475,8 +2511,10 @@ def prune_unreachable_cmd(yes, force):
               help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
                    ".failed forensics: --keep 2 leaves CURRENT plus two.")
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
-def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes):
-    """Build a candidate, run gate v2, publish atomically."""
+@click.option("--no-sweep", "no_sweep", is_flag=True,
+              help="Leave capture-staging/ untouched (default: staged captures are archived into the new epoch; increment 2).")
+def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes, no_sweep):
+    """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
     from .epoch import BuilderBusy, EpochError
     from .epoch_build import build
 
@@ -2485,7 +2523,7 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_b
         report = build(CONFIG_DIR, cfg, delta=not full,
                        confirm_source_removed=confirm_source_removed,
                        prune_unreachable=prune_unreachable,
-                       keep=keep, max_bytes=max_bytes)
+                       keep=keep, max_bytes=max_bytes, sweep=not no_sweep)
     except BuilderBusy as e:
         click.secho(f"✗ {e}", fg="yellow")
         sys.exit(3)
@@ -2499,6 +2537,15 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_b
         fg="green")
     if report.get("durability_caveat"):
         click.secho(f"  ⚠ {report['durability_caveat']}", fg="yellow")
+    sw = report.get("sweep")
+    if sw:
+        if sw.get("skipped"):
+            click.secho(f"  ⚠ capture spool NOT swept: {sw['skipped']} ({sw['staged']} staged)", fg="yellow")
+        else:
+            click.echo(f"  capture spool: {sw['swept']} archived, {sw['already']} already archived, {sw['failed']} failed, "
+                       f"{sw['bytes']} bytes; {sw.get('receipts', 0)} receipt(s), {sw.get('ciphertext_files_copied', 0)} ciphertext file(s) copied")
+            for f in sw.get("failures", []):
+                click.secho(f"    ✗ {f}", fg="red")
 
 
 @epoch.command("status")
