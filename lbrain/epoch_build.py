@@ -317,6 +317,69 @@ def validate_candidate(
 
 # ---------- the build ----------
 
+
+def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict) -> list[dict]:
+    """Archive every staged capture into the staging candidate. Returns the plan (one dict per entry, with the txid the
+    capture reported) for `_finish_sweep` after publish. Skips loudly, never silently: no passphrase = nothing swept."""
+    from .spool import staged_items
+    items = staged_items(home)
+    info: dict = {"staged": len(items), "swept": 0, "already": 0, "failed": 0, "bytes": 0}
+    report["sweep"] = info
+    if not items:
+        return []
+    try:
+        from .archive.cli import archive_passphrase
+        have_pass = bool(archive_passphrase())
+    except Exception as e:  # cryptography extra absent, etc.
+        have_pass = False
+        info["skipped"] = f"archive extra unavailable: {e}"
+    if not have_pass:
+        info.setdefault("skipped", "no archive passphrase (LBRAIN_ARCHIVE_PASSPHRASE): captures stay staged")
+        return []
+    plan = []
+    for meta in items:
+        try:
+            m = json.loads(meta.read_text(encoding="utf-8"))
+            payload = meta.with_name(meta.name[: -len(".meta.json")] + ".transcript")
+            args = ["capture", "--from-file", str(payload)]   # top-level `lbrain capture` (the `archive` command takes a SOURCE)
+            if m.get("session_id"): args += ["--session-id", str(m["session_id"])]
+            if m.get("title"): args += ["--title", str(m["title"])]
+            if m.get("namespace"): args += ["--namespace", str(m["namespace"])]
+            out = _run_cli(args, staging, lbrain_bin, lock=lock)
+            # txids are base64url (LocalTransport: sha256 of the ciphertext, urlsafe), not hex: match any token
+            mt = re.search(r"txid (\S+)", out)
+            already = "already captured" in out
+            ma = re.search(r"\((\S+?)…\)", out)
+            txid = mt.group(1) if mt else (ma.group(1) if already and ma else "")
+            plan.append({"meta": str(meta), "sha256": m.get("sha256"), "bytes": int(m.get("size") or 0),
+                         "txid": txid, "already": already, "captured_at": m.get("captured_at")})
+            info["bytes"] += int(m.get("size") or 0)
+            info["already" if already else "swept"] += 1
+        except EpochError as e:
+            info["failed"] += 1
+            info.setdefault("failures", []).append(f"{meta.name}: {str(e)[-300:]}")
+    return plan
+
+
+def _finish_sweep(home: Path, staging: Path, eid: str, plan: list[dict], report: dict) -> None:
+    """After publish: bring the candidate's new ciphertext into the home's archive/ (content-addressed; existing files are
+    left alone) and write one receipt per swept entry. Receipts are the last write, so a crash here re-sweeps next time."""
+    from .spool import write_sweep_receipt
+    src = staging / "archive"; dst = home / "archive"
+    copied = 0
+    if src.is_dir():
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in sorted(src.iterdir()):
+            if f.is_file() and not (dst / f.name).exists():
+                shutil.copy2(f, dst / f.name); copied += 1
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    for e in plan:
+        write_sweep_receipt(Path(e["meta"]), {"schema": 1, "epoch_id": eid, "txid": e["txid"], "already_archived": e["already"],
+                                              "bytes": e["bytes"], "sha256": e["sha256"], "swept_at": at})
+    report["sweep"]["ciphertext_files_copied"] = copied
+    report["sweep"]["receipts"] = len(plan)
+
+
 def build(
     home: Path,
     cfg,
@@ -328,6 +391,7 @@ def build(
     max_bytes: int | None = None,
     lbrain_bin: str = "lbrain",
     scratch: Path | None = None,
+    sweep: bool = True,
 ) -> dict:
     """Build → validate → swap. Returns a report dict; raises EpochError with the
     staging retained as .failed forensics on any gate refusal."""
@@ -381,6 +445,13 @@ def build(
                 _run_cli(["embed", "--reuse-from", str(prior_db)], staging, lbrain_bin, lock=lock)
             else:
                 _run_cli(["embed", "--stale"], staging, lbrain_bin, lock=lock)
+
+            # increment 2 (2026-09-16, CSO mine 2026-09-15T18:46Z: 306 MB / 29 captures staged and read by nothing):
+            # sweep the home's capture spool into the CANDIDATE through the legacy `archive capture` path, which the
+            # staging home takes because it carries no epochs/CURRENT. Ciphertext lands in staging/archive/ and is copied
+            # into home/archive/ only after publish; receipts are written only then, so a failed build leaves every
+            # entry staged and the next build re-sweeps (the Archiver skips an already-captured payload).
+            swept_plan = _sweep_spool(home, staging, lbrain_bin, lock, report) if sweep else []
             lock.heartbeat()
             # Orphan derived-state sweep: the FIRST production build was refused by
             # the gate over 14 vectors with no chunk — historical debris the live
@@ -481,6 +552,8 @@ def build(
             }, indent=2) + "\n", encoding="utf-8")
 
             caveat = publish(home, eid)
+            if swept_plan:
+                _finish_sweep(home, staging, eid, swept_plan, report)
             # A-592: the marker is written only after the swap succeeded, beside config.toml, outside the
             # tree it describes; a crash between swap and marker leaves today's (unmarked, served) state.
             try:

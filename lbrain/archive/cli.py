@@ -8,6 +8,7 @@ omits these commands.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -424,7 +425,42 @@ def archives_cmd(namespace, verify):
         )
 
 
-_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd]
+@click.command(name="sweep-status")
+@click.option("--json", "as_json", is_flag=True, help="Machine-readable report.")
+def sweep_status(as_json):
+    """Dry-run of the capture-spool sweep (increment 2): what `lbrain epoch build` WOULD archive, and what already was.
+
+    Read-only. Reports staged (awaiting build), swept (receipted), bytes, the capture time range, and whether the
+    passphrase the sweep needs is available. Born of the 2026-09-15 finding that captures were staged and never read."""
+    from ..spool import STAGING_DIRNAME, staged_items, swept_items, sweep_receipt_path
+
+    home = Path(CONFIG_DIR)
+    staged = staged_items(home); swept = swept_items(home)
+    def _meta(m):
+        try: return json.loads(m.read_text(encoding="utf-8"))
+        except Exception: return {}
+    ms = [_meta(m) for m in staged]
+    times = sorted(t for t in (m.get("captured_at") for m in ms) if t)
+    sessions = sorted({str(m.get("session_id")) for m in ms if m.get("session_id")})
+    total = sum(int(m.get("size") or 0) for m in ms)
+    have_pass = bool(archive_passphrase())
+    rep = {"home": str(home), "spool": str(home / STAGING_DIRNAME), "staged": len(staged), "staged_bytes": total,
+           "staged_sessions": len(sessions), "oldest": times[0] if times else None, "newest": times[-1] if times else None,
+           "swept": len(swept), "passphrase_available": have_pass,
+           "next_build_would": ("archive %d capture(s), %d bytes" % (len(staged), total)) if (staged and have_pass)
+                               else ("skip the sweep: no archive passphrase (LBRAIN_ARCHIVE_PASSPHRASE)" if staged else "nothing to sweep")}
+    if as_json:
+        click.echo(json.dumps(rep, indent=2)); return
+    click.secho("Capture-spool sweep status (dry-run)", fg="cyan")
+    click.echo(f"  spool:            {rep['spool']}")
+    click.echo(f"  staged:           {rep['staged']} capture(s), {total} bytes, {rep['staged_sessions']} session(s)"
+               + (f", {rep['oldest']} → {rep['newest']}" if times else ""))
+    click.echo(f"  swept:            {rep['swept']} (receipted; ciphertext under archive/)")
+    click.echo(f"  passphrase:       {'available' if have_pass else 'MISSING'}")
+    click.secho(f"  next epoch build: {rep['next_build_would']}", fg=("green" if have_pass or not staged else "yellow"))
+
+
+_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status]
 
 
 def register(main) -> None:

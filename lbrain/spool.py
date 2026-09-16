@@ -154,17 +154,42 @@ def spool_capture(cfg, home: Path, payload: bytes, *, session_id: str | None,
     return SpoolResult(digest, payload_path, meta_path, skipped=False)
 
 
-def staged_items(home: Path) -> list[Path]:
-    """COMPLETE entries only (payload + meta). Torn spools don't count."""
+SWEPT_SUFFIX = ".swept.json"
+
+
+def sweep_receipt_path(meta: Path) -> Path:
+    """Increment 2 (2026-09-16): the sweep receipt sidecar for a staged entry. Its presence means the entry was
+    archived into a published epoch; the payload and meta stay (additive: nothing here deletes)."""
+    return meta.with_name(meta.name[: -len(META_SUFFIX)] + SWEPT_SUFFIX)
+
+
+def write_sweep_receipt(meta: Path, receipt: dict) -> Path:
+    """tmp→fsync→rename like every spool write; the receipt renames LAST so a crash leaves the entry staged."""
+    p = sweep_receipt_path(meta)
+    _write_then_rename(p, json.dumps(receipt, indent=2).encode("utf-8"))
+    return p
+
+
+def staged_items(home: Path, *, include_swept: bool = False) -> list[Path]:
+    """COMPLETE entries only (payload + meta). Torn spools don't count. Swept entries (a ``.swept.json`` receipt
+    beside them) are excluded unless ``include_swept``: they are archived, not awaiting a build."""
     d = staging_dir(home)
     if not d.is_dir():
         return []
     out = []
     for meta in sorted(d.glob(f"*{META_SUFFIX}")):
         stem = meta.name[: -len(META_SUFFIX)]
-        if (d / f"{stem}{PAYLOAD_SUFFIX}").is_file():
-            out.append(meta)
+        if not (d / f"{stem}{PAYLOAD_SUFFIX}").is_file():
+            continue
+        if not include_swept and sweep_receipt_path(meta).is_file():
+            continue
+        out.append(meta)
     return out
+
+
+def swept_items(home: Path) -> list[Path]:
+    """Entries that carry a sweep receipt (payload + meta + receipt)."""
+    return [m for m in staged_items(home, include_swept=True) if sweep_receipt_path(m).is_file()]
 
 
 def staged_count(home: Path) -> int:
