@@ -145,3 +145,30 @@ def test_r8_any_other_parse_error_aborts(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "parse", broken)
     res = CliRunner().invoke(cli.main, ["import"])
     assert res.exit_code != 0 and "failed to parse" in res.output and "OSError" in res.output
+
+
+# ---- CSO gen-195 countermodels that SURVIVED on 5b (2026-09-16T19:21Z): W2 and W6. The guards exist; the suite lacked them.
+
+def test_w2_an_abort_raised_as_click_exception_propagates_with_its_own_message_never_rewrapped(tmp_path, monkeypatch):
+    """W2 (N5 shape): a ClickException raised inside the scan is the abort itself; it must reach the user verbatim, not be
+    re-wrapped as 'failed to parse (ClickException: ...)'."""
+    import click
+    _home(tmp_path, monkeypatch)
+    def aborting(path, repo_root=None):
+        raise click.ClickException("STOP-MARKER-4242: the scan aborted itself")
+    monkeypatch.setattr(cli, "parse", aborting)
+    res = CliRunner().invoke(cli.main, ["import"])
+    assert res.exit_code != 0
+    assert "STOP-MARKER-4242" in res.output and "failed to parse" not in res.output and "ClickException" not in res.output
+
+
+def test_w6_retire_by_abs_path_matches_a_symlinked_spelling_through_realpath(tmp_path):
+    """W6 (Y1 depth): a row stored under the real path is retired when the scan names the file through a symlinked root."""
+    real_root = tmp_path / "real"; real_root.mkdir(); link_root = tmp_path / "link"; link_root.symlink_to(real_root)
+    (real_root / "d.md").write_text("# d\n\nbody\n", encoding="utf-8")
+    st = Store(tmp_path / "b.db", 4)
+    st.db.execute("INSERT INTO docs (rel_path, abs_path, title, doc_hash, mtime) VALUES (?, ?, ?, ?, ?)", ("d.md", str(real_root / "d.md"), "d", "h", 1.0))
+    st.db.commit()
+    assert st.retire_doc_by_abs_path(str(link_root / "d.md")) == ["d.md"]
+    assert st.db.execute("SELECT count(*) FROM docs").fetchone()[0] == 0
+    st.close()
