@@ -25,7 +25,7 @@ def _jsonl():
         json.dumps({"type": "summary", "summary": "x"}),
         _row("user", "Mount your CTO seat and do a preflight."),
         _row("assistant", [{"type": "thinking", "thinking": "secret reasoning"},
-                           {"type": "text", "text": "The seat is mounted; the A4 receipt is next."},
+                           {"type": "text", "text": "The seat is mounted; the receipt is next."},
                            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}]),
         _row("user", [{"type": "tool_result", "tool_use_id": "t1", "content": "file1 file2"}]),
         _row("assistant", [{"type": "text", "text": "Receipt passed 39/39 at 00:48Z."}]),

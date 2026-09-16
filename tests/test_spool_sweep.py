@@ -227,7 +227,7 @@ def test_s12_txid_comes_only_from_the_machine_line_never_from_a_title(tmp_path, 
 
 # ---- CSO gen-195 countermodels that SURVIVED on 2d (2026-09-16T19:21Z: V1, V6, V8, V10 -- V5 lives in the e2e file).
 # Each test fails when the named guard is removed; the guards themselves were already in the code (the holes were in
-# the suite, not the engine). Written against the CSO's exact mutations in _COLLAB/a4-engine-2d-and-5b-recheck-*/probe/cm2d.py.
+# the suite, not the engine). Written against the reviewer's exact mutations (anchored breaks that removed each guard).
 
 def test_v1_candidate_shred_refuses_a_non_positive_width(tmp_path):
     """V1: the positive-width refusal in the candidate shred is load-bearing (a width-0 vec0 table cannot be created)."""
