@@ -17,8 +17,11 @@ Contract, in order of what must never break:
 - **The spool path derives from the NAMED home, never from config
   ``db_path``** — foreign materialization is impossible by construction, not
   by gate (the 2026-09-01 db_path incident class).
-- **Additive only.** Nothing in this module deletes, and shred never stages
-  (a deferred shred is a lie). Sweep receipts are increment 2.
+- **Additive only, in this module.** Nothing here deletes, and shred never stages
+  (a deferred shred is a lie). Sweep receipts are increment 2. The ONE reclaim of a
+  payload lives in ``epoch_build._reclaim_verified`` and fires only after the archived
+  record decrypts from the home's own ciphertext + key to the meta's sha256 (2026-09-16,
+  CSO P-D: the spool must drain, not double); meta + receipt remain as the record.
 - **Content-addressed idempotency**: the same payload spools to the same name;
   a re-fire is a skip, a concurrent race is an overwrite-with-identical.
 - **Crash ordering**: payload writes tmp→fsync→rename, then the ``.meta.json``
@@ -154,17 +157,69 @@ def spool_capture(cfg, home: Path, payload: bytes, *, session_id: str | None,
     return SpoolResult(digest, payload_path, meta_path, skipped=False)
 
 
-def staged_items(home: Path) -> list[Path]:
-    """COMPLETE entries only (payload + meta). Torn spools don't count."""
+SWEPT_SUFFIX = ".swept.json"
+
+
+def sweep_receipt_path(meta: Path) -> Path:
+    """Increment 2 (2026-09-16): the sweep receipt sidecar for a staged entry. Its presence means the entry was
+    archived into a published epoch; the payload and meta stay (additive: nothing here deletes)."""
+    return meta.with_name(meta.name[: -len(META_SUFFIX)] + SWEPT_SUFFIX)
+
+
+def write_sweep_receipt(meta: Path, receipt: dict) -> Path:
+    """tmp→fsync→rename like every spool write; the receipt renames LAST so a crash leaves the entry staged."""
+    p = sweep_receipt_path(meta)
+    _write_then_rename(p, json.dumps(receipt, indent=2).encode("utf-8"))
+    return p
+
+
+def staged_items(home: Path, *, include_swept: bool = False) -> list[Path]:
+    """COMPLETE entries only (payload + meta). Torn spools don't count. Swept entries (a ``.swept.json`` receipt
+    beside them) are excluded unless ``include_swept``: they are archived, not awaiting a build."""
     d = staging_dir(home)
     if not d.is_dir():
         return []
     out = []
     for meta in sorted(d.glob(f"*{META_SUFFIX}")):
         stem = meta.name[: -len(META_SUFFIX)]
-        if (d / f"{stem}{PAYLOAD_SUFFIX}").is_file():
-            out.append(meta)
+        if not (d / f"{stem}{PAYLOAD_SUFFIX}").is_file():
+            continue
+        if not include_swept and sweep_receipt_path(meta).is_file():
+            continue
+        out.append(meta)
     return out
+
+
+def receipted_items(home: Path) -> list[Path]:
+    """Every entry that carries a sweep receipt, WITH OR WITHOUT its payload (CSO X1: a drained entry is a complete
+    record -- meta + receipt -- and must stay visible to the heal and to status)."""
+    d = staging_dir(home)
+    if not d.is_dir():
+        return []
+    return [m for m in sorted(d.glob(f"*{META_SUFFIX}")) if sweep_receipt_path(m).is_file()]
+
+
+def keyless_receipts(home: Path) -> list[tuple[Path, str]]:
+    """Increment 2b: receipted entries whose txid has no wrapped key under <home>/keys/ -- false receipts (the record is
+    undecryptable). Returned as (meta, txid) so a build can re-stage them. Drained entries included (X1)."""
+    out = []
+    keys = home / "keys"
+    for meta in receipted_items(home):
+        rp = sweep_receipt_path(meta)
+        if not rp.is_file():
+            continue
+        try:
+            txid = str(json.loads(rp.read_text(encoding="utf-8")).get("txid") or "")
+        except Exception:
+            txid = ""
+        if not txid or not (keys / f"{txid}.key").is_file():
+            out.append((meta, txid))
+    return out
+
+
+def swept_items(home: Path) -> list[Path]:
+    """Entries that carry a sweep receipt: meta + receipt, payload present or drained (X1)."""
+    return receipted_items(home)
 
 
 def staged_count(home: Path) -> int:

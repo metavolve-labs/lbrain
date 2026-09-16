@@ -2475,8 +2475,10 @@ def prune_unreachable_cmd(yes, force):
               help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
                    ".failed forensics: --keep 2 leaves CURRENT plus two.")
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
-def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes):
-    """Build a candidate, run gate v2, publish atomically."""
+@click.option("--no-sweep", "no_sweep", is_flag=True,
+              help="Leave capture-staging/ untouched (default: staged captures are archived into the new epoch; increment 2).")
+def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes, no_sweep):
+    """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
     from .epoch import BuilderBusy, EpochError
     from .epoch_build import build
 
@@ -2485,7 +2487,7 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_b
         report = build(CONFIG_DIR, cfg, delta=not full,
                        confirm_source_removed=confirm_source_removed,
                        prune_unreachable=prune_unreachable,
-                       keep=keep, max_bytes=max_bytes)
+                       keep=keep, max_bytes=max_bytes, sweep=not no_sweep)
     except BuilderBusy as e:
         click.secho(f"✗ {e}", fg="yellow")
         sys.exit(3)
@@ -2499,6 +2501,15 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_b
         fg="green")
     if report.get("durability_caveat"):
         click.secho(f"  ⚠ {report['durability_caveat']}", fg="yellow")
+    sw = report.get("sweep")
+    if sw:
+        if sw.get("skipped"):
+            click.secho(f"  ⚠ capture spool NOT swept: {sw['skipped']} ({sw['staged']} staged)", fg="yellow")
+        else:
+            click.echo(f"  capture spool: {sw['swept']} archived, {sw['already']} already archived, {sw['failed']} failed, "
+                       f"{sw['bytes']} bytes; {sw.get('receipts', 0)} receipt(s), {sw.get('ciphertext_files_copied', 0)} ciphertext file(s) copied")
+            for f in sw.get("failures", []):
+                click.secho(f"    ✗ {f}", fg="red")
 
 
 @epoch.command("status")
