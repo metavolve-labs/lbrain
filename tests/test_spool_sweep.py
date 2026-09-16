@@ -223,3 +223,67 @@ def test_s12_txid_comes_only_from_the_machine_line_never_from_a_title(tmp_path, 
     sw = report["sweep"]
     assert sw["failed"] == 2 and all("no LBRAIN-TXID line" in f for f in sw["failures"])
     assert sw["swept"] == 1 and plan[0]["txid"] == "R" * 43
+
+
+# ---- CSO gen-195 countermodels that SURVIVED on 2d (2026-09-16T19:21Z: V1, V6, V8, V10 -- V5 lives in the e2e file).
+# Each test fails when the named guard is removed; the guards themselves were already in the code (the holes were in
+# the suite, not the engine). Written against the CSO's exact mutations in _COLLAB/a4-engine-2d-and-5b-recheck-*/probe/cm2d.py.
+
+def test_v1_candidate_shred_refuses_a_non_positive_width(tmp_path):
+    """V1: the positive-width refusal in the candidate shred is load-bearing (a width-0 vec0 table cannot be created)."""
+    db = tmp_path / "cand.db"; eb._connect_vec(db).close()
+    for bad in (0, -1, None, "4"):
+        with pytest.raises(eb.EpochError) as ei:
+            eb._shred_in_candidate(db, "T" * 43, bad)   # type: ignore[arg-type]
+        assert "not a positive integer" in str(ei.value)
+    con = eb._connect_vec(db)
+    assert con.execute("SELECT name FROM sqlite_master WHERE name='vec_archives'").fetchone() is None   # nothing was created on refusal
+    con.close()
+
+
+def test_v6_unreadable_prior_archive_index_aborts_the_carry_never_carries_zero(tmp_path):
+    """V6 (X2): a prior whose archive index cannot be READ must abort, not look like an empty index (carried 0)."""
+    import sqlite3
+    prior = tmp_path / "prior.db"; cand = tmp_path / "cand.db"
+    con = sqlite3.connect(prior)
+    con.execute("CREATE TABLE archives (archive_id INTEGER PRIMARY KEY, txid TEXT, embedded INTEGER NOT NULL DEFAULT 0, shredded INTEGER NOT NULL DEFAULT 0)")
+    con.execute("INSERT INTO archives (txid, embedded) VALUES ('T1', 1)")
+    con.execute("CREATE TABLE vec_archives (rowid_only INTEGER /* float[8] */)")   # the DDL declares a width (comment kept inside the parens); no embedding column, so the read fails
+    con.commit(); con.close()
+    eb._connect_vec(cand).close()
+    with pytest.raises(eb.EpochError) as ei:
+        eb._carry_archive_index(prior, cand)
+    assert "unreadable" in str(ei.value)
+
+
+def test_v8_prior_with_rows_but_no_ddl_width_is_refused_never_guessed(tmp_path):
+    """V8 (X4): rows in the prior and no vec_archives DDL width -> refusal, not a guessed 1536."""
+    import sqlite3
+    from lbrain.archive.storage import ArchiveStore
+    prior = tmp_path / "prior.db"; cand = tmp_path / "cand.db"
+    con = eb._connect_vec(prior); con.row_factory = sqlite3.Row
+    st = ArchiveStore(con, 8); st.ensure_schema()
+    st.insert_archive(txid="T1", namespace="private", title="one", snapshot="## user\nhello", tags={}, n_bytes=5, created=1.0, transport="local", source_hash="h1")
+    con.execute("DROP TABLE vec_archives"); con.commit(); con.close()   # rows remain (embedded=0), the width DDL is gone
+    eb._connect_vec(cand).close()
+    with pytest.raises(eb.EpochError) as ei:
+        eb._carry_archive_index(prior, cand)
+    assert "refusing to guess a width" in str(ei.value)
+    c2 = eb._connect_vec(cand)
+    assert c2.execute("SELECT name FROM sqlite_master WHERE name='vec_archives'").fetchone() is None   # no table at a guessed width
+    c2.close()
+
+
+def test_v10_hostile_title_that_prints_a_machine_shaped_line_first_loses_to_the_last_machine_line(tmp_path, monkeypatch):
+    """V10 (X7): the capture CLI prints its machine line LAST; a title carrying a 'LBRAIN-TXID <43>' line earlier in the
+    output must not win. The txid is ids[-1], never ids[0]."""
+    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); _stage(home, 1)
+    import lbrain.archive.cli as acli
+    monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
+    hostile_line = "LBRAIN-TXID " + "H" * 43
+    # the title carries newlines, so the CLI's prose echo puts a COMPLETE machine-shaped line before the real one
+    out = f"✓ Captured 'title with a newline\n{hostile_line}\nand more' → local\nLBRAIN-TXID {'R' * 43}\n"
+    monkeypatch.setattr(eb, "_run_cli", lambda args, sh, lb, lock=None, **kw: out)
+    report: dict = {}
+    plan = eb._sweep_spool(home, staging, "lbrain", None, report)
+    assert report["sweep"]["swept"] == 1 and plan[0]["txid"] == "R" * 43

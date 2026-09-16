@@ -126,3 +126,17 @@ def test_e6_sweep_status_never_resolves_a_secret_and_never_fails(tmp_path, monke
     assert out.returncode == 0, out.stdout + out.stderr
     rep = json.loads(out.stdout[out.stdout.index("{"):])
     assert rep["passphrase"].startswith("configured (gcp-secret reference, not resolved") and "if the resolver fails the captures stay staged" in rep["next_build_would"]
+
+
+def test_v5_build_passes_the_configured_embedding_width_to_the_sweep(tmp_path, monkeypatch):
+    """V5 (CSO gen-195 countermodel): the build call site must hand `_sweep_spool` cfg.embedding_dim (384 here), never a
+    hardcoded 1536. Spies on the real call through build() with sweeping on."""
+    home = _home(tmp_path); _stage(home, "sess-v5", _jsonl())
+    seen = {}
+    real = eb._sweep_spool
+    def spy(home_, staging, lbrain_bin, lock, report, dim=0):
+        seen["dim"] = dim; return real(home_, staging, lbrain_bin, lock, report, dim=dim)
+    monkeypatch.setattr(eb, "_sweep_spool", spy)
+    rep = _build(home, tmp_path, delta=False)
+    assert rep["published"] and rep["sweep"]["swept"] == 1
+    assert seen["dim"] == 384 == Config.load().embedding_dim
