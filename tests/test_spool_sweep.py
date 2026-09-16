@@ -4,7 +4,7 @@ Born of the CSO's mine 2026-09-15T18:46Z: 29 captures / 306 MB staged on one hom
 nothing; four strings promised a sweep in the present tense. These tests pin the contract:
 
   S1  a sweep receipt beside an entry removes it from staged_items() and staged_count(); include_swept restores it
-  S2  swept_items() lists exactly the receipted entries; a torn entry is never listed either way
+  S2  swept_items() lists every receipted entry, payload present or drained (X1); a torn entry (no payload, no receipt) is nowhere
   S3  _sweep_spool: no passphrase -> nothing runs, report says why, plan empty, entries stay staged (loud skip)
   S4  _sweep_spool: with a passphrase, one `archive capture` per entry runs IN THE STAGING HOME, the txid is parsed,
       "already captured" is counted separately, a failing capture is counted and named, and NO receipt exists yet
@@ -47,13 +47,15 @@ def test_s1_receipt_hides_entry_from_staged_counts(tmp_path):
     assert sweep_receipt_path(metas[1]).is_file() and json.loads(sweep_receipt_path(metas[1]).read_text())["epoch_id"] == "E1"
 
 
-def test_s2_swept_items_lists_exactly_the_receipted_and_never_a_torn_entry(tmp_path):
+def test_s2_swept_items_lists_exactly_the_receipted_and_a_torn_entry_is_nowhere(tmp_path):
+    """A receipt is the completeness marker of a swept record: with or without its payload (drained, X1) it is swept.
+    A torn entry is meta WITHOUT payload and WITHOUT receipt: it is neither staged nor swept."""
     home = tmp_path / "home"; metas = _stage(home, 3)
-    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "cd" * 16})
-    # torn: receipt + meta but the payload is gone
-    write_sweep_receipt(metas[2], {"epoch_id": "E1", "txid": "ef" * 16}); (metas[2].with_name(metas[2].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX)).unlink()
-    assert swept_items(home) == [metas[0]]
-    assert staged_items(home) == [metas[1]]
+    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "C" * 43})
+    write_sweep_receipt(metas[2], {"epoch_id": "E1", "txid": "E" * 43}); (metas[2].with_name(metas[2].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX)).unlink()   # drained
+    torn = _stage(home, 4)[3]; torn.with_name(torn.name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX).unlink()   # torn: no payload, no receipt
+    assert swept_items(home) == [metas[0], metas[2]]
+    assert staged_items(home) == [metas[1]] and torn not in staged_items(home, include_swept=True)
 
 
 def test_s3_no_passphrase_is_a_loud_skip_and_touches_nothing(tmp_path, monkeypatch):
@@ -79,11 +81,11 @@ def test_s4_sweep_runs_one_capture_per_entry_in_staging_and_writes_no_receipt_ye
         seen.append((args, staging_home))
         i = len(seen)
         if i == 2:
-            return f"· already captured: t1 txid {'cd' * 32}"   # P-A: the full txid, as the fixed CLI prints it
+            return f"· already captured: t1 ({'B' * 16}…)\nLBRAIN-TXID {'B' * 43}\n"   # P-A: the machine line, as the fixed CLI prints it
         if i == 3:
             raise eb.EpochError("`lbrain archive capture` failed in staging (rc 2):\n✗ boom")
-        (staging_home / "archive").mkdir(exist_ok=True); (staging_home / "archive" / ("aa" * 32 + ".bin")).write_bytes(b"ct")
-        return f"✓ Captured 't0' → local\n  txid {'aa' * 32}  ·  13 bytes  ·  snapshot 5 chars indexed\n"
+        (staging_home / "archive").mkdir(exist_ok=True); (staging_home / "archive" / ("A" * 43 + ".bin")).write_bytes(b"ct")
+        return f"✓ Captured 't0' → local\n  txid {'A' * 43}  ·  13 bytes  ·  snapshot 5 chars indexed\nLBRAIN-TXID {'A' * 43}\n"
     monkeypatch.setattr(eb, "_run_cli", fake_run)
     report: dict = {}
     plan = eb._sweep_spool(home, staging, "lbrain", None, report)
@@ -91,7 +93,7 @@ def test_s4_sweep_runs_one_capture_per_entry_in_staging_and_writes_no_receipt_ye
     assert "--from-file" in seen[0][0] and "--session-id" in seen[0][0] and "sid-0" in seen[0][0]
     sw = report["sweep"]
     assert (sw["staged"], sw["swept"], sw["already"], sw["failed"]) == (3, 1, 1, 1) and sw["failures"][0].startswith(metas[2].name)
-    assert len(plan) == 2 and plan[0]["txid"] == "aa" * 32 and plan[1]["already"] is True and plan[1]["txid"] == "cd" * 32
+    assert len(plan) == 2 and plan[0]["txid"] == "A" * 43 and plan[1]["already"] is True and plan[1]["txid"] == "B" * 43
     assert staged_count(home) == 3 and swept_items(home) == []   # receipts only after publish
 
 
@@ -119,108 +121,105 @@ def test_s6_build_signature_carries_the_no_sweep_switch():
     assert inspect.signature(eb.build).parameters["sweep"].default is True
 
 
-def test_s7_keyless_receipt_is_healed_and_recaptured(tmp_path, monkeypatch):
+def test_s7_keyless_receipt_is_healed_and_recaptured_on_a_table_less_candidate(tmp_path, monkeypatch):
+    """X5: the heal must run on a --full candidate that has NO archive tables yet (the exact shape 2b was written for)."""
     import sqlite3
     from lbrain.spool import keyless_receipts
     home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 2)
-    (home / "keys").mkdir(); (home / "keys" / ("ok" * 16 + ".key")).write_bytes(b"k")
-    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "ok" * 16})       # genuine: key present
-    write_sweep_receipt(metas[1], {"epoch_id": "E1", "txid": "bad" * 10})      # false: no key
-    assert [t for _, t in keyless_receipts(home)] == ["bad" * 10]
-    # a candidate db with the keyless row present
-    con = eb._connect_vec(staging / "brain.db"); con.row_factory = sqlite3.Row
-    from lbrain.archive.storage import ArchiveStore
-    st = ArchiveStore(con, 4); st.ensure_schema()
-    st.insert_archive(txid="bad" * 10, namespace="private", title="t1", snapshot="snap", tags={}, n_bytes=13, created=0.0, transport="local", source_hash="h")
-    con.commit(); con.close()
+    (home / "keys").mkdir(); (home / "keys" / ("K" * 43 + ".key")).write_bytes(b"k")
+    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "K" * 43})       # genuine: key present
+    write_sweep_receipt(metas[1], {"epoch_id": "E1", "txid": "X" * 43})       # false: no key
+    assert [t for _, t in keyless_receipts(home)] == ["X" * 43]
+    eb._connect_vec(staging / "brain.db").close()   # a bare candidate: NO archive tables (the --full shape)
     import lbrain.archive.cli as acli
     monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
     seen = []
     def fake_run(args, staging_home, lbrain_bin, lock=None, **kw):
-        seen.append(args); return f"✓ Captured 't1' → local\n  txid {'new' * 10}  ·  13 bytes\n"
+        seen.append(args); return f"✓ Captured 't1' → local\nLBRAIN-TXID {'N' * 43}\n"
     monkeypatch.setattr(eb, "_run_cli", fake_run)
     report: dict = {}
-    plan = eb._sweep_spool(home, staging, "lbrain", None, report)
+    plan = eb._sweep_spool(home, staging, "lbrain", None, report, dim=4)
     assert report["sweep"]["healed_keyless"] == 1 and report["sweep"]["staged"] == 1 and len(seen) == 1   # only the false one re-staged
     assert not sweep_receipt_path(metas[1]).is_file() and sweep_receipt_path(metas[0]).is_file()
     con = eb._connect_vec(staging / "brain.db")
-    assert con.execute("SELECT shredded FROM archives WHERE txid=?", ("bad" * 10,)).fetchone()[0] == 1
+    assert con.execute("SELECT sql FROM sqlite_master WHERE name='vec_archives'").fetchone()[0].find("float[4]") > 0   # created at the REAL width
     con.close()
-    assert plan[0]["txid"] == "new" * 10
+    assert plan[0]["txid"] == "N" * 43
 
 
-def test_s8_torn_meta_is_counted_and_named_and_the_sweep_goes_on(tmp_path, monkeypatch):
-    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 2)
-    metas[0].write_text("{not json")   # torn sidecar (P-B)
+def test_s7b_heal_failure_is_loud_never_a_normal_report(tmp_path, monkeypatch):
+    """X5: a heal that cannot run must abort the build, not file an error and report staged: 0."""
+    import pytest
+    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 1)
+    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "X" * 43})   # false receipt, no key
+    eb._connect_vec(staging / "brain.db").close()
     import lbrain.archive.cli as acli
     monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
-    monkeypatch.setattr(eb, "_run_cli", lambda args, sh, lb, lock=None, **kw: f"✓ Captured\n  txid {'ab' * 32}  ·  13 bytes\n")
+    monkeypatch.setattr(eb, "_run_cli", lambda *a, **k: "")
     report: dict = {}
-    plan = eb._sweep_spool(home, staging, "lbrain", None, report)
-    sw = report["sweep"]
-    assert sw["failed"] == 1 and metas[0].name in sw["failures"][0] and "JSONDecodeError" in sw["failures"][0]
-    assert sw["swept"] == 1 and len(plan) == 1   # the other entry was swept; nothing aborted
+    with pytest.raises(eb.EpochError) as ei:
+        eb._sweep_spool(home, staging, "lbrain", None, report, dim=0)   # width 0 cannot create a vec table
+    assert "heal FAILED" in str(ei.value) and report["sweep_heal_errors"] and sweep_receipt_path(metas[0]).is_file()   # the false receipt is left for the operator to see, the build stopped
 
 
-def test_s9_refusal_forensics_never_retain_keys(tmp_path):
-    staging = tmp_path / "staging"; (staging / "archive").mkdir(parents=True); (staging / "keys").mkdir()
-    (staging / "archive" / "x.bin").write_bytes(b"ct"); (staging / "keys" / "x.key").write_bytes(b"wrapped"); (staging / "brain.db").write_bytes(b"db")
-    fdir = tmp_path / "E1.failed"
-    eb._retain_failed(staging, fdir)
-    assert (fdir / "archive" / "x.bin").is_file() and (fdir / "brain.db").is_file()
-    assert not (fdir / "keys").exists()   # P-C
-
-
-def test_s10_reclaim_only_after_a_verified_round_trip(tmp_path, monkeypatch):
-    from lbrain.archive import crypto
-    from lbrain.archive.archiver import Keystore, LocalTransport
+def test_x1_drained_entries_stay_visible_to_heal_and_status(tmp_path):
+    from lbrain.spool import keyless_receipts, receipted_items
     home = tmp_path / "home"; metas = _stage(home, 2)
-    payload0 = metas[0].with_name(metas[0].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX); payload1 = metas[1].with_name(metas[1].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX)
-    import hashlib
-    for m, p in ((metas[0], payload0), (metas[1], payload1)):
-        d = json.loads(m.read_text()); d["sha256"] = hashlib.sha256(p.read_bytes()).hexdigest(); m.write_text(json.dumps(d))
-    tr = LocalTransport(home / "archive"); ks = Keystore(home / "keys")
-    env0, key0 = crypto.encrypt(payload0.read_bytes(), "pw"); tx0 = tr.put(env0, {}); ks.put(tx0, key0)
-    env1, key1 = crypto.encrypt(b"DIFFERENT BYTES", "pw"); tx1 = tr.put(env1, {}); ks.put(tx1, key1)   # archived bytes != spooled bytes
+    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "X" * 43})
+    metas[0].with_name(metas[0].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX).unlink()   # drained
+    assert receipted_items(home) == [metas[0]] and swept_items(home) == [metas[0]]
+    assert [t for _, t in keyless_receipts(home)] == ["X" * 43]   # the false receipt on a drained entry is still found
+    assert staged_items(home) == [metas[1]] and staged_count(home) == 1
+
+
+def test_s10b_no_key_means_no_reclaim(tmp_path, monkeypatch):
+    """M12: the spool never drains a record whose wrapped key is missing."""
+    home = tmp_path / "home"; metas = _stage(home, 1)
+    payload = metas[0].with_name(metas[0].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX)
+    (home / "archive").mkdir(); (home / "archive" / ("Z" * 43 + ".bin")).write_bytes(b"ct")
     import lbrain.archive.cli as acli
     monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
     report = {"sweep": {}}
-    plan = [{"meta": str(metas[0]), "sha256": json.loads(metas[0].read_text())["sha256"], "txid": tx0},
-            {"meta": str(metas[1]), "sha256": json.loads(metas[1].read_text())["sha256"], "txid": tx1}]
-    n = eb._reclaim_verified(home, plan, report)
-    assert n == 1 and not payload0.exists() and payload1.exists()   # P-D: drained only where the round trip matched
-    assert report["sweep"]["reclaim_mismatch"] == [tx1]
-    assert metas[0].is_file()   # meta stays as the record
+    n = eb._reclaim_verified(home, [{"meta": str(metas[0]), "sha256": "x", "txid": "Z" * 43}], report)
+    assert n == 0 and payload.exists()
 
 
-def test_s11_full_build_carries_the_archive_index(tmp_path):
-    import sqlite3
+def test_s11b_carry_fails_closed_on_lost_vectors_and_uses_the_priors_width(tmp_path):
+    """X2/X3/X4: an embedded row without its vector aborts the carry; the candidate's vec width comes from the prior's DDL."""
+    import pytest, sqlite3
     prior = tmp_path / "prior.db"; cand = tmp_path / "cand.db"
     con = eb._connect_vec(prior); con.row_factory = sqlite3.Row
     from lbrain.archive.storage import ArchiveStore
-    st = ArchiveStore(con, 4); st.ensure_schema()
+    st = ArchiveStore(con, 8); st.ensure_schema()
     st.insert_archive(txid="T1", namespace="private", title="one", snapshot="## user\nhello", tags={}, n_bytes=5, created=1.0, transport="local", source_hash="h1")
-    st.write_archive_embedding("T1", b"\x00\x00\x80\x3f" * 4)
+    st.write_archive_embedding("T1", b"\x00\x00\x80\x3f" * 8)
+    con.execute("DELETE FROM vec_archives")   # the vector is lost but the row says embedded=1
     con.commit(); con.close()
-    c2 = eb._connect_vec(cand); c2.close()
-    n = eb._carry_archive_index(prior, cand)   # P-F
-    assert n == 1
-    c3 = eb._connect_vec(cand); c3.row_factory = sqlite3.Row
-    assert c3.execute("SELECT txid, embedded FROM archives").fetchone()["txid"] == "T1"
-    assert c3.execute("SELECT count(*) FROM fts_archives WHERE txid='T1'").fetchone()[0] == 1
+    eb._connect_vec(cand).close()
+    with pytest.raises(eb.EpochError) as ei:
+        eb._carry_archive_index(prior, cand)
+    assert "no vector" in str(ei.value)
+    # restore the vector: the carry succeeds and the candidate's width is the prior's (8), not a default
+    con = eb._connect_vec(prior); con.row_factory = sqlite3.Row
+    ArchiveStore(con, 8).write_archive_embedding("T1", b"\x00\x00\x80\x3f" * 8); con.commit(); con.close()
+    assert eb._carry_archive_index(prior, cand) == 1
+    c3 = eb._connect_vec(cand)
+    assert "float[8]" in c3.execute("SELECT sql FROM sqlite_master WHERE name='vec_archives'").fetchone()[0]
     assert c3.execute("SELECT count(*) FROM vec_archives").fetchone()[0] == 1
     c3.close()
 
 
-def test_s12_already_captured_must_print_the_full_txid(tmp_path, monkeypatch):
-    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 2)
+def test_s12_txid_comes_only_from_the_machine_line_never_from_a_title(tmp_path, monkeypatch):
+    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 3)
     import lbrain.archive.cli as acli
     monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
-    outs = ["· already captured: t0 (0123456789abcdef…)",            # the OLD prefix form (P-A): must be a FAILED entry, never a receipt
-            f"· already captured: t1 txid {'cd' * 32}"]              # the fixed form: full txid
+    hostile = "txid " + "H" * 43
+    outs = ["· already captured: t0 (0123456789abcdef…)",                                  # old prefix form: no machine line -> FAILED
+            f"✓ Captured '{hostile}' → local\n  txid {hostile[5:]}  ·  13 bytes\nLBRAIN-TXID {'R' * 43}\n",   # X7: a title that imitates the prose; the machine line wins
+            f"LBRAIN-TXID {'tooshort'}\n"]                                                 # M2: a token that is not a 43-char base64url id -> FAILED
     monkeypatch.setattr(eb, "_run_cli", lambda args, sh, lb, lock=None, **kw: outs.pop(0))
     report: dict = {}
     plan = eb._sweep_spool(home, staging, "lbrain", None, report)
     sw = report["sweep"]
-    assert sw["failed"] == 1 and "no full txid" in sw["failures"][0] and metas[0].name in sw["failures"][0]
-    assert sw["already"] == 1 and plan[0]["txid"] == "cd" * 32 and plan[0]["already"] is True
+    assert sw["failed"] == 2 and all("no LBRAIN-TXID line" in f for f in sw["failures"])
+    assert sw["swept"] == 1 and plan[0]["txid"] == "R" * 43

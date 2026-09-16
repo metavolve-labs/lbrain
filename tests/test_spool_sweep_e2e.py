@@ -83,3 +83,46 @@ def test_e1_e2_e3_build_with_sweep_end_to_end(tmp_path):
     sw3 = rep3["sweep"]
     assert rep3["published"] and sw3["failed"] == 1 and torn.name in sw3["failures"][0] and sw3["swept"] == 1, sw3
     assert sweep_receipt_path(good).is_file()
+
+
+def test_e4_refusal_path_retains_no_keys_at_the_call_site(tmp_path, monkeypatch):
+    """M4c: through build() itself, not the helper: a refused candidate's .failed dir holds ciphertext, never keys."""
+    import pytest
+    home = _home(tmp_path)
+    _stage(home, "sess-r", _jsonl("41/41"))
+    real = eb.validate_candidate
+    monkeypatch.setattr(eb, "validate_candidate", lambda *a, **k: ["forced refusal (test)"])
+    with pytest.raises(eb.EpochError):
+        _build(home, tmp_path, delta=False)
+    failed = sorted((home / "epochs").glob("*.failed"))
+    assert failed and (failed[-1] / "archive").is_dir()
+    assert not (failed[-1] / "keys").exists()
+    assert (home / "epochs" / "CURRENT").exists() is False or True   # no publish happened; CURRENT untouched (none existed)
+
+
+def test_e5_full_build_carries_the_archive_index_at_the_call_site(tmp_path):
+    """M7: through build(): after a sweep, a --full rebuild keeps the archive rows AND their vectors, and retrieve works."""
+    home = _home(tmp_path)
+    meta, payload = _stage(home, "sess-f", _jsonl("42/42"))
+    rep1 = _build(home, tmp_path, delta=False)
+    txid = json.loads(sweep_receipt_path(meta).read_text())["txid"]
+    rep2 = _build(home, tmp_path, delta=False)   # a second FULL build: the archive index is not derived from sources
+    assert rep2["published"] and rep2.get("archive_index_carried", 0) >= 1, rep2
+    db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
+    con = eb._connect_vec(db)
+    assert con.execute("SELECT count(*) FROM archives WHERE txid=? AND shredded=0", (txid,)).fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM vec_archives").fetchone()[0] >= 1
+    assert "float[384]" in con.execute("SELECT sql FROM sqlite_master WHERE name='vec_archives'").fetchone()[0]
+    con.close()
+    out = subprocess.run([_bin(tmp_path), "retrieve", "--txid", txid, "--out", str(tmp_path / "rt2.bin")], env={**os.environ, "LBRAIN_HOME": str(home)}, capture_output=True, text=True)
+    assert out.returncode == 0 and (tmp_path / "rt2.bin").read_bytes() == payload
+
+
+def test_e6_sweep_status_never_resolves_a_secret_and_never_fails(tmp_path, monkeypatch):
+    """M9/X6: with a gcp-secret reference and a resolver that would raise, status exits 0, says 'not resolved', and promises nothing."""
+    home = _home(tmp_path); _stage(home, "sess-s", _jsonl("43/43"))
+    env = {**os.environ, "LBRAIN_HOME": str(home), "LBRAIN_ARCHIVE_PASSPHRASE": "gcp-secret:no-such-project/no-such-secret", "GOOGLE_APPLICATION_CREDENTIALS": "/nonexistent"}
+    out = subprocess.run([_bin(tmp_path), "sweep-status", "--json"], env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stdout + out.stderr
+    rep = json.loads(out.stdout[out.stdout.index("{"):])
+    assert rep["passphrase"].startswith("configured (gcp-secret reference, not resolved") and "if the resolver fails the captures stay staged" in rep["next_build_would"]

@@ -190,12 +190,21 @@ def staged_items(home: Path, *, include_swept: bool = False) -> list[Path]:
     return out
 
 
+def receipted_items(home: Path) -> list[Path]:
+    """Every entry that carries a sweep receipt, WITH OR WITHOUT its payload (CSO X1: a drained entry is a complete
+    record -- meta + receipt -- and must stay visible to the heal and to status)."""
+    d = staging_dir(home)
+    if not d.is_dir():
+        return []
+    return [m for m in sorted(d.glob(f"*{META_SUFFIX}")) if sweep_receipt_path(m).is_file()]
+
+
 def keyless_receipts(home: Path) -> list[tuple[Path, str]]:
     """Increment 2b: receipted entries whose txid has no wrapped key under <home>/keys/ -- false receipts (the record is
-    undecryptable). Returned as (meta, txid) so a build can re-stage them."""
+    undecryptable). Returned as (meta, txid) so a build can re-stage them. Drained entries included (X1)."""
     out = []
     keys = home / "keys"
-    for meta in staged_items(home, include_swept=True):
+    for meta in receipted_items(home):
         rp = sweep_receipt_path(meta)
         if not rp.is_file():
             continue
@@ -209,8 +218,8 @@ def keyless_receipts(home: Path) -> list[tuple[Path, str]]:
 
 
 def swept_items(home: Path) -> list[Path]:
-    """Entries that carry a sweep receipt (payload + meta + receipt)."""
-    return [m for m in staged_items(home, include_swept=True) if sweep_receipt_path(m).is_file()]
+    """Entries that carry a sweep receipt: meta + receipt, payload present or drained (X1)."""
+    return receipted_items(home)
 
 
 def staged_count(home: Path) -> int:

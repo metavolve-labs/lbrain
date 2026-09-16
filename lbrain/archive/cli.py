@@ -244,8 +244,8 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
         store.close()
 
     if res.skipped:
-        # full txid, never a prefix: the epoch sweep parses this line (CSO P-A, 2026-09-16: a 16-char prefix became a "txid")
-        click.echo(f"· already captured: {label} txid {res.txid}")
+        click.echo(f"· already captured: {label} ({res.txid[:16]}…)")
+        click.echo(f"LBRAIN-TXID {res.txid}")   # machine line, own line, last: the only thing the epoch sweep parses (CSO P-A/X7)
         return
     if quiet:
         click.echo(f"✓ captured {label} → {res.transport}:{res.txid[:16]}… ({res.n_bytes}B)")
@@ -253,6 +253,7 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
         click.secho(f"✓ Captured '{res.title}' → {res.transport}", fg="green")
         click.echo(f"  txid {res.txid}  ·  {res.n_bytes} bytes  ·  snapshot {res.snapshot_chars} chars indexed")
         click.echo(f"  recall: lbrain recall \"<query>\"   ·   full: lbrain retrieve --txid {res.txid}")
+    click.echo(f"LBRAIN-TXID {res.txid}")   # machine line, own line, last (CSO P-A/X7)
 
 
 @click.command(name="recall")
@@ -458,8 +459,10 @@ def sweep_status(as_json):
     rep = {"home": str(home), "spool": str(home / STAGING_DIRNAME), "staged": len(staged), "staged_bytes": total,
            "staged_sessions": len(sessions), "oldest": times[0] if times else None, "newest": times[-1] if times else None,
            "swept": len(swept), "passphrase": pp_state, "passphrase_configured": have_pass,
-           "next_build_would": ("archive %d capture(s), %d bytes" % (len(staged), total)) if (staged and have_pass)
-                               else ("skip the sweep: no archive passphrase (LBRAIN_ARCHIVE_PASSPHRASE)" if staged else "nothing to sweep")}
+           "next_build_would": ("nothing to sweep" if not staged else
+                               ("skip the sweep: no archive passphrase (LBRAIN_ARCHIVE_PASSPHRASE)" if not have_pass else
+                                ("attempt to archive %d capture(s), %d bytes AFTER resolving the gcp-secret reference; if the resolver fails the captures stay staged (status does not resolve it)" % (len(staged), total)
+                                 if raw.startswith(("gcp-secret:", "gcp:")) else "archive %d capture(s), %d bytes" % (len(staged), total))))}
     if spool_err: rep["spool_error"] = spool_err
     if as_json:
         click.echo(json.dumps(rep, indent=2)); return

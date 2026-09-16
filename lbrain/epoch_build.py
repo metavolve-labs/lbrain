@@ -331,27 +331,35 @@ def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
     """Copy the Tier-2 archive index (archives rows, their FTS rows and vectors) from the prior epoch into a full-build
     candidate. Returns rows carried (0 when the prior has no archive tables). Content-addressed rows: INSERT OR IGNORE."""
     import sqlite3
+    # CSO X2: a prior WITHOUT archive tables carries 0 (stated); a prior whose archive index cannot be READ aborts the
+    # build -- a lost index must never look like an empty one. CSO X3/X4: the width comes from the prior's own DDL
+    # and every embedded row's vector must read back, or the carry aborts; no default width, no silent drop.
+    width = _archive_vec_width(prior_db)
+    pc = _connect_vec(prior_db); pc.row_factory = sqlite3.Row
     try:
-        pc = _connect_vec(prior_db); pc.row_factory = sqlite3.Row
         has = pc.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='archives'").fetchone()
         if not has:
-            pc.close(); return 0
+            return 0
         rows = [dict(r) for r in pc.execute("SELECT * FROM archives")]
-        vecs = {}
-        try:
-            for r in pc.execute("SELECT rowid, embedding FROM vec_archives"): vecs[r[0]] = r[1]
-        except Exception:
-            vecs = {}
+        vecs = {r[0]: r[1] for r in pc.execute("SELECT rowid, embedding FROM vec_archives")} if width else {}
+    except Exception as e:
+        raise EpochError(f"prior archive index unreadable ({type(e).__name__}: {str(e)[:160]}); refusing to publish a candidate without it")
+    finally:
         pc.close()
-    except Exception:
-        return 0
     if not rows:
         return 0
+    embedded_ids = {r["archive_id"] for r in rows if r.get("embedded") and not r.get("shredded")}
+    missing_vecs = sorted(embedded_ids - set(vecs))
+    if missing_vecs:
+        raise EpochError(f"prior archive index: {len(missing_vecs)} embedded row(s) have no vector in vec_archives ({missing_vecs[:5]}); refusing a carry that would lose them")
+    if vecs and width and any(len(b) != width * 4 for b in vecs.values()):
+        raise EpochError(f"prior archive index: vector bytes do not match the declared width {width}; refusing the carry")
     con = _connect_vec(staging_db); con.row_factory = sqlite3.Row
     try:
         from .archive.storage import ArchiveStore
-        dim = len(next(iter(vecs.values()))) // 4 if vecs else 0
-        st = ArchiveStore(con, dim or 1536); st.ensure_schema()
+        if not width:
+            raise EpochError("prior archive index has rows but no vec_archives DDL width; refusing to guess a width")
+        st = ArchiveStore(con, width); st.ensure_schema()
         n = 0
         for r in rows:
             cols = ", ".join(r.keys()); ph = ", ".join("?" for _ in r)
@@ -369,16 +377,34 @@ def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
         con.close()
 
 
-def _shred_in_candidate(staging_db: Path, txid: str) -> None:
+def _archive_vec_width(db: Path) -> int | None:
+    """The declared width of vec_archives in a db, from its own DDL (`float[N]`); None when the table is absent."""
+    import sqlite3
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT sql FROM sqlite_master WHERE name='vec_archives'").fetchone()
+    finally:
+        con.close()
+    if not row or not row[0]:
+        return None
+    m = re.search(r"float\[(\d+)\]", row[0])
+    return int(m.group(1)) if m else None
+
+
+def _shred_in_candidate(staging_db: Path, txid: str, dim: int) -> None:
     """Mark a keyless archive row shredded in the CANDIDATE db (never the published one): its ciphertext cannot be
-    decrypted, so the index must stop presenting it and the capture must not skip its payload as already archived."""
+    decrypted, so the index must stop presenting it and the capture must not skip its payload as already archived.
+    `dim` is the configured embedding width (CSO X5: a width-0 vec0 table cannot be created; a --full candidate has
+    no archive tables until this creates them at the real width)."""
     if not staging_db.exists():
         return
     import sqlite3
+    if not isinstance(dim, int) or dim <= 0:
+        raise EpochError(f"candidate shred: embedding width {dim!r} is not a positive integer; refusing to create a vec table of that width")
     con = _connect_vec(staging_db); con.row_factory = sqlite3.Row   # the archive tables need sqlite-vec loaded
     try:
         from .archive.storage import ArchiveStore
-        st = ArchiveStore(con, 0); st.ensure_schema()   # P-F: a --full candidate carries no archive tables until something creates them
+        st = ArchiveStore(con, dim); st.ensure_schema()
         if st.get_archive(txid) is not None:
             st.mark_archive_shredded(txid, purge_snapshot=True)
         con.commit()
@@ -386,7 +412,7 @@ def _shred_in_candidate(staging_db: Path, txid: str) -> None:
         con.close()
 
 
-def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict) -> list[dict]:
+def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict, dim: int = 0) -> list[dict]:
     """Archive every staged capture into the staging candidate. Returns the plan (one dict per entry, with the txid the
     capture reported) for `_finish_sweep` after publish. Skips loudly, never silently: no passphrase = nothing swept."""
     from .spool import staged_items, keyless_receipts, sweep_receipt_path
@@ -394,14 +420,19 @@ def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict)
     # cannot be decrypted (the first live sweep left every wrapped key in the staging home). Such entries are re-staged:
     # the false receipt is removed and the keyless index row is marked shredded in the CANDIDATE so the capture does not
     # skip it as "already archived". Additive: the orphaned ciphertext stays under home/archive/.
-    healed = []
+    healed = []; heal_errors = []
     for meta, txid in keyless_receipts(home):
         try:
-            _shred_in_candidate(staging / "brain.db", txid)   # first: if this fails the false receipt stays and is reported
+            _shred_in_candidate(staging / "brain.db", txid, dim)   # first: if this fails the false receipt stays
             sweep_receipt_path(meta).unlink()
             healed.append(txid)
         except Exception as e:
-            report.setdefault("sweep_heal_errors", []).append(f"{meta.name}: {e}")
+            heal_errors.append(f"{meta.name}: {type(e).__name__}: {str(e)[:200]}")
+    if heal_errors:
+        # CSO X5: a heal that fails must never become a normal-looking report; a false receipt left standing is
+        # an undecryptable record presented as archived. Fail closed: the build stops here, staging is retained.
+        report["sweep_heal_errors"] = heal_errors
+        raise EpochError("capture-spool heal FAILED for %d false receipt(s): %s" % (len(heal_errors), "; ".join(heal_errors)[:600]))
     items = staged_items(home)
     info: dict = {"staged": len(items), "swept": 0, "already": 0, "failed": 0, "bytes": 0, "healed_keyless": len(healed)}
     report["sweep"] = info
@@ -427,13 +458,15 @@ def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict)
             if m.get("namespace"): args += ["--namespace", str(m["namespace"])]
             out = _run_cli(args, staging, lbrain_bin, lock=lock)
             # txids are base64url (LocalTransport: sha256 of the ciphertext, urlsafe), not hex: match any token
-            mt = re.search(r"txid (\S{20,})", out)   # the FULL txid or nothing (CSO P-A): a prefix is never a record id
+            # CSO P-A/X7: the txid comes ONLY from the capture CLI's machine line `LBRAIN-TXID <id>` (its own line, printed
+            # last), never from prose that a transcript title could imitate; the id must be a 43-char base64url token.
+            ids = re.findall(r"^LBRAIN-TXID ([A-Za-z0-9_-]{43})$", out, flags=re.M)
             already = "already captured" in out
-            if not mt:
+            if not ids:
                 info["failed"] += 1
-                info.setdefault("failures", []).append(f"{meta.name}: capture printed no full txid ({'already captured' if already else 'fresh'} branch)")
+                info.setdefault("failures", []).append(f"{meta.name}: capture printed no LBRAIN-TXID line ({'already captured' if already else 'fresh'} branch)")
                 continue
-            txid = mt.group(1)
+            txid = ids[-1]
             plan.append({"meta": str(meta), "sha256": m.get("sha256"), "bytes": int(m.get("size") or 0),
                          "txid": txid, "already": already, "captured_at": m.get("captured_at")})
             info["bytes"] += int(m.get("size") or 0)
@@ -579,7 +612,7 @@ def build(
             # carry the prior epoch's archive tables into the candidate before the sweep (discoverability survives).
             if prior_db is not None and not delta:
                 report["archive_index_carried"] = _carry_archive_index(prior_db, staging_db)
-            swept_plan = _sweep_spool(home, staging, lbrain_bin, lock, report) if sweep else []
+            swept_plan = _sweep_spool(home, staging, lbrain_bin, lock, report, dim=int(getattr(cfg, "embedding_dim", 0) or 0)) if sweep else []
             lock.heartbeat()
             # Orphan derived-state sweep: the FIRST production build was refused by
             # the gate over 14 vectors with no chunk — historical debris the live
