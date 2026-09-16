@@ -187,6 +187,24 @@ def staged_items(home: Path, *, include_swept: bool = False) -> list[Path]:
     return out
 
 
+def keyless_receipts(home: Path) -> list[tuple[Path, str]]:
+    """Increment 2b: receipted entries whose txid has no wrapped key under <home>/keys/ -- false receipts (the record is
+    undecryptable). Returned as (meta, txid) so a build can re-stage them."""
+    out = []
+    keys = home / "keys"
+    for meta in staged_items(home, include_swept=True):
+        rp = sweep_receipt_path(meta)
+        if not rp.is_file():
+            continue
+        try:
+            txid = str(json.loads(rp.read_text(encoding="utf-8")).get("txid") or "")
+        except Exception:
+            txid = ""
+        if not txid or not (keys / f"{txid}.key").is_file():
+            out.append((meta, txid))
+    return out
+
+
 def swept_items(home: Path) -> list[Path]:
     """Entries that carry a sweep receipt (payload + meta + receipt)."""
     return [m for m in staged_items(home, include_swept=True) if sweep_receipt_path(m).is_file()]

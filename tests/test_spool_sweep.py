@@ -11,6 +11,9 @@ nothing; four strings promised a sweep in the present tense. These tests pin the
   S5  _finish_sweep: ciphertext files from staging/archive land in home/archive (existing files untouched), one receipt
       per entry with epoch id + txid + bytes; afterwards staged_count() is 0 and swept_items() is complete
   S6  build(..., sweep=False) never touches the spool (the --no-sweep path)
+  S7  (2b) a receipt whose txid has no local key is FALSE: keyless_receipts() lists it; the sweep removes the receipt,
+      marks the row shredded in the CANDIDATE db, and re-captures the payload (found by the CTO 2026-09-16: the first
+      live sweep left all 20 wrapped keys in the staging home -- the control had checked the listing, not a retrieve)
 Nothing here encrypts or embeds: the CLI runner is faked, so the contract is the sweep's, not the archiver's.
 """
 import json
@@ -98,16 +101,49 @@ def test_s5_finish_sweep_copies_ciphertext_and_writes_receipts(tmp_path):
     (home / "archive").mkdir(); (home / "archive" / "old.bin").write_bytes(b"old"); (staging / "archive" / "old.bin").write_bytes(b"DIFFERENT")
     plan = [{"meta": str(metas[0]), "sha256": "x", "bytes": 13, "txid": "ab" * 32, "already": False, "captured_at": None},
             {"meta": str(metas[1]), "sha256": "y", "bytes": 13, "txid": "cd" * 32, "already": True, "captured_at": None}]
+    (staging / "keys").mkdir(); (staging / "keys" / ("ab" * 32 + ".key")).write_bytes(b"wrapped-dek")   # only the FIRST record's key exists
     report = {"sweep": {}}
     eb._finish_sweep(home, staging, "E9", plan, report)
     assert (home / "archive" / "new.bin").read_bytes() == b"new" and (home / "archive" / "new.tags.json").is_file()
     assert (home / "archive" / "old.bin").read_bytes() == b"old"   # existing ciphertext is never overwritten
-    assert report["sweep"] == {"ciphertext_files_copied": 2, "receipts": 2}
-    assert staged_count(home) == 0 and swept_items(home) == metas
-    r = json.loads(sweep_receipt_path(metas[1]).read_text())
-    assert r["epoch_id"] == "E9" and r["txid"] == "cd" * 32 and r["already_archived"] is True and r["bytes"] == 13
+    assert (home / "keys" / ("ab" * 32 + ".key")).read_bytes() == b"wrapped-dek"   # 2b: the wrapped key travels with the ciphertext
+    assert report["sweep"]["ciphertext_files_copied"] == 2 and report["sweep"]["key_files_copied"] == 1
+    assert report["sweep"]["receipts"] == 1 and report["sweep"]["no_receipt_key_missing"] == ["cd" * 32]   # 2b: no key, no receipt
+    assert staged_count(home) == 1 and swept_items(home) == [metas[0]]
+    r = json.loads(sweep_receipt_path(metas[0]).read_text())
+    assert r["epoch_id"] == "E9" and r["txid"] == "ab" * 32 and r["already_archived"] is False and r["bytes"] == 13
 
 
 def test_s6_build_signature_carries_the_no_sweep_switch():
     import inspect
     assert inspect.signature(eb.build).parameters["sweep"].default is True
+
+
+def test_s7_keyless_receipt_is_healed_and_recaptured(tmp_path, monkeypatch):
+    import sqlite3
+    from lbrain.spool import keyless_receipts
+    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 2)
+    (home / "keys").mkdir(); (home / "keys" / ("ok" * 16 + ".key")).write_bytes(b"k")
+    write_sweep_receipt(metas[0], {"epoch_id": "E1", "txid": "ok" * 16})       # genuine: key present
+    write_sweep_receipt(metas[1], {"epoch_id": "E1", "txid": "bad" * 10})      # false: no key
+    assert [t for _, t in keyless_receipts(home)] == ["bad" * 10]
+    # a candidate db with the keyless row present
+    con = eb._connect_vec(staging / "brain.db"); con.row_factory = sqlite3.Row
+    from lbrain.archive.storage import ArchiveStore
+    st = ArchiveStore(con, 4); st.ensure_schema()
+    st.insert_archive(txid="bad" * 10, namespace="private", title="t1", snapshot="snap", tags={}, n_bytes=13, created=0.0, transport="local", source_hash="h")
+    con.commit(); con.close()
+    import lbrain.archive.cli as acli
+    monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
+    seen = []
+    def fake_run(args, staging_home, lbrain_bin, lock=None, **kw):
+        seen.append(args); return f"✓ Captured 't1' → local\n  txid {'new' * 10}  ·  13 bytes\n"
+    monkeypatch.setattr(eb, "_run_cli", fake_run)
+    report: dict = {}
+    plan = eb._sweep_spool(home, staging, "lbrain", None, report)
+    assert report["sweep"]["healed_keyless"] == 1 and report["sweep"]["staged"] == 1 and len(seen) == 1   # only the false one re-staged
+    assert not sweep_receipt_path(metas[1]).is_file() and sweep_receipt_path(metas[0]).is_file()
+    con = eb._connect_vec(staging / "brain.db")
+    assert con.execute("SELECT shredded FROM archives WHERE txid=?", ("bad" * 10,)).fetchone()[0] == 1
+    con.close()
+    assert plan[0]["txid"] == "new" * 10

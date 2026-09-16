@@ -318,12 +318,39 @@ def validate_candidate(
 # ---------- the build ----------
 
 
+def _shred_in_candidate(staging_db: Path, txid: str) -> None:
+    """Mark a keyless archive row shredded in the CANDIDATE db (never the published one): its ciphertext cannot be
+    decrypted, so the index must stop presenting it and the capture must not skip its payload as already archived."""
+    if not staging_db.exists():
+        return
+    import sqlite3
+    con = _connect_vec(staging_db); con.row_factory = sqlite3.Row   # the archive tables need sqlite-vec loaded
+    try:
+        from .archive.storage import ArchiveStore
+        ArchiveStore(con, 0).mark_archive_shredded(txid, purge_snapshot=True)
+        con.commit()
+    finally:
+        con.close()
+
+
 def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict) -> list[dict]:
     """Archive every staged capture into the staging candidate. Returns the plan (one dict per entry, with the txid the
     capture reported) for `_finish_sweep` after publish. Skips loudly, never silently: no passphrase = nothing swept."""
-    from .spool import staged_items
+    from .spool import staged_items, keyless_receipts, sweep_receipt_path
+    # increment 2b (2026-09-16, found by the CTO scoping 3b): a receipt whose txid has no local key is FALSE -- the record
+    # cannot be decrypted (the first live sweep left every wrapped key in the staging home). Such entries are re-staged:
+    # the false receipt is removed and the keyless index row is marked shredded in the CANDIDATE so the capture does not
+    # skip it as "already archived". Additive: the orphaned ciphertext stays under home/archive/.
+    healed = []
+    for meta, txid in keyless_receipts(home):
+        try:
+            _shred_in_candidate(staging / "brain.db", txid)   # first: if this fails the false receipt stays and is reported
+            sweep_receipt_path(meta).unlink()
+            healed.append(txid)
+        except Exception as e:
+            report.setdefault("sweep_heal_errors", []).append(f"{meta.name}: {e}")
     items = staged_items(home)
-    info: dict = {"staged": len(items), "swept": 0, "already": 0, "failed": 0, "bytes": 0}
+    info: dict = {"staged": len(items), "swept": 0, "already": 0, "failed": 0, "bytes": 0, "healed_keyless": len(healed)}
     report["sweep"] = info
     if not items:
         return []
@@ -365,19 +392,28 @@ def _finish_sweep(home: Path, staging: Path, eid: str, plan: list[dict], report:
     """After publish: bring the candidate's new ciphertext into the home's archive/ (content-addressed; existing files are
     left alone) and write one receipt per swept entry. Receipts are the last write, so a crash here re-sweeps next time."""
     from .spool import write_sweep_receipt
-    src = staging / "archive"; dst = home / "archive"
-    copied = 0
-    if src.is_dir():
-        dst.mkdir(parents=True, exist_ok=True)
-        for f in sorted(src.iterdir()):
-            if f.is_file() and not (dst / f.name).exists():
-                shutil.copy2(f, dst / f.name); copied += 1
+    copied = {"archive": 0, "keys": 0}
+    for sub in ("archive", "keys"):   # the ciphertext AND its wrapped key: a record without its key is unrecoverable
+        src = staging / sub; dst = home / sub
+        if src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+            for f in sorted(src.iterdir()):
+                if f.is_file() and not (dst / f.name).exists():
+                    shutil.copy2(f, dst / f.name); copied[sub] += 1
     at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    receipts = 0; keyless = []
     for e in plan:
+        # a receipt is written ONLY when the record's key is on the home: fail closed, the entry stays staged otherwise
+        if not e["txid"] or not (home / "keys" / f"{e['txid']}.key").is_file():
+            keyless.append(e["txid"] or Path(e["meta"]).name); continue
         write_sweep_receipt(Path(e["meta"]), {"schema": 1, "epoch_id": eid, "txid": e["txid"], "already_archived": e["already"],
                                               "bytes": e["bytes"], "sha256": e["sha256"], "swept_at": at})
-    report["sweep"]["ciphertext_files_copied"] = copied
-    report["sweep"]["receipts"] = len(plan)
+        receipts += 1
+    report["sweep"]["ciphertext_files_copied"] = copied["archive"]
+    report["sweep"]["key_files_copied"] = copied["keys"]
+    report["sweep"]["receipts"] = receipts
+    if keyless:
+        report["sweep"]["no_receipt_key_missing"] = keyless
 
 
 def build(
