@@ -17,8 +17,11 @@ Contract, in order of what must never break:
 - **The spool path derives from the NAMED home, never from config
   ``db_path``** — foreign materialization is impossible by construction, not
   by gate (the 2026-09-01 db_path incident class).
-- **Additive only.** Nothing in this module deletes, and shred never stages
-  (a deferred shred is a lie). Sweep receipts are increment 2.
+- **Additive only, in this module.** Nothing here deletes, and shred never stages
+  (a deferred shred is a lie). Sweep receipts are increment 2. The ONE reclaim of a
+  payload lives in ``epoch_build._reclaim_verified`` and fires only after the archived
+  record decrypts from the home's own ciphertext + key to the meta's sha256 (2026-09-16,
+  CSO P-D: the spool must drain, not double); meta + receipt remain as the record.
 - **Content-addressed idempotency**: the same payload spools to the same name;
   a re-fire is a skip, a concurrent race is an overwrite-with-identical.
 - **Crash ordering**: payload writes tmp→fsync→rename, then the ``.meta.json``

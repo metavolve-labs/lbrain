@@ -79,7 +79,7 @@ def test_s4_sweep_runs_one_capture_per_entry_in_staging_and_writes_no_receipt_ye
         seen.append((args, staging_home))
         i = len(seen)
         if i == 2:
-            return "· already captured: t1 (0123456789abcdef…)"
+            return f"· already captured: t1 txid {'cd' * 32}"   # P-A: the full txid, as the fixed CLI prints it
         if i == 3:
             raise eb.EpochError("`lbrain archive capture` failed in staging (rc 2):\n✗ boom")
         (staging_home / "archive").mkdir(exist_ok=True); (staging_home / "archive" / ("aa" * 32 + ".bin")).write_bytes(b"ct")
@@ -91,7 +91,7 @@ def test_s4_sweep_runs_one_capture_per_entry_in_staging_and_writes_no_receipt_ye
     assert "--from-file" in seen[0][0] and "--session-id" in seen[0][0] and "sid-0" in seen[0][0]
     sw = report["sweep"]
     assert (sw["staged"], sw["swept"], sw["already"], sw["failed"]) == (3, 1, 1, 1) and sw["failures"][0].startswith(metas[2].name)
-    assert len(plan) == 2 and plan[0]["txid"] == "aa" * 32 and plan[1]["already"] is True and plan[1]["txid"] == "0123456789abcdef"
+    assert len(plan) == 2 and plan[0]["txid"] == "aa" * 32 and plan[1]["already"] is True and plan[1]["txid"] == "cd" * 32
     assert staged_count(home) == 3 and swept_items(home) == []   # receipts only after publish
 
 
@@ -147,3 +147,80 @@ def test_s7_keyless_receipt_is_healed_and_recaptured(tmp_path, monkeypatch):
     assert con.execute("SELECT shredded FROM archives WHERE txid=?", ("bad" * 10,)).fetchone()[0] == 1
     con.close()
     assert plan[0]["txid"] == "new" * 10
+
+
+def test_s8_torn_meta_is_counted_and_named_and_the_sweep_goes_on(tmp_path, monkeypatch):
+    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 2)
+    metas[0].write_text("{not json")   # torn sidecar (P-B)
+    import lbrain.archive.cli as acli
+    monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
+    monkeypatch.setattr(eb, "_run_cli", lambda args, sh, lb, lock=None, **kw: f"✓ Captured\n  txid {'ab' * 32}  ·  13 bytes\n")
+    report: dict = {}
+    plan = eb._sweep_spool(home, staging, "lbrain", None, report)
+    sw = report["sweep"]
+    assert sw["failed"] == 1 and metas[0].name in sw["failures"][0] and "JSONDecodeError" in sw["failures"][0]
+    assert sw["swept"] == 1 and len(plan) == 1   # the other entry was swept; nothing aborted
+
+
+def test_s9_refusal_forensics_never_retain_keys(tmp_path):
+    staging = tmp_path / "staging"; (staging / "archive").mkdir(parents=True); (staging / "keys").mkdir()
+    (staging / "archive" / "x.bin").write_bytes(b"ct"); (staging / "keys" / "x.key").write_bytes(b"wrapped"); (staging / "brain.db").write_bytes(b"db")
+    fdir = tmp_path / "E1.failed"
+    eb._retain_failed(staging, fdir)
+    assert (fdir / "archive" / "x.bin").is_file() and (fdir / "brain.db").is_file()
+    assert not (fdir / "keys").exists()   # P-C
+
+
+def test_s10_reclaim_only_after_a_verified_round_trip(tmp_path, monkeypatch):
+    from lbrain.archive import crypto
+    from lbrain.archive.archiver import Keystore, LocalTransport
+    home = tmp_path / "home"; metas = _stage(home, 2)
+    payload0 = metas[0].with_name(metas[0].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX); payload1 = metas[1].with_name(metas[1].name[:-len(META_SUFFIX)] + PAYLOAD_SUFFIX)
+    import hashlib
+    for m, p in ((metas[0], payload0), (metas[1], payload1)):
+        d = json.loads(m.read_text()); d["sha256"] = hashlib.sha256(p.read_bytes()).hexdigest(); m.write_text(json.dumps(d))
+    tr = LocalTransport(home / "archive"); ks = Keystore(home / "keys")
+    env0, key0 = crypto.encrypt(payload0.read_bytes(), "pw"); tx0 = tr.put(env0, {}); ks.put(tx0, key0)
+    env1, key1 = crypto.encrypt(b"DIFFERENT BYTES", "pw"); tx1 = tr.put(env1, {}); ks.put(tx1, key1)   # archived bytes != spooled bytes
+    import lbrain.archive.cli as acli
+    monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
+    report = {"sweep": {}}
+    plan = [{"meta": str(metas[0]), "sha256": json.loads(metas[0].read_text())["sha256"], "txid": tx0},
+            {"meta": str(metas[1]), "sha256": json.loads(metas[1].read_text())["sha256"], "txid": tx1}]
+    n = eb._reclaim_verified(home, plan, report)
+    assert n == 1 and not payload0.exists() and payload1.exists()   # P-D: drained only where the round trip matched
+    assert report["sweep"]["reclaim_mismatch"] == [tx1]
+    assert metas[0].is_file()   # meta stays as the record
+
+
+def test_s11_full_build_carries_the_archive_index(tmp_path):
+    import sqlite3
+    prior = tmp_path / "prior.db"; cand = tmp_path / "cand.db"
+    con = eb._connect_vec(prior); con.row_factory = sqlite3.Row
+    from lbrain.archive.storage import ArchiveStore
+    st = ArchiveStore(con, 4); st.ensure_schema()
+    st.insert_archive(txid="T1", namespace="private", title="one", snapshot="## user\nhello", tags={}, n_bytes=5, created=1.0, transport="local", source_hash="h1")
+    st.write_archive_embedding("T1", b"\x00\x00\x80\x3f" * 4)
+    con.commit(); con.close()
+    c2 = eb._connect_vec(cand); c2.close()
+    n = eb._carry_archive_index(prior, cand)   # P-F
+    assert n == 1
+    c3 = eb._connect_vec(cand); c3.row_factory = sqlite3.Row
+    assert c3.execute("SELECT txid, embedded FROM archives").fetchone()["txid"] == "T1"
+    assert c3.execute("SELECT count(*) FROM fts_archives WHERE txid='T1'").fetchone()[0] == 1
+    assert c3.execute("SELECT count(*) FROM vec_archives").fetchone()[0] == 1
+    c3.close()
+
+
+def test_s12_already_captured_must_print_the_full_txid(tmp_path, monkeypatch):
+    home = tmp_path / "home"; staging = tmp_path / "staging"; staging.mkdir(); metas = _stage(home, 2)
+    import lbrain.archive.cli as acli
+    monkeypatch.setattr(acli, "archive_passphrase", lambda: "pw")
+    outs = ["· already captured: t0 (0123456789abcdef…)",            # the OLD prefix form (P-A): must be a FAILED entry, never a receipt
+            f"· already captured: t1 txid {'cd' * 32}"]              # the fixed form: full txid
+    monkeypatch.setattr(eb, "_run_cli", lambda args, sh, lb, lock=None, **kw: outs.pop(0))
+    report: dict = {}
+    plan = eb._sweep_spool(home, staging, "lbrain", None, report)
+    sw = report["sweep"]
+    assert sw["failed"] == 1 and "no full txid" in sw["failures"][0] and metas[0].name in sw["failures"][0]
+    assert sw["already"] == 1 and plan[0]["txid"] == "cd" * 32 and plan[0]["already"] is True

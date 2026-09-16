@@ -318,6 +318,57 @@ def validate_candidate(
 # ---------- the build ----------
 
 
+def _retain_failed(staging: Path, fdir: Path) -> None:
+    """Keep a refused candidate as forensics WITHOUT its wrapped archive keys (CSO P-C, 2026-09-16: a post-sweep
+    staging holds ciphertext + keys together; `.failed/` is never pruned and never shredded, so keys must not land there)."""
+    shutil.copytree(staging, fdir, dirs_exist_ok=True, ignore=shutil.ignore_patterns("keys"))
+    k = fdir / "keys"
+    if k.exists():
+        shutil.rmtree(k, ignore_errors=True)
+
+
+def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
+    """Copy the Tier-2 archive index (archives rows, their FTS rows and vectors) from the prior epoch into a full-build
+    candidate. Returns rows carried (0 when the prior has no archive tables). Content-addressed rows: INSERT OR IGNORE."""
+    import sqlite3
+    try:
+        pc = _connect_vec(prior_db); pc.row_factory = sqlite3.Row
+        has = pc.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='archives'").fetchone()
+        if not has:
+            pc.close(); return 0
+        rows = [dict(r) for r in pc.execute("SELECT * FROM archives")]
+        vecs = {}
+        try:
+            for r in pc.execute("SELECT rowid, embedding FROM vec_archives"): vecs[r[0]] = r[1]
+        except Exception:
+            vecs = {}
+        pc.close()
+    except Exception:
+        return 0
+    if not rows:
+        return 0
+    con = _connect_vec(staging_db); con.row_factory = sqlite3.Row
+    try:
+        from .archive.storage import ArchiveStore
+        dim = len(next(iter(vecs.values()))) // 4 if vecs else 0
+        st = ArchiveStore(con, dim or 1536); st.ensure_schema()
+        n = 0
+        for r in rows:
+            cols = ", ".join(r.keys()); ph = ", ".join("?" for _ in r)
+            con.execute(f"INSERT OR IGNORE INTO archives ({cols}) VALUES ({ph})", tuple(r.values()))
+            aid = r["archive_id"]
+            if not r.get("shredded"):
+                con.execute("DELETE FROM fts_archives WHERE rowid = ?", (aid,))
+                con.execute("INSERT INTO fts_archives (rowid, snapshot, title, txid) VALUES (?, ?, ?, ?)", (aid, r.get("snapshot") or "", r.get("title") or "", r.get("txid") or ""))
+                if aid in vecs:
+                    con.execute("DELETE FROM vec_archives WHERE rowid = ?", (aid,))
+                    con.execute("INSERT INTO vec_archives (rowid, embedding) VALUES (?, ?)", (aid, vecs[aid]))
+            n += 1
+        con.commit(); return n
+    finally:
+        con.close()
+
+
 def _shred_in_candidate(staging_db: Path, txid: str) -> None:
     """Mark a keyless archive row shredded in the CANDIDATE db (never the published one): its ciphertext cannot be
     decrypted, so the index must stop presenting it and the capture must not skip its payload as already archived."""
@@ -327,7 +378,9 @@ def _shred_in_candidate(staging_db: Path, txid: str) -> None:
     con = _connect_vec(staging_db); con.row_factory = sqlite3.Row   # the archive tables need sqlite-vec loaded
     try:
         from .archive.storage import ArchiveStore
-        ArchiveStore(con, 0).mark_archive_shredded(txid, purge_snapshot=True)
+        st = ArchiveStore(con, 0); st.ensure_schema()   # P-F: a --full candidate carries no archive tables until something creates them
+        if st.get_archive(txid) is not None:
+            st.mark_archive_shredded(txid, purge_snapshot=True)
         con.commit()
     finally:
         con.close()
@@ -374,18 +427,49 @@ def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict)
             if m.get("namespace"): args += ["--namespace", str(m["namespace"])]
             out = _run_cli(args, staging, lbrain_bin, lock=lock)
             # txids are base64url (LocalTransport: sha256 of the ciphertext, urlsafe), not hex: match any token
-            mt = re.search(r"txid (\S+)", out)
+            mt = re.search(r"txid (\S{20,})", out)   # the FULL txid or nothing (CSO P-A): a prefix is never a record id
             already = "already captured" in out
-            ma = re.search(r"\((\S+?)…\)", out)
-            txid = mt.group(1) if mt else (ma.group(1) if already and ma else "")
+            if not mt:
+                info["failed"] += 1
+                info.setdefault("failures", []).append(f"{meta.name}: capture printed no full txid ({'already captured' if already else 'fresh'} branch)")
+                continue
+            txid = mt.group(1)
             plan.append({"meta": str(meta), "sha256": m.get("sha256"), "bytes": int(m.get("size") or 0),
                          "txid": txid, "already": already, "captured_at": m.get("captured_at")})
             info["bytes"] += int(m.get("size") or 0)
             info["already" if already else "swept"] += 1
-        except EpochError as e:
+        except Exception as e:   # P-B: a torn sidecar or any per-entry error is COUNTED and NAMED; the build goes on
             info["failed"] += 1
-            info.setdefault("failures", []).append(f"{meta.name}: {str(e)[-300:]}")
+            info.setdefault("failures", []).append(f"{meta.name}: {type(e).__name__}: {str(e)[-300:]}")
     return plan
+
+
+def _reclaim_verified(home: Path, plan: list[dict], report: dict) -> int:
+    """Unlink a spooled payload only after the archived record round-trips: home/archive ciphertext + home/keys wrapped
+    key -> decrypt with the build's passphrase -> sha256 == meta sha256. Anything short of that keeps the bytes."""
+    try:
+        from .archive import crypto
+        from .archive.archiver import Keystore, LocalTransport
+        from .archive.cli import archive_passphrase
+        pw = archive_passphrase()
+    except Exception as e:
+        report["sweep"].setdefault("reclaim_skipped", str(e)[:120]); return 0
+    if not pw:
+        report["sweep"].setdefault("reclaim_skipped", "no passphrase"); return 0
+    ks = Keystore(home / "keys"); tr = LocalTransport(home / "archive"); n = 0
+    for e in plan:
+        meta = Path(e["meta"]); payload = meta.with_name(meta.name[: -len(".meta.json")] + ".transcript")
+        try:
+            key_env = ks.get(e["txid"])
+            if key_env is None: continue
+            data = crypto.decrypt(tr.get(e["txid"]), key_env, pw)
+            if hashlib.sha256(data).hexdigest() != str(e.get("sha256") or ""): 
+                report["sweep"].setdefault("reclaim_mismatch", []).append(e["txid"]); continue
+            if payload.is_file():
+                payload.unlink(); n += 1
+        except Exception as ex:
+            report["sweep"].setdefault("reclaim_errors", []).append(f"{e['txid']}: {type(ex).__name__}: {str(ex)[:120]}")
+    return n
 
 
 def _finish_sweep(home: Path, staging: Path, eid: str, plan: list[dict], report: dict) -> None:
@@ -414,6 +498,10 @@ def _finish_sweep(home: Path, staging: Path, eid: str, plan: list[dict], report:
     report["sweep"]["receipts"] = receipts
     if keyless:
         report["sweep"]["no_receipt_key_missing"] = keyless
+    # P-D (CSO 2026-09-16): the spool must DRAIN, not double. A receipted payload is reclaimed only after this build
+    # decrypts the archived record from the HOME's own ciphertext + key and the plaintext hashes to the meta's sha256.
+    # meta + receipt stay (the record of what was captured and where it went); a failed round trip keeps the payload.
+    report["sweep"]["reclaimed"] = _reclaim_verified(home, [e for e in plan if e["txid"] and e["txid"] not in keyless], report)
 
 
 def build(
@@ -487,6 +575,10 @@ def build(
             # staging home takes because it carries no epochs/CURRENT. Ciphertext lands in staging/archive/ and is copied
             # into home/archive/ only after publish; receipts are written only then, so a failed build leaves every
             # entry staged and the next build re-sweeps (the Archiver skips an already-captured payload).
+            # P-F (CSO 2026-09-16): the archive index is not derived from sources, so a --full candidate would drop it;
+            # carry the prior epoch's archive tables into the candidate before the sweep (discoverability survives).
+            if prior_db is not None and not delta:
+                report["archive_index_carried"] = _carry_archive_index(prior_db, staging_db)
             swept_plan = _sweep_spool(home, staging, lbrain_bin, lock, report) if sweep else []
             lock.heartbeat()
             # Orphan derived-state sweep: the FIRST production build was refused by
@@ -517,7 +609,7 @@ def build(
             if failures:
                 fdir = failed_dir(home, eid)
                 fdir.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(staging, fdir, dirs_exist_ok=True)
+                _retain_failed(staging, fdir)
                 raise EpochError(
                     "gate v2 REFUSED promotion:\n  - " + "\n  - ".join(failures)
                     + f"\n  candidate retained: {fdir}")

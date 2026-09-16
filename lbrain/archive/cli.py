@@ -9,6 +9,7 @@ omits these commands.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -243,7 +244,8 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
         store.close()
 
     if res.skipped:
-        click.echo(f"· already captured: {label} ({res.txid[:16]}…)")
+        # full txid, never a prefix: the epoch sweep parses this line (CSO P-A, 2026-09-16: a 16-char prefix became a "txid")
+        click.echo(f"· already captured: {label} txid {res.txid}")
         return
     if quiet:
         click.echo(f"✓ captured {label} → {res.transport}:{res.txid[:16]}… ({res.n_bytes}B)")
@@ -435,7 +437,12 @@ def sweep_status(as_json):
     from ..spool import STAGING_DIRNAME, staged_items, swept_items, sweep_receipt_path
 
     home = Path(CONFIG_DIR)
-    staged = staged_items(home); swept = swept_items(home)
+    try:
+        staged = staged_items(home); swept = swept_items(home)
+    except Exception as e:   # a status command answers even when the spool is unreadable
+        staged, swept = [], []; spool_err = f"{type(e).__name__}: {str(e)[:120]}"
+    else:
+        spool_err = None
     def _meta(m):
         try: return json.loads(m.read_text(encoding="utf-8"))
         except Exception: return {}
@@ -443,12 +450,17 @@ def sweep_status(as_json):
     times = sorted(t for t in (m.get("captured_at") for m in ms) if t)
     sessions = sorted({str(m.get("session_id")) for m in ms if m.get("session_id")})
     total = sum(int(m.get("size") or 0) for m in ms)
-    have_pass = bool(archive_passphrase())
+    # P-E (CSO 2026-09-16): read-only means read-only. Report whether a passphrase is CONFIGURED without resolving a
+    # `gcp-secret:` reference (that is a network call to a secret manager and can fail); never exit non-zero.
+    raw = os.environ.get("LBRAIN_ARCHIVE_PASSPHRASE", "").strip()
+    pp_state = "missing" if not raw else ("configured (gcp-secret reference, not resolved by status)" if raw.startswith(("gcp-secret:", "gcp:")) else "configured (literal)")
+    have_pass = bool(raw)
     rep = {"home": str(home), "spool": str(home / STAGING_DIRNAME), "staged": len(staged), "staged_bytes": total,
            "staged_sessions": len(sessions), "oldest": times[0] if times else None, "newest": times[-1] if times else None,
-           "swept": len(swept), "passphrase_available": have_pass,
+           "swept": len(swept), "passphrase": pp_state, "passphrase_configured": have_pass,
            "next_build_would": ("archive %d capture(s), %d bytes" % (len(staged), total)) if (staged and have_pass)
                                else ("skip the sweep: no archive passphrase (LBRAIN_ARCHIVE_PASSPHRASE)" if staged else "nothing to sweep")}
+    if spool_err: rep["spool_error"] = spool_err
     if as_json:
         click.echo(json.dumps(rep, indent=2)); return
     click.secho("Capture-spool sweep status (dry-run)", fg="cyan")
@@ -456,7 +468,8 @@ def sweep_status(as_json):
     click.echo(f"  staged:           {rep['staged']} capture(s), {total} bytes, {rep['staged_sessions']} session(s)"
                + (f", {rep['oldest']} → {rep['newest']}" if times else ""))
     click.echo(f"  swept:            {rep['swept']} (receipted; ciphertext under archive/)")
-    click.echo(f"  passphrase:       {'available' if have_pass else 'MISSING'}")
+    click.echo(f"  passphrase:       {pp_state}")
+    if spool_err: click.secho(f"  spool:            unreadable — {spool_err}", fg="yellow")
     click.secho(f"  next epoch build: {rep['next_build_would']}", fg=("green" if have_pass or not staged else "yellow"))
 
 
