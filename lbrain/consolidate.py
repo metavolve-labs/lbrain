@@ -28,6 +28,7 @@ import struct
 import time
 from pathlib import Path
 
+import re
 import httpx
 
 from .config import CONFIG_DIR, Config
@@ -232,6 +233,17 @@ def _build_prompt_fragments(cluster_chunks: list[dict]) -> str:
     return "\n\n".join(texts)
 
 
+def _gemini_generation_config(model: str, **params) -> dict:
+    """Sampling parameters only for Gemini 2.x. Google's 2026-10 deprecation notice:
+    upcoming models refuse ``temperature`` / ``top_p`` / ``top_k`` / ``thinking_budget``
+    (a 400, not a warning). Return ``{}`` for gemini-3 and later so a model bump
+    cannot break the call; keep the knobs on 2.x where they still apply."""
+    m = re.search(r"gemini-(\d+)", model or "")
+    if m and int(m.group(1)) >= 3:
+        return {}
+    return dict(params)
+
+
 def synthesize_cluster(api_key: str, cluster_chunks: list[dict], model=DEFAULT_MODEL) -> str:
     texts = []
     for i, c in enumerate(cluster_chunks):
@@ -255,7 +267,7 @@ def synthesize_cluster(api_key: str, cluster_chunks: list[dict], model=DEFAULT_M
     headers = {"x-goog-api-key": api_key}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.2},
+        "generationConfig": _gemini_generation_config(model, temperature=0.2),
     }
 
     with httpx.Client(timeout=120.0) as client:
