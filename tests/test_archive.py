@@ -326,7 +326,8 @@ def test_float_unreadable_balance_alerts_as_unknown(tmp_path, monkeypatch, capsy
 
 
 def test_float_off_by_default_and_failed_alert_does_not_fail_archive(tmp_path, monkeypatch, capsys):
-    arc, store, out = _float_arc(tmp_path, monkeypatch, 0.0, floor=0.0)
+    # Off must mean off: at floor 0 even an unreadable balance stays silent (CSO N1).
+    arc, store, out = _float_arc(tmp_path, monkeypatch, RuntimeError("gateway down"), floor=0.0)
     arc.archive(b"a", title="s", passphrase=PASS)
     assert not out.exists() and "FLOAT" not in capsys.readouterr().err
     store.close()
