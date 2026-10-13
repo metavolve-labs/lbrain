@@ -271,3 +271,67 @@ def test_local_transport_is_content_addressed(tmp_path):
     txid = t.put(data, {"App-Name": "LBrain"})
     assert txid == _content_txid(data)
     assert t.get(txid) == data
+
+
+# --------------------------------------------------------------------------- float guard (B3)
+
+
+class _PayingTransport(LocalTransport):
+    """Local store that reports a paying wallet's balance, as the Arweave transport does."""
+
+    def __init__(self, root, balance):
+        super().__init__(root)
+        self._balance = balance
+
+    def balance_ar(self):
+        if isinstance(self._balance, Exception):
+            raise self._balance
+        return "ADDR", self._balance
+
+
+def _float_arc(tmp_path, monkeypatch, balance, floor=0.25, cmd=None):
+    cfg, _ = _cfg(tmp_path, monkeypatch)
+    cfg.arweave_float_min_ar = floor
+    out = tmp_path / "alert.txt"
+    cfg.arweave_float_alert_cmd = cmd if cmd is not None else (
+        f'echo "$LBRAIN_FLOAT_ADDRESS $LBRAIN_FLOAT_BALANCE_AR $LBRAIN_FLOAT_MIN_AR $LBRAIN_FLOAT_TXID" > {out}')
+    store = Store(tmp_path / "brain.db", embedding_dim=cfg.embedding_dim)
+    arc = Archiver(cfg, store, _FakeEmbedder(cfg.embedding_dim),
+                   transport=_PayingTransport(tmp_path / "arch", balance))
+    return arc, store, out
+
+
+def test_float_below_floor_alerts_and_archive_still_lands(tmp_path, monkeypatch, capsys):
+    arc, store, out = _float_arc(tmp_path, monkeypatch, 0.2)
+    res = arc.archive(b"payload", title="s", passphrase=PASS)
+    assert arc.retrieve(res.txid, PASS) == b"payload"
+    assert out.read_text().split() == ["ADDR", "0.200000000000", "0.25", res.txid]
+    assert "LBRAIN FLOAT LOW" in capsys.readouterr().err
+    store.close()
+
+
+def test_float_at_or_above_floor_is_silent(tmp_path, monkeypatch, capsys):
+    arc, store, out = _float_arc(tmp_path, monkeypatch, 0.25)
+    arc.archive(b"payload", title="s", passphrase=PASS)
+    assert not out.exists() and "FLOAT" not in capsys.readouterr().err
+    store.close()
+
+
+def test_float_unreadable_balance_alerts_as_unknown(tmp_path, monkeypatch, capsys):
+    arc, store, out = _float_arc(tmp_path, monkeypatch, RuntimeError("gateway down"))
+    arc.archive(b"payload", title="s", passphrase=PASS)
+    assert out.read_text().split()[:2] == ["unknown", "unknown"]
+    assert "error=RuntimeError" in capsys.readouterr().err
+    store.close()
+
+
+def test_float_off_by_default_and_failed_alert_does_not_fail_archive(tmp_path, monkeypatch, capsys):
+    # Off must mean off: at floor 0 even an unreadable balance stays silent (CSO N1).
+    arc, store, out = _float_arc(tmp_path, monkeypatch, RuntimeError("gateway down"), floor=0.0)
+    arc.archive(b"a", title="s", passphrase=PASS)
+    assert not out.exists() and "FLOAT" not in capsys.readouterr().err
+    store.close()
+    arc, store, _ = _float_arc(tmp_path / "b", monkeypatch, 0.1, cmd="exit 7")
+    res = arc.archive(b"b", title="s", passphrase=PASS)
+    assert res.txid and "FLOAT ALERT FAILED" in capsys.readouterr().err
+    store.close()

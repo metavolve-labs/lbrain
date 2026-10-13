@@ -263,6 +263,11 @@ class Config:
     arweave_wallet_path: str = ""  # JWK path; secret routed to ~/.lbrain/env, not plaintext
     arweave_gateway: str = "https://arweave.net"  # fetch/GraphQL gateway
     turbo_endpoint: str = "https://turbo.ardrive.io"  # ar.io Turbo (v2 bundled uploads)
+    # Float guard: after each permaweb write, read the paying wallet's balance; below this
+    # many AR, warn on stderr and run the alert command. 0 = off. Never moves funds: a top-up
+    # is a person's decision. Default empty (an alert route is an external side effect).
+    arweave_float_min_ar: float = 0.0
+    arweave_float_alert_cmd: str = ""
     archive_namespace: str = "private"  # default silo: private working/research memory
     db_path: Path = field(default_factory=lambda: DB_PATH)
 
@@ -355,6 +360,8 @@ class Config:
             or os.environ.get("LBRAIN_ARWEAVE_WALLET", cls.arweave_wallet_path),
             arweave_gateway=raw.get("arweave_gateway", cls.arweave_gateway),
             turbo_endpoint=raw.get("turbo_endpoint", cls.turbo_endpoint),
+            arweave_float_min_ar=float(raw.get("arweave_float_min_ar", cls.arweave_float_min_ar)),
+            arweave_float_alert_cmd=raw.get("arweave_float_alert_cmd", cls.arweave_float_alert_cmd),
             archive_namespace=raw.get("archive_namespace", cls.archive_namespace),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
@@ -410,6 +417,8 @@ class Config:
             f"arweave_wallet_path = {q(self.arweave_wallet_path)}",
             f"arweave_gateway = {q(self.arweave_gateway)}",
             f"turbo_endpoint = {q(self.turbo_endpoint)}",
+            f"arweave_float_min_ar = {float(self.arweave_float_min_ar)}",
+            f"arweave_float_alert_cmd = {q(self.arweave_float_alert_cmd)}",
             f"archive_namespace = {q(self.archive_namespace)}",
             f"db_path = {q(self.db_path)}",
             "sources = [",
