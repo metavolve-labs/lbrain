@@ -224,6 +224,15 @@ class ArweaveL1Transport:
             (self.archive_dir / f"{tx.id}.bin").write_bytes(data)
         return tx.id
 
+    def balance_ar(self) -> tuple[str, float]:
+        """The paying wallet's address and its balance in AR, read live from the gateway."""
+        import httpx
+
+        addr = self.wallet.address
+        r = httpx.get(f"{self.gateway}/wallet/{addr}/balance", timeout=20.0)
+        r.raise_for_status()
+        return addr, int(r.text.strip()) / 1e12
+
     def get(self, txid: str) -> bytes:
         # Local-first: if this node holds the blob (we captured it, or it's a
         # local/ghost txid), serve it without a gateway round-trip that may 404.
@@ -561,6 +570,7 @@ class Archiver:
         txid = self.transport.put(payload_env, tags)
         # The wrapped DEK is stored LOCALLY ONLY — this is the deletable half of crypto-shred.
         self.keystore.put(txid, key_env)
+        self._check_float(txid)
 
         text = _decode_text(payload)
         snapshot = make_snapshot(text, self.cfg, model=snapshot_model, force_extractive=force_extractive)
@@ -587,6 +597,36 @@ class Archiver:
             snapshot=snapshot, snapshot_chars=len(snapshot), transport=self.transport.name,
             source_hash=src_hash, skipped=False,
         )
+
+    def _check_float(self, txid: str) -> dict | None:
+        """Float guard (off unless ``arweave_float_min_ar`` > 0). Reads the paying wallet's
+        balance after a write; below the floor, or when the balance cannot be read, warns on
+        stderr and runs ``arweave_float_alert_cmd`` with the facts in its environment. It never
+        moves funds, and it never fails the archive: the record has already landed."""
+        import os
+        import subprocess
+        import sys
+
+        floor = float(getattr(self.cfg, "arweave_float_min_ar", 0.0) or 0.0)
+        if floor <= 0 or not hasattr(self.transport, "balance_ar"):
+            return None
+        try:
+            addr, bal = self.transport.balance_ar()
+            facts = {"address": addr, "balance_ar": f"{bal:.12f}"}
+            if bal >= floor:
+                return None
+        except Exception as e:  # unknown is not OK: say so, loudly
+            facts = {"address": "unknown", "balance_ar": "unknown", "error": type(e).__name__}
+        facts.update({"min_ar": f"{floor}", "txid": txid})
+        sys.stderr.write("LBRAIN FLOAT LOW " + " ".join(f"{k}={v}" for k, v in facts.items()) + "\n")
+        cmd = getattr(self.cfg, "arweave_float_alert_cmd", "") or ""
+        if cmd:
+            env = dict(os.environ, **{f"LBRAIN_FLOAT_{k.upper()}": v for k, v in facts.items()})
+            try:
+                subprocess.run(cmd, shell=True, env=env, timeout=60, check=True)
+            except Exception as e:
+                sys.stderr.write(f"LBRAIN FLOAT ALERT FAILED {type(e).__name__}: {cmd}\n")
+        return facts
 
     # ---- read path --------------------------------------------------------
 
