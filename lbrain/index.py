@@ -279,6 +279,33 @@ def set_banner_retirement(on) -> None:
     _BANNER_RETIREMENT = on is True or (isinstance(on, str) and on.strip().lower() in ("true", "yes", "1"))
 
 
+# Keyword-path supersession (config.toml `keyword_supersede_penalty`, `successor_pull_in`;
+# fortify step 2b). The keyword path marked a retired record but ranked it by FTS relevance alone,
+# so on S1 it stayed at rank 1 above its successor on the search path (P1, P2, P5). Defaults are
+# today's behaviour: penalty 1.0 (no demotion), pull-in off. Armed ONLY by Config.load().
+_KEYWORD_SUPERSEDE_PENALTY = 1.0
+_SUCCESSOR_PULL_IN = False
+
+
+def set_keyword_supersession(penalty=1.0, pull_in=False) -> None:
+    """Arm step 2b. A penalty outside (0, 1] warns and falls back to 1.0 (no demotion)."""
+    global _KEYWORD_SUPERSEDE_PENALTY, _SUCCESSOR_PULL_IN
+    try:
+        val = float(penalty)
+    except (TypeError, ValueError):
+        val = -1.0
+    if not (0.0 < val <= 1.0):
+        import warnings
+        warnings.warn(f"keyword_supersede_penalty={penalty!r} is not in (0, 1]; using 1.0", stacklevel=2)
+        val = 1.0
+    _KEYWORD_SUPERSEDE_PENALTY = val
+    _SUCCESSOR_PULL_IN = pull_in is True or (isinstance(pull_in, str) and pull_in.strip().lower() in ("true", "yes", "1"))
+
+
+def keyword_supersession() -> tuple[float, bool]:
+    return _KEYWORD_SUPERSEDE_PENALTY, _SUCCESSOR_PULL_IN
+
+
 def banner_retirement_enabled() -> bool:
     return _BANNER_RETIREMENT
 

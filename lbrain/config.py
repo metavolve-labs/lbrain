@@ -257,6 +257,11 @@ class Config:
     # Fortify step 2 (A13): read a line-initial SUPERSEDED / RETIRED / ARCHIVED banner in a
     # document's first 15 lines as self-retirement ("IN PART" and its kin flag only). Off = today.
     banner_retirement: bool = False
+    # Fortify step 2b: the keyword path multiplies a retired/superseded hit's score by this
+    # (1.0 = today, flag only) and, when successor_pull_in is on, serves the named successor's
+    # best chunk beside it (edge or named successor only; at most one per retired hit).
+    keyword_supersede_penalty: float = 1.0
+    successor_pull_in: bool = False
     force_priority_only: bool = False
     # Class assumed for a document with no `disclosure:` frontmatter. Empty means
     # UNCLASSIFIED, and every blinding mode withholds unclassified material — so
@@ -302,10 +307,12 @@ class Config:
             # the dim.
             from .embed import LocalEmbedClient
 
-            from .index import set_banner_retirement, set_exclude_markers, set_retired_marker_scope
+            from .index import (set_banner_retirement, set_exclude_markers,
+                                set_keyword_supersession, set_retired_marker_scope)
             set_exclude_markers(())
             set_retired_marker_scope("path")
             set_banner_retirement(False)
+            set_keyword_supersession(1.0, False)
             return cls(
                 embedding_provider="local",
                 embedding_model=LocalEmbedClient.DEFAULT_MODEL,
@@ -313,10 +320,13 @@ class Config:
                 gemini_base_url=os.environ.get("GEMINI_BASE_URL", cls.gemini_base_url),
             )
         raw = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-        from .index import set_banner_retirement, set_exclude_markers, set_retired_marker_scope
+        from .index import (set_banner_retirement, set_exclude_markers,
+                            set_keyword_supersession, set_retired_marker_scope)
         set_exclude_markers(list(raw.get("exclude_path_markers", []) or []))
         set_retired_marker_scope(raw.get("retired_marker_scope", cls.retired_marker_scope))
         set_banner_retirement(raw.get("banner_retirement", cls.banner_retirement))
+        set_keyword_supersession(raw.get("keyword_supersede_penalty", cls.keyword_supersede_penalty),
+                                 raw.get("successor_pull_in", cls.successor_pull_in))
         sources = [Path(s).expanduser() for s in raw.get("sources", [])]
         api_key = raw.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
         gemini_key = (
@@ -364,6 +374,8 @@ class Config:
             exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
             retired_marker_scope=raw.get("retired_marker_scope", cls.retired_marker_scope),
             banner_retirement=raw.get("banner_retirement", cls.banner_retirement) is True,
+            keyword_supersede_penalty=raw.get("keyword_supersede_penalty", cls.keyword_supersede_penalty),
+            successor_pull_in=raw.get("successor_pull_in", cls.successor_pull_in) is True,
             force_priority_only=raw.get("force_priority_only", cls.force_priority_only),
             disclosure_default=raw.get("disclosure_default", cls.disclosure_default),
             arweave_enabled=raw.get("arweave_enabled", cls.arweave_enabled),
@@ -424,6 +436,8 @@ class Config:
             + ", ".join(q(x) for x in self.exclude_path_markers) + "]",
             f"retired_marker_scope = {q(self.retired_marker_scope)}",
             f"banner_retirement = {str(self.banner_retirement).lower()}",
+            f"keyword_supersede_penalty = {float(self.keyword_supersede_penalty)}",
+            f"successor_pull_in = {str(self.successor_pull_in).lower()}",
             f"force_priority_only = {str(self.force_priority_only).lower()}",
             f"disclosure_default = {q(self.disclosure_default)}",
             f"arweave_enabled = {str(self.arweave_enabled).lower()}",

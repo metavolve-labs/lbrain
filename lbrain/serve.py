@@ -588,6 +588,9 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
             parts.append(f"RETIRED \u2192 corrected by: {succ}")
         else:
             parts.append("RETIRED (no successor named)")
+    elif "successor_pulled_in" in h.boosts:
+        # Fortify step 2b: served because a retired record named it, not on its own match.
+        parts.append(f"SUCCESSOR of {getattr(h, 'pulled_in_for', '') or 'a retired record'} (pulled in)")
     elif "superseded_in_part" in h.boosts:
         # Fortify step 2 (A13): a banner that retires the record only IN PART. Marked so the
         # reader checks the successor; never penalised, because part of it still binds (TOUCH3).
