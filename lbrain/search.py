@@ -248,6 +248,7 @@ def _resolve_retired_successors(store, retired_paths: set[str]) -> dict[str, str
     for rp in all_paths:
         by_slug.setdefault(canonical_slug(_basename_slug(rp)), []).append(rp)
 
+    banners = _resolve_banners(store)
     out: dict[str, str] = {}
     for r in store.db.execute("SELECT rel_path, metadata FROM docs"):
         rp = r["rel_path"]
@@ -256,15 +257,17 @@ def _resolve_retired_successors(store, retired_paths: set[str]) -> dict[str, str
         try:
             meta = _json.loads(r["metadata"] or "{}")
         except (ValueError, TypeError):
-            continue
+            meta = {}
         if not isinstance(meta, dict):
-            continue
+            meta = {}
         tgt = ""
         for k in _SUCCESSOR_KEYS:
             v = meta.get(k)
             if isinstance(v, str) and v.strip():
                 tgt = v.strip().strip("[]")     # tolerate [[wikilink]] form
                 break
+        if not tgt:                             # frontmatter governs; the banner is the fallback
+            tgt = banners.get(rp, ("", ""))[1]
         if not tgt:
             continue
         hit = _resolve_target(tgt, all_paths, by_slug, rp)
@@ -273,6 +276,62 @@ def _resolve_retired_successors(store, retired_paths: set[str]) -> dict[str, str
         else:
             out[rp] = "?" + tgt
     return out
+
+
+# rel_path -> (kind, successor as written) read from prose retirement banners (fortify step 2,
+# A13). Cached per store and invalidated by the docs' count and newest mtime, so a query does not
+# re-parse the corpus. Empty unless `banner_retirement` is armed.
+_BANNERS: dict[int, tuple[tuple, dict[str, tuple[str, str]]]] = {}
+
+
+def _resolve_banners(store) -> dict[str, tuple[str, str]]:
+    from .index import banner_retirement_enabled, parse_retirement_banner
+    if not banner_retirement_enabled():
+        return {}
+    key = tuple(store.db.execute("SELECT count(*), max(mtime) FROM docs").fetchone())
+    cached = _BANNERS.get(id(store))
+    if cached and cached[0] == key:
+        return cached[1]
+    out: dict[str, tuple[str, str]] = {}
+    # SQL prefilter before parsing (LIKE is case-insensitive): only first chunks naming a word.
+    for r in store.db.execute(
+            "SELECT rel_path, text FROM chunks WHERE chunk_idx = 0 AND (text LIKE '%superseded%' "
+            "OR text LIKE '%retired%' OR text LIKE '%archived%')"):
+        b = parse_retirement_banner(r["text"])
+        if b:
+            out[r["rel_path"]] = b
+    _BANNERS[id(store)] = (key, out)
+    return out
+
+
+def _banner_partials(store) -> dict[str, str]:
+    """Records whose banner retires them only IN PART: flagged on both paths, never penalised.
+    Value: the resolved successor, "?<as-written>" when it does not resolve, or ""."""
+    parts = {rp: t for rp, (k, t) in _resolve_banners(store).items() if k == "part"}
+    if not parts:
+        return {}
+    all_paths = [r["rel_path"] for r in store.db.execute("SELECT rel_path FROM docs")]
+    by_slug: dict[str, list[str]] = {}
+    for rp in all_paths:
+        by_slug.setdefault(canonical_slug(_basename_slug(rp)), []).append(rp)
+    out: dict[str, str] = {}
+    for rp, tgt in parts.items():
+        if not tgt:
+            out[rp] = ""
+            continue
+        hit = _resolve_target(tgt, all_paths, by_slug, rp)
+        out[rp] = hit if (hit and hit != rp) else "?" + tgt
+    return out
+
+
+def _flag_partials(store, hits) -> None:
+    partial = _banner_partials(store)
+    if not partial:
+        return
+    for h in hits:
+        if h.rel_path in partial and "superseded" not in h.boosts and "retired" not in h.boosts:
+            h.boosts["superseded_in_part"] = 1.0   # flag only, never a score multiplier
+            h.retired_successor = partial[h.rel_path]
 
 
 def _resolve_self_retired_paths(store) -> set[str]:
@@ -309,6 +368,8 @@ def _resolve_self_retired_paths(store) -> set[str]:
         parts = [x for x in re.split(r"[\\/]", r["rel_path"]) if x]
         if is_retired_signal(parts, meta):
             out.add(r["rel_path"])
+    # Fortify step 2 (A13): a full prose banner is a self-retirement too. "part" is not.
+    out |= {rp for rp, (kind, _t) in _resolve_banners(store).items() if kind == "full"}
     return out
 
 
@@ -805,6 +866,7 @@ def search(
                         h.score *= pen
                         h.boosts["retired"] = pen
                         h.retired_successor = _succ.get(h.rel_path, "")
+        _flag_partials(store, out)
         if current_only and out:
             # Claim-span exclusion (grain mismatch): drop chunks whose text contains a
             # CLOSED claim, even in an otherwise-current doc — a fresh file can carry a
@@ -942,6 +1004,7 @@ def keyword_only(
                 if h.rel_path in retired_paths:
                     h.boosts["retired"] = 1.0
                     h.retired_successor = _succ_kw.get(h.rel_path, "")
+    _flag_partials(store, hits)
     if current_only and hits:
         # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
         # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.

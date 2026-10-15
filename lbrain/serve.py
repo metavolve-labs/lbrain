@@ -588,6 +588,16 @@ def _header(idx: int, h: Hit, verdict: str | None, *, staleness_on: bool = True)
             parts.append(f"RETIRED \u2192 corrected by: {succ}")
         else:
             parts.append("RETIRED (no successor named)")
+    elif "superseded_in_part" in h.boosts:
+        # Fortify step 2 (A13): a banner that retires the record only IN PART. Marked so the
+        # reader checks the successor; never penalised, because part of it still binds (TOUCH3).
+        succ = getattr(h, "retired_successor", "") or ""
+        if succ.startswith("?"):
+            parts.append(f"SUPERSEDED IN PART (successor named but UNRESOLVABLE: {succ[1:]})")
+        elif succ:
+            parts.append(f"SUPERSEDED IN PART \u2192 see: {succ}")
+        else:
+            parts.append("SUPERSEDED IN PART")
     # Belief lifecycle (lbrain/beliefs.py). The DRAFT wording is load-bearing, not
     # decoration: a model cannot tell its own prior speculation from an observed
     # fact once both are tokens in context — the attention mechanism blends them.

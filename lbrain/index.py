@@ -244,6 +244,89 @@ def set_retired_marker_scope(scope) -> None:
     _RETIRED_MARKER_DIRS_ONLY = val == "dirs"
 
 
+# Prose retirement banners (config.toml `banner_retirement`; fortify step 2 / A13, CSO plan
+# 2026-10-15). Authors retire a document by writing a banner at its top, not frontmatter: 478
+# docs in the CTO brain say SUPERSEDED in prose, about 10 declare their own retirement in a
+# banner, and no route read any of them, so the superseded framework v0 served at rank 1 above
+# its named successor v02 on both paths. OFF by default (today's behaviour); armed ONLY by
+# Config.load(), like the switches above.
+_BANNER_RETIREMENT = False
+_BANNER_LINES = 15           # a banner counts only in the first 15 lines of the body
+_BANNER_BLOCK_MAX = 6        # lines read as the banner's own block (successor, partial cue)
+# What may precede the word on its line: whitespace, blockquote, heading, emphasis, emoji.
+# Not "-" (a list item is content, not a banner) and not "`" (code).
+_BANNER_LEAD = re.compile(r"^[\s>#*_←-⯿☀-➿️\U0001f000-\U0001faff]*")
+_BANNER_UPPER = re.compile(r"^(SUPERSEDED|RETIRED|ARCHIVED)\b")
+# Mixed case ("Superseded 2026-05-14 — see [[x]]") counts only when it reads as a declaration
+# (followed by "by", a date or a dash/colon) AND the block names a successor.
+_BANNER_MIXED = re.compile(r"^(superseded|retired|archived)(?=\s+(by\b|\d{4}-\d{2}-\d{2})|\s*[—–:-])",
+                           re.IGNORECASE)
+# "IN PART" flags, never penalises (CSO step 2 rule; TOUCH3: "the disclosure envelope ... below
+# still bind" must not retire the document in full).
+_BANNER_PARTIAL = re.compile(
+    r"\bin part\b|\bpartially\b|\bpartly\b|\bstill bind(?:s|ing)?\b|\bremains? (?:binding|in force|valid)\b"
+    r"|\bstill (?:valid|in force|stands?)\b|\b(?:superseded|retired) in (?:its|their)\b", re.IGNORECASE)
+_BANNER_SUCC = (
+    re.compile(r"\[\[([^\]|#]+)"),                          # [[wikilink]]
+    re.compile(r"`([^`\s]+\.(?:md|tex|txt|json|yml|yaml))`"),  # `backticked-file.md`
+    re.compile(r"\bby\s+([\w./-]+\.(?:md|tex|txt|json|yml|yaml))\b"),  # by FILE.md
+)
+
+
+def set_banner_retirement(on) -> None:
+    """Arm `banner_retirement` (bool). Anything but an explicit true leaves it off."""
+    global _BANNER_RETIREMENT
+    _BANNER_RETIREMENT = on is True or (isinstance(on, str) and on.strip().lower() in ("true", "yes", "1"))
+
+
+def banner_retirement_enabled() -> bool:
+    return _BANNER_RETIREMENT
+
+
+def parse_retirement_banner(text: str):
+    """Read a self-retirement banner from the start of a document body (its first chunk).
+
+    Returns None, or (kind, successor) where kind is "full" or "part" and successor is the
+    named target exactly as written ("" when none is named). The FIRST banner line in the first
+    15 lines decides; its block is that line plus the lines that continue it (the same
+    blockquote, or the same paragraph), at most 6.
+    """
+    if not text:
+        return None
+    lines = text.splitlines()[:_BANNER_LINES]
+    for i, raw in enumerate(lines):
+        lead = _BANNER_LEAD.match(raw).group(0)
+        body = raw[len(lead):]
+        # A banner opens a paragraph or carries a marker (> # ** emoji). A wrapped prose line
+        # that happens to begin with the word ("...is\nsuperseded by this paragraph") is not one.
+        if not lead.strip() and i > 0 and lines[i - 1].strip():
+            continue
+        upper = bool(_BANNER_UPPER.match(body))
+        mixed = (not upper) and bool(_BANNER_MIXED.match(body))
+        if not (upper or mixed):
+            continue
+        quoted = raw.lstrip().startswith(">")
+        block = [raw]
+        for nxt in lines[i + 1:i + _BANNER_BLOCK_MAX]:
+            if not nxt.strip() or (quoted and not nxt.lstrip().startswith(">")):
+                break
+            block.append(nxt)
+        joined = " ".join(block)
+        succ = ""
+        best = None
+        for pat in _BANNER_SUCC:
+            m = pat.search(joined)
+            if m and (best is None or m.start() < best[0]):
+                best = (m.start(), m.group(1).strip())
+        if best:
+            succ = best[1].rstrip(".,;:)")
+        if mixed and not succ:
+            continue                      # mixed case without a named successor is prose
+        kind = "part" if _BANNER_PARTIAL.search(joined) else "full"
+        return kind, succ
+    return None
+
+
 def is_retired_signal(path_parts, meta) -> bool:
     """True when the record carries an explicit retired status, by path marker or frontmatter.
     Name-derived salience (000-PRIORITY-) must never outlive the status the name encoded."""
