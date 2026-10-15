@@ -321,7 +321,16 @@ def parse_retirement_banner(text: str):
     if not text:
         return None
     lines = text.splitlines()[:_BANNER_LINES]
+    in_fence = False
     for i, raw in enumerate(lines):
+        # Code is quoted material, not a declaration (CSO 2026-10-15T0719Z: a YAML comment
+        # "# RETIRED — claims adjudicated as dead" inside a fence fired on the live retired-claims
+        # registry). A ``` or ~~~ line, also inside a blockquote, opens or closes a fence.
+        if re.match(r"^[\s>]*(```|~~~)", raw):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         lead = _BANNER_LEAD.match(raw).group(0)
         body = raw[len(lead):]
         # A banner opens a paragraph or carries a marker (> # ** emoji). A wrapped prose line
