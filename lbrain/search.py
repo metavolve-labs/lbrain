@@ -45,6 +45,9 @@ class Hit:
     # `Supersedes:` edge -- both sides agree. Ruling s3 (2026-09-14): mutual confirmation,
     # render the corroborated form. False for self-only; meaningless when no successor.
     retired_corroborated: bool = False
+    # Fortify step 2b: set on a hit the keyword path PULLED IN as the named successor of a
+    # retired hit it served; the value is that retired record's rel_path.
+    pulled_in_for: str = ""
     # Frontmatter `date:` from the doc. The serve path cannot re-derive this from
     # chunk text — the frontmatter is stripped before chunking.
     doc_date: str = ""
@@ -332,6 +335,68 @@ def _flag_partials(store, hits) -> None:
         if h.rel_path in partial and "superseded" not in h.boosts and "retired" not in h.boosts:
             h.boosts["superseded_in_part"] = 1.0   # flag only, never a score multiplier
             h.retired_successor = partial[h.rel_path]
+
+
+def _pull_in_successors(store, hits, fts_query, k):
+    """Fortify step 2b(b): beside each served retired/superseded hit, serve its successor's best
+    chunk when the successor is not already served. At most one per retired record.
+
+    CSO gate (addendum, 2b(b)): only from an EDGE or a NAMED successor, never from a bare status
+    or path marker -- those say "I am dead", not "who replaced me". An edge counts only when it
+    names exactly one source; an ambiguous edge pulls nothing, as it buries nothing (AX-06).
+    The pulled hit inherits the retired hit's pre-penalty score, so it lands where the reader was
+    about to read the dead record.
+    """
+    # "Served" means inside the cut. The keyword path over-fetches for room, so a successor can
+    # sit in the candidate list BELOW the cut: that one is lifted, not duplicated.
+    served = {h.rel_path for h in hits[:k]}
+    below = {}
+    for h in hits[k:]:
+        below.setdefault(h.rel_path, h)
+    present = set(served)
+    edges = _edge_sources(store)
+    cols = ("SELECT c.rel_path, c.chunk_idx, c.text, c.heading_path, d.title, d.is_priority, "
+            "d.doc_type, d.mtime, d.evidence, d.claim_date ")
+    added = []
+    for h in hits:
+        if "superseded" not in h.boosts and "retired" not in h.boosts:
+            continue
+        succ = ""
+        named = getattr(h, "retired_successor", "") or ""
+        if named and not named.startswith("?"):
+            succ = named
+        elif "superseded" in h.boosts:
+            srcs = sorted(edges.get(h.rel_path, set()))
+            if len(srcs) == 1:
+                succ = srcs[0]
+        if not succ or succ in present:
+            continue
+        if succ in below:                 # already a candidate below the cut: lift it
+            lifted = below[succ]
+            lifted.score = max(lifted.score, h.score)
+            lifted.boosts["successor_pulled_in"] = 1.0
+            lifted.pulled_in_for = h.rel_path
+            present.add(succ)
+            continue
+        row = store.db.execute(
+            cols + "FROM fts_chunks JOIN chunks c ON c.chunk_id = fts_chunks.rowid "
+            "JOIN docs d ON d.rel_path = c.rel_path WHERE fts_chunks MATCH ? AND c.rel_path = ? "
+            "ORDER BY fts_chunks.rank LIMIT 1", (fts_query, succ)).fetchone()
+        if row is None:   # the successor shares no query term: serve its opening chunk
+            row = store.db.execute(
+                cols + "FROM chunks c JOIN docs d ON d.rel_path = c.rel_path "
+                "WHERE c.rel_path = ? ORDER BY c.chunk_idx LIMIT 1", (succ,)).fetchone()
+        if row is None:
+            continue
+        new = Hit(rel_path=row["rel_path"], chunk_idx=row["chunk_idx"], text=row["text"],
+                  title=row["title"], score=h.score, keyword_score=h.keyword_score,
+                  doc_type=row["doc_type"], is_priority=bool(row["is_priority"]), mtime=row["mtime"],
+                  heading_path=row["heading_path"], evidence=row["evidence"], doc_date=row["claim_date"])
+        new.boosts["successor_pulled_in"] = 1.0
+        new.pulled_in_for = h.rel_path
+        present.add(succ)
+        added.append(new)
+    return hits + added
 
 
 def _resolve_self_retired_paths(store) -> set[str]:
@@ -930,7 +995,12 @@ def keyword_only(
     # a LIMIT k would silently return fewer than k results, so isolation would
     # look like poor recall. With no beliefs the query and its result are
     # unchanged, which keeps the pre-existing behaviour exactly.
-    fetch = k * 4 if (store.belief_states() or envelope is not None) else k
+    from .index import keyword_supersession
+    _kw_pen, _kw_pull = keyword_supersession()
+    # step 2b: a demoted or pulled-in candidate needs room below the cut, or demotion only
+    # reorders the top k and the k-th live record never surfaces.
+    _kw_room = (_kw_pen < 1.0 or _kw_pull) and not current_only
+    fetch = k * 4 if (store.belief_states() or envelope is not None or _kw_room) else k
     rows = store.db.execute(
         "SELECT c.chunk_id, fts_chunks.rank AS rank, c.rel_path, c.chunk_idx, c.text, "
                 "       c.heading_path, "
@@ -1005,6 +1075,19 @@ def keyword_only(
                     h.boosts["retired"] = 1.0
                     h.retired_successor = _succ_kw.get(h.rel_path, "")
     _flag_partials(store, hits)
+    if _kw_room and hits:
+        # Fortify step 2b. (b) pull-in first, so the successor inherits the PRE-penalty score;
+        # then (a) demote the flagged hits and re-rank. Defaults (1.0, off) skip this block.
+        if _kw_pull:
+            hits = _pull_in_successors(store, hits, fts_query, k)
+        if _kw_pen < 1.0:
+            for h in hits:
+                for key in ("superseded", "retired"):
+                    if key in h.boosts:
+                        h.score *= _kw_pen
+                        h.boosts[key] = _kw_pen
+                        break
+        hits.sort(key=lambda h: h.score, reverse=True)
     if current_only and hits:
         # Claim-span exclusion (grain mismatch): drop chunks whose text contains a CLOSED
         # claim, even in an otherwise-current doc. Keyword path, matching the ranked path.
