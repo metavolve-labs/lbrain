@@ -223,11 +223,28 @@ _BACKUP_MARKERS = (
 _RETIRED_STATUS = {"retired", "archived", "superseded"}
 _RETIRED_PATH_MARKERS = ("-archived-", "-retired-", "-superseded-")
 
+# Where a path marker counts (config.toml `retired_marker_scope`). "path" (the default,
+# unchanged behaviour) matches every segment, the filename included. "dirs" matches
+# directory segments only. Fortify A11 (CSO, 2026-10-15): matching the FILENAME buried live
+# documents ABOUT retirement (`CSO-THE-RETIRED-REGISTRY-IS-WIRED-...`) at 0.25x, two false
+# fires for every real one in the CTO brain; a dated archive rename is a directory.
+# Module-global, armed ONLY by Config.load(), like the exclusions below.
+_RETIRED_MARKER_DIRS_ONLY = False
+
+
+def set_retired_marker_scope(scope) -> None:
+    """Arm `retired_marker_scope`: "dirs" or "path" (anything else falls back to "path")."""
+    global _RETIRED_MARKER_DIRS_ONLY
+    _RETIRED_MARKER_DIRS_ONLY = str(scope or "path").strip().lower() == "dirs"
+
 
 def is_retired_signal(path_parts, meta) -> bool:
     """True when the record carries an explicit retired status, by path marker or frontmatter.
     Name-derived salience (000-PRIORITY-) must never outlive the status the name encoded."""
-    for part in path_parts:
+    parts = list(path_parts)
+    if _RETIRED_MARKER_DIRS_ONLY and parts:
+        parts = parts[:-1]  # the last segment is the file itself
+    for part in parts:
         low = part.lower()
         if any(m in low for m in _RETIRED_PATH_MARKERS):
             return True
