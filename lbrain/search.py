@@ -300,6 +300,10 @@ def _resolve_banners(store) -> dict[str, tuple[str, str]]:
     for r in store.db.execute(
             "SELECT rel_path, text FROM chunks WHERE chunk_idx = 0 AND (text LIKE '%superseded%' "
             "OR text LIKE '%retired%' OR text LIKE '%archived%')"):
+        # A marker file named for the state (`SUPERSEDED.md`) describes its DIRECTORY; the
+        # notice itself is current (CSO blind label, 2026-10-15T0719Z, fire 8).
+        if _basename_slug(r["rel_path"]).upper() in ("SUPERSEDED", "RETIRED", "ARCHIVED"):
+            continue
         b = parse_retirement_banner(r["text"])
         if b:
             out[r["rel_path"]] = b

@@ -176,3 +176,70 @@ def test_config_write_then_load_arms_the_flag(tmp_path, monkeypatch):
     cfgmod.Config(banner_retirement=False).write()
     cfgmod.Config.load()
     assert not index.banner_retirement_enabled()
+
+
+# ---- fence fix (CSO 2026-10-15T0719Z: the parser fired inside a code fence on the live
+# retired-claims registry; held-out finding, precision 11/13 across all brains) ----
+
+# The trigger, verbatim: the first 15 lines (the parser's whole window) of the CSO brain's
+# `_root--retired-claims--derived.md` first chunk. Truncated to the window so no registry row
+# below it is published in this public repo.
+_FENCE_TRIGGER = """# Retired claims registry (derived view — source of truth: personas/cso/RETIRED.yml)
+
+> YAML rendered into an indexable .md view; the engine indexes .md only (A-412).
+
+```yaml
+# TWO LISTS, BOTH DECLARED (CTO decision 2026-08-10).
+# This file is the master for CORPUS and GTM surfaces. The public `lbrain` repo
+# keeps its own NEVER list in tests/test_human_facing_register.py for repo
+# surfaces, because a public repo's tests cannot read a private corpus file and
+# mirroring this one there would publish the disease list. They CAN drift; that
+# is accepted and named here so the drift is visible rather than discovered.
+#
+# RETIRED — claims adjudicated as dead, with their cause of death.
+#
+# A number appearing in a document is not permission to use it. This file is the"""
+
+
+def test_fence_trigger_verbatim_returns_none():
+    assert "# RETIRED \u2014 claims adjudicated as dead" in _FENCE_TRIGGER, "precondition: the trigger line is present"
+    assert parse_retirement_banner(_FENCE_TRIGGER) is None
+
+
+def test_fence_trigger_fired_before_the_fix_shape():
+    """Negative control on the fixture: the same line OUTSIDE a fence still reads as a banner,
+    so the None above is the fence skip, not a fixture the parser could never fire on."""
+    unfenced = _FENCE_TRIGGER.replace("```yaml\n", "")
+    assert parse_retirement_banner(unfenced) is not None
+
+
+@pytest.mark.parametrize("text,want", [
+    ("~~~\n# SUPERSEDED by x.md\n~~~\n", None),                                   # tilde fence
+    ("> ```\n> SUPERSEDED by x.md\n> ```\n", None),                                # fence inside a blockquote
+    ("```\ncode\n```\n\n> SUPERSEDED by later.md\n", ("full", "later.md")),     # a banner after a closed fence
+])
+def test_fence_states(text, want):
+    assert parse_retirement_banner(text) == want
+
+
+def test_state_named_marker_file_is_exempt(tmp_path):
+    """A `SUPERSEDED.md` notice describes its directory; the notice itself is current
+    (CSO blind label 2026-10-15, fire 8)."""
+    docs = dict(_DOCS)
+    docs["d/SUPERSEDED.md"] = "# SUPERSEDED \u2014 do not read as current\n\nZK-MARKER this directory was replaced.\n"
+    index.set_banner_retirement(True)
+    root = tmp_path / "corpus"
+    for rel, text in docs.items():
+        p = root / rel; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding="utf-8")
+    store = Store(tmp_path / "brain.db", embedding_dim=DIM)
+    emb = FakeEmbedder()
+    for rel in docs:
+        doc = parse(root / rel, repo_root=root)
+        store.upsert_doc(doc)
+        chunks = chunk_doc(doc)
+        ids = store.insert_chunks(chunks)
+        store.write_embeddings(ids, emb.embed([c.text for c in chunks]))
+    store.db.commit()
+    assert parse_retirement_banner(docs["d/SUPERSEDED.md"]) == ("full", ""), "precondition: the text alone fires"
+    got = _resolve_self_retired_paths(store)
+    assert "d/SUPERSEDED.md" not in got and "f/frame-v0.md" in got
