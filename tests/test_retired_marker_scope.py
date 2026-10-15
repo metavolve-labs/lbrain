@@ -42,9 +42,16 @@ def test_dirs_scope_does_not_touch_frontmatter_routes():
     assert index.is_retired_signal(FILE_NAMED, {"status": "live"}) is False
 
 
-@pytest.mark.parametrize("bad", [None, "", "DIRECTORY", "files"])
-def test_unknown_scope_falls_back_to_path(bad):
+@pytest.mark.parametrize("bad", [None, ""])
+def test_empty_scope_falls_back_to_path_silently(bad):
     index.set_retired_marker_scope(bad)
+    assert index.is_retired_signal(FILE_NAMED, {}) is True
+
+
+@pytest.mark.parametrize("bad", ["DIRECTORY", "files", "dir"])
+def test_unknown_scope_warns_and_falls_back_to_path(bad):
+    with pytest.warns(UserWarning, match="retired_marker_scope"):
+        index.set_retired_marker_scope(bad)
     assert index.is_retired_signal(FILE_NAMED, {}) is True
 
 

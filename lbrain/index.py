@@ -235,7 +235,13 @@ _RETIRED_MARKER_DIRS_ONLY = False
 def set_retired_marker_scope(scope) -> None:
     """Arm `retired_marker_scope`: "dirs" or "path" (anything else falls back to "path")."""
     global _RETIRED_MARKER_DIRS_ONLY
-    _RETIRED_MARKER_DIRS_ONLY = str(scope or "path").strip().lower() == "dirs"
+    val = str(scope or "path").strip().lower()
+    if val not in ("path", "dirs"):
+        # A typo must not pass silently as the default (CSO, step-1 acceptance 2026-10-15).
+        import warnings
+        warnings.warn(f"retired_marker_scope={scope!r} is not 'path' or 'dirs'; using 'path'",
+                      stacklevel=2)
+    _RETIRED_MARKER_DIRS_ONLY = val == "dirs"
 
 
 def is_retired_signal(path_parts, meta) -> bool:
