@@ -171,7 +171,13 @@ def _run_cli(args: list[str], staging_home: Path, lbrain_bin: str,
         proc.communicate()
         raise
     if proc.returncode != 0:
-        tail = (out + "\n" + err)[-2000:]
+        both = out + "\n" + err
+        # Surface the failure line itself. A plain tail of the last 2,000 chars was filled by harmless parse
+        # warnings on large corpora and cut off the real error (fortify step 14, 2026-10-16: a prune refusal
+        # was invisible behind frontmatter warnings). Failure-marked lines first, then the tail.
+        key = [l for l in both.splitlines() if l.lstrip().startswith(("✗", "Error", "error:", "Traceback"))
+               or "refusing" in l]
+        tail = ("\n".join(key[-20:]) + "\n--- tail ---\n" if key else "") + both[-1500:]
         raise EpochError(f"`lbrain {' '.join(args)}` failed in staging (rc {proc.returncode}):\n{tail}")
     return out
 
@@ -544,6 +550,7 @@ def build(
     delta: bool = True,
     confirm_source_removed: tuple[str, ...] = (),
     prune_unreachable: bool = False,
+    confirm_delist: bool = False,
     keep: int = 3,
     max_bytes: int | None = None,
     lbrain_bin: str = "lbrain",
@@ -590,7 +597,8 @@ def build(
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
             (staging / "config.toml").write_text(raw, encoding="utf-8")
 
-            _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else []),
+            _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else [])
+                     + (["--confirm-delist"] if confirm_delist else []),
                      staging, lbrain_bin, lock=lock)
             lock.heartbeat()
             # A CONFIRMED-removed root's docs are purged deliberately here — prune's

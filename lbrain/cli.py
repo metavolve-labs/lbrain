@@ -801,12 +801,16 @@ def _project_belief(store, doc) -> int:
 @click.argument("paths", nargs=-1, type=click.Path(exists=True))
 @click.option("--prune/--no-prune", default=True, help="Drop docs no longer on disk")
 @click.option("--force-prune", is_flag=True, help="Override the prune safety guards (mount-gone / >50%)")
+@click.option("--confirm-delist", "confirm_delist", is_flag=True,
+              help="Confirm an intended delist by exclude_path_markers that removes >50% of docs "
+                   "(distinct from --force-prune: the missing-files guard stays live).")
 @click.option("--prune-unreachable", "prune_unreachable", is_flag=True,
               help="Also drop docs whose file still exists but lies under NO configured source "
                    "(the UNREACHABLE class `doctor` reports); guarded like --prune.")
 @click.option("--rechunk", is_flag=True,
               help="Re-chunk every document even if its body is unchanged.")
-def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unreachable: bool, rechunk: bool):
+def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, confirm_delist: bool,
+               prune_unreachable: bool, rechunk: bool):
     """Walk source directories and ingest markdown into the brain."""
     cfg = Config.load()
     # Epoch-managed home ⇒ build-validate-swap is the ONLY write path (design
@@ -987,7 +991,8 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, prune_unr
     if prune:
         try:
             with store.transaction():
-                pruned = store.prune_missing(source_roots=sources, force=force_prune)
+                pruned = store.prune_missing(source_roots=sources, force=force_prune,
+                                             confirm_delist=confirm_delist)
         except RuntimeError as e:
             store.close()
             click.secho(f"✗ {e}", fg="red")
@@ -2507,13 +2512,15 @@ def prune_unreachable_cmd(yes, force):
                    "vanished or hollow root refuses promotion (mass-absence is not deletion).")
 @click.option("--prune-unreachable", "prune_unreachable", is_flag=True,
               help="Drop docs that still exist on disk but lie under no configured source (guarded).")
+@click.option("--confirm-delist", "confirm_delist", is_flag=True,
+              help="Confirm an intended exclude_path_markers delist of >50% of docs (passed to the staging import).")
 @click.option("--keep", default=3, show_default=True,
               help="PRIOR epochs to retain, not counting CURRENT (never removed), leased epochs or "
                    ".failed forensics: --keep 2 leaves CURRENT plus two.")
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 @click.option("--no-sweep", "no_sweep", is_flag=True,
               help="Leave capture-staging/ untouched (default: staged captures are archived into the new epoch; increment 2).")
-def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_bytes, no_sweep):
+def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_delist, keep, max_bytes, no_sweep):
     """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
     from .epoch import BuilderBusy, EpochError
     from .epoch_build import build
@@ -2522,7 +2529,7 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, keep, max_b
     try:
         report = build(CONFIG_DIR, cfg, delta=not full,
                        confirm_source_removed=confirm_source_removed,
-                       prune_unreachable=prune_unreachable,
+                       prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
                        keep=keep, max_bytes=max_bytes, sweep=not no_sweep)
     except BuilderBusy as e:
         click.secho(f"✗ {e}", fg="yellow")
