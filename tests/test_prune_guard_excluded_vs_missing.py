@@ -124,3 +124,12 @@ def test_epoch_stage_error_surfaces_the_failure_line_past_a_wall_of_warnings(tmp
     with pytest.raises(EpochError) as e:
         _run_cli(["import", "--prune"], tmp_path, str(fake))
     assert "✗ prune would remove 9/10 docs" in str(e.value)
+
+
+def test_P4_force_prune_alone_does_not_pass_a_large_delist(tmp_path):
+    """CSO P4 (PR #78 PASS, 0916Z, non-blocking): --force-prune is for missing files; it must not stand
+    in for --confirm-delist. 8 of 10 excluded, force only: refuse and remove nothing."""
+    root, store = _brain(tmp_path, n_mail=8, n_live=2)
+    index.set_exclude_markers(["/claimed/"])
+    assert _refused(store, root, force=True)
+    assert _count(store) == 10
