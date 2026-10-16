@@ -120,6 +120,25 @@ def _inventory(db_path: Path, sources: list[str]) -> dict[str, dict[str, str]]:
     return inv
 
 
+def _inventory_abs(db_path: Path, sources: list[str]) -> dict[str, list[str]]:
+    """{source_root: [abs_path, ...]}: the same longest-prefix mapping as `_inventory`, keeping each doc's STORED
+    abs_path. A path is never rebuilt from root + rel_path (CSO PR #80 D1, 2026-10-16: in live epochs rel_path
+    sometimes already carries the root's basename, 452 docs across five homes, so `root / rel` names a file
+    that is not the doc and a marker anchored across the root boundary misses)."""
+    roots = sorted((str(Path(s)) for s in sources), key=len, reverse=True)
+    inv: dict[str, list[str]] = {str(Path(s)): [] for s in sources}
+    con = sqlite3.connect(str(db_path))
+    try:
+        for (ap,) in con.execute("SELECT abs_path FROM docs"):
+            for root in roots:
+                if ap == root or ap.startswith(root.rstrip("/") + "/"):
+                    inv[root].append(ap)
+                    break
+    finally:
+        con.close()
+    return inv
+
+
 def _unscanned_count(db_path: Path, sources: list[str]) -> int:
     """How many indexed docs lie under NO configured source root (A-576).
 
@@ -216,6 +235,7 @@ def validate_candidate(
     sources: list[str],
     prior_inv: dict[str, dict[str, str]],
     confirmed_removed: set[str],
+    prior_abs: dict[str, list[str]] | None = None,
 ) -> list[str]:
     """Every failure is a string naming what refused and why. Empty list = pass."""
     failures: list[str] = []
@@ -265,20 +285,29 @@ def validate_candidate(
         # docs in the scan) would have published. This compares what the candidate holds per root with what
         # the prior epoch held there, net of docs the operator's exclude markers now remove on purpose (CCO
         # review 122655Z: an intended delist, a first build, a confirmed removal are not failures).
-        cand_inv = _inventory(db_path, sources)
+        # Exclusion is judged on each prior doc's STORED abs_path (`prior_abs`), never on a path rebuilt from
+        # root + rel_path (CSO D1). FAIL CLOSED without `prior_abs`: the check still runs, counting EVERY prior doc as
+        # expected (no exclusion credit), so a caller that omits it can get a conservative refusal, never a silent
+        # pass (CSO probe P3 on the first fix, 2026-10-16). `build()` always supplies it.
+        # Known limit (CSO P2): a root RENAMED in config maps its prior docs to no current root, so neither this
+        # check nor the deletion manifest sees them go; the renamed-to root is judged as a first build.
+        cand_inv = _inventory_abs(db_path, sources)
         for src in (str(Path(s)) for s in sources):
-            prior_docs = prior_inv.get(src, {})
-            if not prior_docs or src in confirmed_removed:
-                continue  # first build of this root, or removal asserted
-            expected = [rp for rp in prior_docs if not is_excluded_path(Path(src) / rp)]
-            if not expected:
-                continue  # every prior doc is now excluded: an intended delist, judged by the prune guard
-            kept = len(cand_inv.get(src, {}))
-            if kept < SOURCE_COLLAPSE_FLOOR * len(expected):
+            if src in confirmed_removed:
+                continue  # removal asserted
+            if prior_abs is not None:
+                prior_n = len(prior_abs.get(src, []))
+                expected_n = sum(1 for ap in prior_abs.get(src, []) if not is_excluded_path(Path(ap)))
+            else:
+                prior_n = expected_n = len(prior_inv.get(src, {}))
+            if not prior_n or not expected_n:
+                continue  # first build of this root, or every prior doc now excluded (an intended delist)
+            kept = len(cand_inv.get(src, []))
+            if kept < SOURCE_COLLAPSE_FLOOR * expected_n:
                 failures.append(
-                    f"source-collapse: {src}: candidate holds {kept} docs vs {len(expected)} expected from the "
-                    f"prior epoch ({len(prior_docs) - len(expected)} more now excluded by markers) — a scan that "
-                    "lost most of a root is not a deletion; refuse; pass --confirm-source-removed to assert intent")
+                    f"source-collapse: {src}: candidate holds {kept} docs vs {expected_n} expected from the "
+                    f"prior epoch ({prior_n - expected_n} more now excluded by markers) — a scan that lost most "
+                    "of a root is not a deletion; refuse; pass --confirm-source-removed to assert intent")
 
         # -- vector sanity (Grok G3: the right number of zeros) --
         # FULL scan, not first-32 (CSO R4: the realistic embed-failure shape is
@@ -614,6 +643,7 @@ def build(
             except EpochError:
                 prior_db = None  # dangling CURRENT: full build, publish will heal it
             prior_inv = _inventory(prior_db, sources) if prior_db else {}
+            prior_abs = _inventory_abs(prior_db, sources) if prior_db else {}
 
             if delta and prior_db is not None:
                 _sqlite_snapshot(prior_db, staging_db)  # byte-copy, never hardlink (D1)
@@ -672,7 +702,7 @@ def build(
 
             failures = validate_candidate(
                 staging_db, embedding_dim=cfg.embedding_dim, sources=sources,
-                prior_inv=prior_inv, confirmed_removed=confirmed)
+                prior_inv=prior_inv, confirmed_removed=confirmed, prior_abs=prior_abs)
             if failures:
                 fdir = failed_dir(home, eid)
                 fdir.parent.mkdir(parents=True, exist_ok=True)
