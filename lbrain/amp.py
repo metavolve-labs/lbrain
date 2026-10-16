@@ -13,6 +13,7 @@ verifiable "trust layer."
 """
 from __future__ import annotations
 
+import os
 import re
 
 # --- prompt-injection containment -------------------------------------------
@@ -228,26 +229,59 @@ def engine_stamp() -> str:
     case. What this names, exactly: the checkout's HEAD at the moment lbrain.amp was imported. For an
     editable install that is the loaded code; it is not an immutable build id, and a file edited in
     place after import without a commit is invisible to it. Reads .git/HEAD and the ref file directly.
+
+    CSO PR #78 review (2026-10-16T09:16Z): in a git worktree `.git` is a FILE (`gitdir: <path>`), and
+    the stamp silently dropped the sha. It now follows `gitdir:`, resolves branch refs through the
+    shared `commondir`, and falls back to `packed-refs` (a ref that lives only there was also blind).
     """
     global _ENGINE_STAMP
     if _ENGINE_STAMP is not None:
         return _ENGINE_STAMP
     from . import __version__
     stamp = __version__
-    try:
-        import os
-        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        head = open(os.path.join(root, ".git", "HEAD"), encoding="utf-8").read().strip()
-        if head.startswith("ref: "):
-            sha = open(os.path.join(root, ".git", head[5:]), encoding="utf-8").read().strip()
-        else:
-            sha = head
-        if sha:
-            stamp += "+" + sha[:7]
-    except OSError:
-        pass  # a wheel install has no checkout; the version alone is the honest stamp
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sha = _git_head_sha(root)
+    if sha:
+        stamp += "+" + sha[:7]
     _ENGINE_STAMP = stamp
     return stamp
+
+
+def _read(path: str) -> str:
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def _git_head_sha(root: str) -> str:
+    """HEAD's sha for the checkout at `root`, or "" (a wheel install has no checkout; the version
+    alone is then the honest stamp). Handles a plain checkout, a worktree, and packed refs."""
+    try:
+        gitdir = os.path.join(root, ".git")
+        if os.path.isfile(gitdir):                      # worktree: ".git" is "gitdir: <path>"
+            line = _read(gitdir)
+            if not line.startswith("gitdir: "):
+                return ""
+            gitdir = os.path.normpath(os.path.join(root, line[len("gitdir: "):]))
+        head = _read(os.path.join(gitdir, "HEAD"))
+        if not head.startswith("ref: "):
+            return head                                 # detached HEAD
+        ref = head[len("ref: "):]
+        common = gitdir
+        if os.path.isfile(os.path.join(gitdir, "commondir")):
+            common = os.path.normpath(os.path.join(gitdir, _read(os.path.join(gitdir, "commondir"))))
+        for base in (gitdir, common):
+            p = os.path.join(base, ref)
+            if os.path.isfile(p):
+                return _read(p)
+        packed = os.path.join(common, "packed-refs")
+        if os.path.isfile(packed):
+            for line in _read(packed).splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[1] == ref:
+                    return parts[0]
+    except OSError:
+        pass
+    return ""
 
 
 engine_stamp()  # bind at import, not at first serve (CCO 07:43Z counterexample)
