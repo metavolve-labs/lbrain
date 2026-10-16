@@ -583,6 +583,7 @@ class Store:
         source_roots: list | None = None,
         max_fraction: float = 0.5,
         force: bool = False,
+        confirm_delist: bool = False,
     ) -> list[str]:
         """Drop docs whose source file no longer exists on disk — and their
         chunks, vectors, FTS rows, and wikilinks. (vec_chunks has no FK, so we
@@ -624,27 +625,46 @@ class Store:
         # `pruned: 0`, and its superseded text kept ranking against the record that
         # corrected it. Verified live 2026-07-28 — the exclusion shipped without
         # this and changed nothing a user would see.
-        # Fortify step 14 (2026-10-16): the >max_fraction guard exists for the unmounted-source failure, where
-        # files LOOK gone. A doc removed because the operator's config now EXCLUDES its path (a delist such as
-        # /claimed/) is a policy decision recorded in config.toml, not a vanished mount, so it does not count
-        # toward the guard. Before this split, delisting ~4,400 claimed mails from a seat brain (53% of it)
-        # was refused as "probably unmounted" and could only be forced past the guard that should still watch
-        # for real missing files. Missing files keep the guard exactly as before.
+        # Fortify step 14 (2026-10-16; CSO review of PR #78). Two guards, two failure shapes:
+        #  - MISSING files (the unmounted-source shape) are measured against the docs that STAY, never against a
+        #    total padded by a delist: otherwise a 53% delist hides a mount-gone event in the kept 47% (CSO P1).
+        #    --force-prune overrides, as before.
+        #  - Policy-EXCLUDED docs (a delist such as /claimed/) are a config decision, not a vanished mount, but a
+        #    mis-set marker (e.g. "/") is the same mass removal by accident (CSO P2). Over max_fraction of the
+        #    corpus it needs its own explicit --confirm-delist, distinct from --force-prune so the missing-files
+        #    guard stays live while an intended delist passes. Per-marker counts are printed so a wrong marker
+        #    is visible by name.
+        import sys as _sys
+
+        from .index import exclude_markers as _markers
+
         missing = [r["rel_path"] for r in rows if not os.path.exists(r["abs_path"])]
         _missing = set(missing)
-        excluded = [r["rel_path"] for r in rows
-                    if r["rel_path"] not in _missing and is_excluded_path(_Path(r["abs_path"]))]
+        excl_rows = [r for r in rows
+                     if r["rel_path"] not in _missing and is_excluded_path(_Path(r["abs_path"]))]
+        excluded = [r["rel_path"] for r in excl_rows]
         gone = missing + excluded
-        if missing and not force and rows and len(missing) / len(rows) > max_fraction:
+        kept = len(rows) - len(excluded)
+        if missing and not force and (kept <= 0 or len(missing) / kept > max_fraction):
             raise RuntimeError(
-                f"prune would remove {len(missing)}/{len(rows)} docs whose files are MISSING "
+                f"prune would remove {len(missing)}/{kept} kept docs whose files are MISSING "
                 f"(>{int(max_fraction * 100)}%) — refusing. A source directory is "
                 "probably unmounted. Re-run with --force-prune to override."
             )
         if excluded:
-            import sys as _sys
-            print(f"[lbrain] prune: {len(excluded)} doc(s) delisted by exclude_path_markers "
-                  f"(policy, not missing); {len(missing)} missing", file=_sys.stderr)
+            per = {}
+            for r in excl_rows:
+                hit = next((m for m in _markers() if m in r["abs_path"]), "(backup marker)")
+                per[hit] = per.get(hit, 0) + 1
+            detail = ", ".join(f"{m}: {n}" for m, n in sorted(per.items(), key=lambda x: -x[1]))
+            if not confirm_delist and rows and len(excluded) / len(rows) > max_fraction:
+                raise RuntimeError(
+                    f"delist would remove {len(excluded)}/{len(rows)} docs by exclude_path_markers "
+                    f"(>{int(max_fraction * 100)}%; {detail}) — refusing. If this delist is intended, "
+                    "re-run with --confirm-delist."
+                )
+            print(f"[lbrain] prune: {len(excluded)} doc(s) delisted by exclude_path_markers ({detail}); "
+                  f"{len(missing)} missing", file=_sys.stderr)
         for rel in gone:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
