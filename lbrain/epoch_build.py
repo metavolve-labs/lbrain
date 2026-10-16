@@ -171,7 +171,13 @@ def _run_cli(args: list[str], staging_home: Path, lbrain_bin: str,
         proc.communicate()
         raise
     if proc.returncode != 0:
-        tail = (out + "\n" + err)[-2000:]
+        both = out + "\n" + err
+        # Surface the failure line itself. A plain tail of the last 2,000 chars was filled by harmless parse
+        # warnings on large corpora and cut off the real error (fortify step 14, 2026-10-16: a prune refusal
+        # was invisible behind frontmatter warnings). Failure-marked lines first, then the tail.
+        key = [l for l in both.splitlines() if l.lstrip().startswith(("✗", "Error", "error:", "Traceback"))
+               or "refusing" in l]
+        tail = ("\n".join(key[-20:]) + "\n--- tail ---\n" if key else "") + both[-1500:]
         raise EpochError(f"`lbrain {' '.join(args)}` failed in staging (rc {proc.returncode}):\n{tail}")
     return out
 

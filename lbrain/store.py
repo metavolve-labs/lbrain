@@ -624,17 +624,27 @@ class Store:
         # `pruned: 0`, and its superseded text kept ranking against the record that
         # corrected it. Verified live 2026-07-28 — the exclusion shipped without
         # this and changed nothing a user would see.
-        gone = [
-            r["rel_path"]
-            for r in rows
-            if not os.path.exists(r["abs_path"]) or is_excluded_path(_Path(r["abs_path"]))
-        ]
-        if gone and not force and rows and len(gone) / len(rows) > max_fraction:
+        # Fortify step 14 (2026-10-16): the >max_fraction guard exists for the unmounted-source failure, where
+        # files LOOK gone. A doc removed because the operator's config now EXCLUDES its path (a delist such as
+        # /claimed/) is a policy decision recorded in config.toml, not a vanished mount, so it does not count
+        # toward the guard. Before this split, delisting ~4,400 claimed mails from a seat brain (53% of it)
+        # was refused as "probably unmounted" and could only be forced past the guard that should still watch
+        # for real missing files. Missing files keep the guard exactly as before.
+        missing = [r["rel_path"] for r in rows if not os.path.exists(r["abs_path"])]
+        _missing = set(missing)
+        excluded = [r["rel_path"] for r in rows
+                    if r["rel_path"] not in _missing and is_excluded_path(_Path(r["abs_path"]))]
+        gone = missing + excluded
+        if missing and not force and rows and len(missing) / len(rows) > max_fraction:
             raise RuntimeError(
-                f"prune would remove {len(gone)}/{len(rows)} docs "
+                f"prune would remove {len(missing)}/{len(rows)} docs whose files are MISSING "
                 f"(>{int(max_fraction * 100)}%) — refusing. A source directory is "
                 "probably unmounted. Re-run with --force-prune to override."
             )
+        if excluded:
+            import sys as _sys
+            print(f"[lbrain] prune: {len(excluded)} doc(s) delisted by exclude_path_markers "
+                  f"(policy, not missing); {len(missing)} missing", file=_sys.stderr)
         for rel in gone:
             self.delete_doc_chunks(rel)
             self.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
