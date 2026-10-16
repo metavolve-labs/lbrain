@@ -50,7 +50,11 @@ from .epoch import (
     publish,
     resolve_db_path,
 )
-from .index import discover
+from .index import discover, is_excluded_path
+
+# gate v2 source-collapse floor: a candidate keeping fewer than this fraction of a root's expected docs
+# (prior epoch minus intended exclusions) is refused. Same 50% line as the prune guards.
+SOURCE_COLLAPSE_FLOOR = 0.5
 
 
 # ---------- helpers ----------
@@ -253,6 +257,28 @@ def validate_candidate(
                     f"deletion-manifest: source root {src} enumerated EMPTY while the prior "
                     f"epoch held {len(prior_docs)} docs (decoy/hollow root) — refuse; pass "
                     "--confirm-source-removed to assert intent")
+
+        # -- source collapse: the candidate against the PRIOR EPOCH, per source root (2026-10-16) --
+        # CCO-REFRESH-20261016T111454: a wake build produced a candidate with 0 docs while every source root
+        # was present and populated on disk; the deletion manifest above passed (it asks "is the root still
+        # there", and it was) and only `chunks < 1` caught it. A PARTIAL collapse (a root that lost most of its
+        # docs in the scan) would have published. This compares what the candidate holds per root with what
+        # the prior epoch held there, net of docs the operator's exclude markers now remove on purpose (CCO
+        # review 122655Z: an intended delist, a first build, a confirmed removal are not failures).
+        cand_inv = _inventory(db_path, sources)
+        for src in (str(Path(s)) for s in sources):
+            prior_docs = prior_inv.get(src, {})
+            if not prior_docs or src in confirmed_removed:
+                continue  # first build of this root, or removal asserted
+            expected = [rp for rp in prior_docs if not is_excluded_path(Path(src) / rp)]
+            if not expected:
+                continue  # every prior doc is now excluded: an intended delist, judged by the prune guard
+            kept = len(cand_inv.get(src, {}))
+            if kept < SOURCE_COLLAPSE_FLOOR * len(expected):
+                failures.append(
+                    f"source-collapse: {src}: candidate holds {kept} docs vs {len(expected)} expected from the "
+                    f"prior epoch ({len(prior_docs) - len(expected)} more now excluded by markers) — a scan that "
+                    "lost most of a root is not a deletion; refuse; pass --confirm-source-removed to assert intent")
 
         # -- vector sanity (Grok G3: the right number of zeros) --
         # FULL scan, not first-32 (CSO R4: the realistic embed-failure shape is
