@@ -557,10 +557,13 @@ def test_cli_since_accepts_utc_minute_and_epoch_and_refuses_garbage(tmp_path):
     home, _ = _home(tmp_path)
     (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\nembedding_provider = "local"\n')
     c = tmp_path / ".claude-seat"
-    os.utime(_claude_transcript(c, SID_A, "2026-10-01T00:00:00Z"), (1_000_000, 1_000_000))
-    for since in ("2026-10-17T05:00Z", "2000000"):
+    import datetime as dt
+    cut = dt.datetime(2026, 10, 17, 5, 0, tzinfo=dt.timezone.utc).timestamp()
+    os.utime(_claude_transcript(c, SID_A, "2026-10-01T00:00:00Z"), (cut - 60, cut - 60))   # a minute before
+    os.utime(_claude_transcript(c, SID_B, "2026-10-17T05:00:30Z"), (cut + 60, cut + 60))   # a minute after
+    for since in ("2026-10-17T05:00Z", str(int(cut))):                     # the minute is read as UTC, not local
         r = _cli(home, "--claude-config-dir", str(c), "--dry-run", "--since", since)
         assert r.returncode == 0, (since, r.stdout, r.stderr)
-        assert "before cutoff 1" in r.stdout, (since, r.stdout)
+        assert "before cutoff 1" in r.stdout and "would stage 1" in r.stdout.lower(), (since, r.stdout)
     bad = _cli(home, "--claude-config-dir", str(c), "--dry-run", "--since", "yesterday")
     assert bad.returncode == 2 and "--since" in (bad.stdout + bad.stderr), (bad.stdout, bad.stderr)
