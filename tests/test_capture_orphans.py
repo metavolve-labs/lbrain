@@ -493,3 +493,74 @@ def test_unknown_location_of_an_unscanned_kind_is_not_an_error(tmp_path):
     cx = tmp_path / ".codex"; (cx / "sessions").mkdir(parents=True)
     rep = orphans.recover(cfg, home, codex_homes=[cx], live=[orphans.LiveProc("claude", None, 0.0, None)])
     assert rep.errors == []
+
+
+# --- --since cutoff (first wiring must not sweep a seat's history) and streaming hashing ---------------------------
+
+def test_since_skips_transcripts_last_written_before_the_cutoff(tmp_path):
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    old = _claude_transcript(c, SID_A, "2026-10-01T00:00:00Z")
+    new = _claude_transcript(c, SID_B, "2026-10-16T21:00:00Z")
+    os.utime(old, (1_000_000, 1_000_000))
+    os.utime(new, (3_000_000, 3_000_000))
+    rep = orphans.recover(cfg, home, claude_dirs=[c], live=[], since=2_000_000)
+    assert rep.staged == [SID_B] and rep.before_cutoff == 1 and _staged_sids(home) == [SID_B]
+
+
+def test_since_boundary_is_inclusive_and_a_post_cutoff_write_is_captured(tmp_path):
+    """A session killed after wiring always has a write after the cutoff: it is captured, even if it began before."""
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    p = _claude_transcript(c, SID_A, "2026-10-01T00:00:00Z")
+    os.utime(p, (2_000_000, 2_000_000))                                           # exactly at the cutoff
+    rep = orphans.recover(cfg, home, claude_dirs=[c], live=[], since=2_000_000)
+    assert rep.staged == [SID_A] and rep.before_cutoff == 0
+
+
+def test_without_since_history_is_still_captured(tmp_path):
+    """Backfill stays available: no cutoff means every orphan, however old."""
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    os.utime(_claude_transcript(c, SID_A, "2026-01-01T00:00:00Z"), (1000, 1000))
+    rep = orphans.recover(cfg, home, claude_dirs=[c], live=[])
+    assert rep.staged == [SID_A] and rep.before_cutoff == 0
+
+
+def test_streaming_hash_matches_the_whole_file_hash_across_blocks(tmp_path):
+    import hashlib
+    p = tmp_path / "big.jsonl"
+    data = os.urandom((1 << 20) * 2 + 12345)                                     # spans three 1 MiB blocks
+    p.write_bytes(data)
+    assert orphans._sha256_file(p) == hashlib.sha256(data).hexdigest()
+
+
+def test_dry_run_and_known_content_never_load_a_whole_transcript(tmp_path, monkeypatch):
+    """Peak memory is one transcript at staging, not all of them: hashing streams, dry run reads no payload."""
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    orphans.recover(cfg, home, claude_dirs=[c], live=[])                          # captured once
+    _claude_transcript(c, SID_B, "2026-10-16T22:00:00Z")
+    real = Path.read_bytes
+
+    def guarded(self):
+        if self.suffix == ".jsonl" and c in self.parents:
+            raise AssertionError(f"whole transcript loaded: {self}")
+        return real(self)
+    monkeypatch.setattr(Path, "read_bytes", guarded)
+    rep = orphans.recover(cfg, home, claude_dirs=[c], live=[], dry_run=True)
+    assert rep.staged == [SID_B] and rep.known == 1
+
+
+def test_cli_since_accepts_utc_minute_and_epoch_and_refuses_garbage(tmp_path):
+    home, _ = _home(tmp_path)
+    (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\nembedding_provider = "local"\n')
+    c = tmp_path / ".claude-seat"
+    os.utime(_claude_transcript(c, SID_A, "2026-10-01T00:00:00Z"), (1_000_000, 1_000_000))
+    for since in ("2026-10-17T05:00Z", "2000000"):
+        r = _cli(home, "--claude-config-dir", str(c), "--dry-run", "--since", since)
+        assert r.returncode == 0, (since, r.stdout, r.stderr)
+        assert "before cutoff 1" in r.stdout, (since, r.stdout)
+    bad = _cli(home, "--claude-config-dir", str(c), "--dry-run", "--since", "yesterday")
+    assert bad.returncode == 2 and "--since" in (bad.stdout + bad.stderr), (bad.stdout, bad.stderr)

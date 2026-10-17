@@ -67,6 +67,7 @@ class OrphanReport:
     staged: list[str] = field(default_factory=list)
     known: int = 0
     older: int = 0
+    before_cutoff: int = 0
     live: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -262,8 +263,22 @@ def first_timestamp(path: Path) -> str:
     return ""
 
 
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), dry_run=False,
-            live=None) -> OrphanReport:
+            live=None, since: float | None = None) -> OrphanReport:
+    """Stage this seat's orphaned transcripts. ``since`` (epoch seconds): skip transcripts last written before it.
+    The launcher passes the date orphan capture was wired, so the first launch does not sweep a seat's whole history
+    into its brain (measured on the CTO home: 93 never-captured transcripts, 938 MB, some deliberately kept out of
+    every index); a crash after the cutoff always leaves a later mtime, so no real orphan is missed. Backfilling
+    history is a separate, deliberate choice (run without ``since``). Content is hashed STREAMING and payloads are
+    read one at a time at staging, so peak memory is one transcript, not all of them."""
     from .spool import SpoolIntegrityError, spool_capture
     from .write_gates import WriteGateError
 
@@ -288,22 +303,37 @@ def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), d
             rep.live.append(t.session_id)
             continue
         try:
-            payload = t.path.read_bytes()
+            st = t.path.stat()
+            if since is not None and st.st_mtime < since:
+                rep.before_cutoff += 1
+                continue
+            if st.st_size == 0:
+                continue
+            digest = _sha256_file(t.path)
         except OSError as e:
             rep.errors.append(f"{t.path}: {e}")
             continue
-        if not payload:
-            continue
-        if hashlib.sha256(payload).hexdigest() in seen:
+        if digest in seen:
             rep.known += 1
             continue
-        if is_older_form(payload, t.session_id, metas):
-            rep.older += 1
-            continue
-        todo.append((first_timestamp(t.path), t, payload))
-    for _, t, payload in sorted(todo, key=lambda x: (x[0], str(x[1].path))):
+        if any(m.get("session_id") == t.session_id for m in metas):
+            try:
+                older = is_older_form(t.path.read_bytes(), t.session_id, metas)
+            except OSError as e:
+                rep.errors.append(f"{t.path}: {e}")
+                continue
+            if older:
+                rep.older += 1
+                continue
+        todo.append((first_timestamp(t.path), t))
+    for _, t in sorted(todo, key=lambda x: (x[0], str(x[1].path))):
         if dry_run:
             rep.staged.append(t.session_id)
+            continue
+        try:
+            payload = t.path.read_bytes()
+        except OSError as e:
+            rep.errors.append(f"{t.path}: {e}")
             continue
         try:
             res = spool_capture(cfg, home, payload, session_id=t.session_id,
