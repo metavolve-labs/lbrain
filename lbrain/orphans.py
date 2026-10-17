@@ -120,13 +120,14 @@ def _resumed_sid(args: list[str]) -> str | None:
 def _live_processes(proc_root: Path | str | None = None, btime: float | None = None) -> list[LiveProc]:
     """Every live claude / codex / grok process. Raises LivenessUnreadable when the table cannot be read.
 
-    ``proc_root`` (default /proc, or $LBRAIN_PROC_ROOT) and ``btime`` exist so the reader ITSELF can be tested
-    against a fabricated table (CSO round 2: a fail-closed path no test exercises is not a tested path).
+    ``proc_root`` (default /proc) and ``btime`` are FUNCTION PARAMETERS ONLY, so the reader itself can be tested
+    against a fabricated table (CSO round 2). There is deliberately no environment override: an env var that
+    redirects the process table is a one-line fail-open lever that a seat's <home>/env would carry (CSO round 3).
     Location: the kind's env key (CLAUDE_CONFIG_DIR, CODEX_HOME, GROK_HOME) from THE PROCESS'S environment, a
     relative value resolved against the process's own cwd; without the key, the process's own HOME plus the
     default dir. Never the scanner's home or cwd (CSO round 2 #1). If the environment cannot be read, or neither
     the key nor HOME is in it, the location is UNKNOWN (None), which protects every location of that kind."""
-    root = Path(proc_root or os.environ.get("LBRAIN_PROC_ROOT") or "/proc")
+    root = Path(proc_root) if proc_root is not None else Path("/proc")
     try:
         if btime is None:
             with open(root / "stat", encoding="ascii") as f:
@@ -156,24 +157,33 @@ def _live_processes(proc_root: Path | str | None = None, btime: float | None = N
         except (OSError, ValueError, IndexError) as e:
             raise LivenessUnreadable(f"{d}/stat unreadable: {e}") from e
         location: Path | None = None
+        env: dict | None = {}
         try:
-            env = {}
             for kv in (d / "environ").read_bytes().split(b"\0"):
                 for want in (key, "HOME"):
                     pre = want.encode() + b"="
                     if kv.startswith(pre):
                         env[want] = kv[len(pre):].decode(errors="replace")
-            if env.get(key):
-                loc = Path(env[key])
-                if not loc.is_absolute():
-                    loc = Path(os.readlink(d / "cwd")) / loc
-                location = loc.resolve()
-            elif env.get("HOME"):
-                location = (Path(env["HOME"]) / default).resolve()
         except FileNotFoundError:
-            continue
+            continue                                     # exited while we looked
         except OSError:
-            location = None                              # environment unreadable: unknown
+            env = None                                   # environment unreadable: location unknown
+
+        def _absolute(value: str) -> Path | None:
+            p = Path(value)
+            if not p.is_absolute():
+                try:
+                    p = Path(os.readlink(d / "cwd")) / p     # the PROCESS's cwd, never the scanner's
+                except OSError:
+                    return None                          # cwd unreadable or gone: unknown, never a dropped process
+            return p.resolve()
+
+        if env is not None:
+            if env.get(key):
+                location = _absolute(env[key])
+            elif env.get("HOME"):
+                h = _absolute(env["HOME"])
+                location = (h / default).resolve() if h is not None else None
         out.append(LiveProc(kind, location, start, _resumed_sid(args)))
     return out
 
@@ -264,8 +274,9 @@ def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), d
         except LivenessUnreadable as e:
             rep.errors.append(f"liveness unknown, nothing staged (fail closed): {e}")
             return rep
+    scanned = {k for k, locs in (("claude", claude_dirs), ("codex", codex_homes), ("grok", grok_homes)) if locs}
     for p in live:
-        if p.location is None:
+        if p.location is None and p.kind in scanned:
             rep.errors.append(f"a live {p.kind} process's location could not be read; every {p.kind} location "
                               "is treated as live (fail closed)")
     metas = _metas(home)

@@ -419,14 +419,77 @@ def test_older_form_when_the_captured_payload_was_drained(tmp_path):
     assert rep.staged == [] and rep.older == 1
 
 
-def test_cli_fail_closed_exits_non_zero(tmp_path):
-    """CSO round 2 #3: the fail-closed path must report AND exit non-zero (here: an unreadable process table)."""
+def test_cli_fail_closed_exits_non_zero(tmp_path, monkeypatch):
+    """CSO round 2 #3 / round 3: the fail-closed path reports AND exits non-zero. In-process (CliRunner) with the
+    reader monkeypatched: there is deliberately no environment lever to point the CLI at a fake process table."""
+    from click.testing import CliRunner
+    import lbrain.cli as lcli
+    import lbrain.config as lconfig
     home, _ = _home(tmp_path)
     (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\nembedding_provider = "local"\n')
+    monkeypatch.setattr(lcli, "CONFIG_DIR", home)
+    monkeypatch.setattr(lconfig, "CONFIG_PATH", home / "config.toml")
+    monkeypatch.setenv("LBRAIN_ARCHIVE_PASSPHRASE", "x" * 32)
     c = tmp_path / ".claude-seat"
     _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    monkeypatch.setattr(orphans, "_live_processes", lambda *a, **k: [orphans.LiveProc("claude", None, 0.0, None)])
+    res = CliRunner().invoke(lcli.main, ["capture-orphans", "--claude-config-dir", str(c)])
+    assert res.exit_code != 0 and not _staged_sids(home), (res.exit_code, res.output)
+
+
+def test_no_environment_variable_redirects_the_process_table(tmp_path, monkeypatch):
+    """CSO round 3 D1: $LBRAIN_PROC_ROOT (or any env) must NOT redirect the reader. With it pointing at an empty
+    table, a REAL live claude stand-in must still be seen."""
+    empty = _fake_root(tmp_path)
+    monkeypatch.setenv("LBRAIN_PROC_ROOT", str(empty))
+    cfg_dir = tmp_path / ".claude-envlever"; cfg_dir.mkdir()
+    proc = _stand_in("claude", ["--resume", SID_B], {"CLAUDE_CONFIG_DIR": str(cfg_dir)})
+    try:
+        assert _wait_live(lambda p: p.session_id == SID_B), "the env var redirected the process table"
+    finally:
+        proc.kill(); proc.wait()
+
+
+def test_reader_unreadable_stat_raises(tmp_path):
+    """CSO round 3 F1c: an unreadable /proc/<pid>/stat is not skipped."""
     root = _fake_root(tmp_path)
-    _fake_proc(root, 4249, ["claude"], environ_unreadable=True)
-    r = _cli(home, "--claude-config-dir", str(c), env_extra={"LBRAIN_PROC_ROOT": str(root),
-                                                              "LBRAIN_ARCHIVE_PASSPHRASE": "x" * 32})
-    assert r.returncode != 0 and not _staged_sids(home), (r.returncode, r.stdout, r.stderr)
+    d = _fake_proc(root, 4250, ["claude"], environ={"HOME": str(tmp_path)})
+    (d / "stat").unlink(); (d / "stat").mkdir()
+    with pytest.raises(orphans.LivenessUnreadable):
+        orphans._live_processes(root)
+
+
+def test_symlink_pointing_inside_the_location_is_not_followed(tmp_path):
+    """CSO round 3 F6b: a symlink whose target is INSIDE the location is still a symlink, never captured twice."""
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    target = c / "notes" / "scratch.txt"; target.parent.mkdir(parents=True)        # INSIDE the location, not a transcript
+    target.write_text(json.dumps({"timestamp": "2026-10-16T22:00:00Z", "x": "distinct content"}) + "\n")
+    link = c / "projects" / "-proj" / f"{SID_B}.jsonl"
+    link.symlink_to(target)
+    orphans.recover(cfg, home, claude_dirs=[c], live=[])
+    assert _staged_sids(home) == [SID_A]
+
+
+def test_reader_unreadable_cwd_is_unknown_not_dropped(tmp_path):
+    """CSO round 3 N1: a relative CLAUDE_CONFIG_DIR with no readable cwd -> unknown location (fail closed), never
+    a process dropped from the live list."""
+    root = _fake_root(tmp_path)
+    _fake_proc(root, 4251, ["claude"], environ={"CLAUDE_CONFIG_DIR": "rel/.claude-y"})   # no cwd link
+    assert [(p.kind, p.location) for p in orphans._live_processes(root)] == [("claude", None)]
+
+
+def test_reader_resolves_a_relative_home_against_the_process_cwd(tmp_path):
+    root = _fake_root(tmp_path)
+    pcwd = tmp_path / "proc-cwd2"; pcwd.mkdir()
+    _fake_proc(root, 4252, ["codex"], environ={"HOME": "relhome"}, cwd=pcwd)
+    assert orphans._live_processes(root)[0].location == (pcwd / "relhome" / ".codex").resolve()
+
+
+def test_unknown_location_of_an_unscanned_kind_is_not_an_error(tmp_path):
+    """CSO round 3 noise: an unknown-location claude process does not fail a codex-only scan."""
+    home, cfg = _home(tmp_path)
+    cx = tmp_path / ".codex"; (cx / "sessions").mkdir(parents=True)
+    rep = orphans.recover(cfg, home, codex_homes=[cx], live=[orphans.LiveProc("claude", None, 0.0, None)])
+    assert rep.errors == []
