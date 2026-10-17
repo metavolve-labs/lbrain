@@ -237,6 +237,12 @@ class ArchiveStore:
             return
         aid = row["archive_id"]
         self.db.execute("DELETE FROM vec_archives WHERE rowid = ?", (aid,))
+        # chunk text and vectors are derived from the snapshot: ANY shred removes them (a hard shred promises nothing
+        # readable survives locally; a soft shred is unsearchable like its whole-snapshot vector). CSO PR #83 D1.
+        if self.has_chunk_tables():
+            for (cid,) in self.db.execute("SELECT chunk_id FROM archive_chunks WHERE archive_id = ?", (aid,)).fetchall():
+                self.db.execute("DELETE FROM vec_archive_chunks WHERE rowid = ?", (cid,))
+            self.db.execute("DELETE FROM archive_chunks WHERE archive_id = ?", (aid,))
         if purge_snapshot:
             self.db.execute("DELETE FROM fts_archives WHERE rowid = ?", (aid,))
             self.db.execute(
@@ -283,7 +289,9 @@ def chunk_snapshot(text: str, size: int = 1800, overlap: int = 200) -> list[str]
             out.append(piece)
         if end >= len(text):
             break
-        i = max(end - overlap, i + 1)
+        nxt = max(end - overlap, i + 1)
+        nl2 = text.find("\n", nxt, end)            # start the next chunk on a line boundary inside the overlap (D2)
+        i = nl2 + 1 if nl2 != -1 and nl2 + 1 < end else nxt
     return out
 
 

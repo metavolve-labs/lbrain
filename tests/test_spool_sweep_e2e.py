@@ -162,7 +162,9 @@ def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path):
     assert rep["published"] and rep["sweep"]["swept"] == 1, rep["sweep"]
     ac = rep.get("archive_chunks") or {}
     assert "error" not in ac and ac.get("served") == 1, ac                 # the reindex step ran in the build
-    # the capture itself chunk-embedded the snapshot at sweep time, so the reindex finds nothing left to do
+    # the ARCHIVER chunk-embedded the snapshot at capture time, so the reindex finds nothing left to do; if the
+    # archiver's write path were removed, the reindex would report chunked == 1 here (CSO PR #83 D3 / B8)
+    assert ac.get("chunked") == 0, ac
     db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
     con = eb._connect_vec(db)
     n_rows = con.execute("SELECT count(*) FROM archive_chunks").fetchone()[0]

@@ -128,3 +128,56 @@ def test_chunker_is_deterministic_overlapping_and_cuts_between_lines():
     assert all(c.endswith("\n") or c is a[-1] for c in a[:-1])                     # cut at a newline
     assert a[1][:50] in a[0]                                                         # overlap carries context
     assert chunk_snapshot("") == [] and chunk_snapshot("short") == ["short"]
+
+
+# ---- CSO PR #83 review (0330Z) ---------------------------------------------------------------------------------
+
+def _chunk_counts(st, txid):
+    aid = st.db.execute("SELECT archive_id FROM archives WHERE txid = ?", (txid,)).fetchone()[0]
+    rows = st.db.execute("SELECT chunk_id FROM archive_chunks WHERE archive_id = ?", (aid,)).fetchall()
+    vecs = sum(st.db.execute("SELECT count(*) FROM vec_archive_chunks WHERE rowid = ?", (r[0],)).fetchone()[0] for r in rows)
+    return len(rows), vecs
+
+
+@pytest.mark.parametrize("purge", [True, False])
+def test_shred_removes_chunk_text_and_vectors(tmp_path, purge):
+    """D1 (privacy): a HARD shred promises nothing readable survives locally; chunk text must go too. A soft shred
+    is unsearchable like its whole-snapshot vector, so its chunks go as well."""
+    st = _store(tmp_path / "a.db")
+    _add(st, "a", "sess-A", "secret line one\nsecret line two\n", 10, _vec(1, 0))
+    st.write_archive_chunks("a", ["secret line one\n", "secret line two\n"], [_vec(1, 0), _vec(0, 1)])
+    st.mark_archive_shredded("a", purge_snapshot=purge)
+    assert _chunk_counts(st, "a") == (0, 0)
+    assert st.search_archives(_vec(0, 1), k=3) == []
+
+
+def test_search_filters_a_shredded_archive_that_still_has_chunks(tmp_path):
+    """The shredded filter in search is tested on its own: a legacy row (shredded flag set without its chunks being
+    removed) must not be served through a chunk."""
+    st = _store(tmp_path / "a.db")
+    _add(st, "a", "sess-A", "x\n", 10, _vec(1, 0))
+    st.write_archive_chunks("a", ["x\n"], [_vec(0, 1)])
+    st.db.execute("UPDATE archives SET shredded = 1 WHERE txid = 'a'"); st.db.commit()
+    assert st.search_archives(_vec(0, 1), k=3) == []
+
+
+def test_carry_never_copies_a_shredded_archives_chunk_text(tmp_path):
+    prior = _store(tmp_path / "prior.db")
+    _add(prior, "live", "sess-L", "live\n", 10, _vec(1, 0))
+    _add(prior, "gone", "sess-G", "gone\n", 10, _vec(0, 1))
+    prior.write_archive_chunks("live", ["live chunk"], [_vec(1, 0)])
+    prior.write_archive_chunks("gone", ["SHREDDED CLEARTEXT"], [_vec(0, 1)])
+    prior.db.execute("UPDATE archives SET shredded = 1 WHERE txid = 'gone'"); prior.db.commit(); prior.db.close()
+    staging = tmp_path / "staging.db"
+    epoch_build._connect_vec(staging).close()
+    epoch_build._carry_archive_index(tmp_path / "prior.db", staging)
+    st = _store(staging)
+    texts = [r[0] for r in st.db.execute("SELECT text FROM archive_chunks")]
+    assert texts == ["live chunk"]
+
+
+def test_every_chunk_after_the_first_starts_on_a_line():
+    """D2: a chunk starting mid-word previews badly ('el in `a545…'); the next chunk starts on a line boundary."""
+    text = "".join(f"line {i:04d} with a few words of session text here\n" for i in range(500))
+    chunks = chunk_snapshot(text)
+    assert len(chunks) > 5 and all(c.startswith("line ") for c in chunks)

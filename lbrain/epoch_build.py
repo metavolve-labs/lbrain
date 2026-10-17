@@ -463,6 +463,8 @@ def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
             if any(len(b) != width * 4 for b in cvec.values()):
                 raise EpochError(f"prior archive chunk index: vector bytes do not match the width {width}; refusing the carry")
             st._ensure_chunk_schema()
+            shredded_ids = {r["archive_id"] for r in rows if r.get("shredded")}
+            crow = [r for r in crow if r["archive_id"] not in shredded_ids]   # never carry a shredded archive's text (D1)
             for r in crow:
                 con.execute("INSERT OR IGNORE INTO archive_chunks (chunk_id, archive_id, ord, text) VALUES (?, ?, ?, ?)",
                             (r["chunk_id"], r["archive_id"], r["ord"], r["text"]))
