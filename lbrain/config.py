@@ -251,6 +251,10 @@ class Config:
     # Empty by default — an exclusion that ships as a default is an ambient default.
     # Applied at discover() for import, currency AND the epoch deletion manifest.
     exclude_path_markers: list[str] = field(default_factory=list)
+    # Transcripts `capture-orphans` must NEVER stage, whatever their mtime: an exact session id, or (an entry
+    # containing "/") a substring of the transcript's path. Empty by default. An exclusion is a decision
+    # recorded by name, never a side effect of a timestamp (CSO, PR #84 review).
+    capture_keep_out: list[str] = field(default_factory=list)
     # Where `-retired-` / `-archived-` / `-superseded-` path markers count: "path" (every
     # segment, filename included; default, unchanged) or "dirs" (directories only). Fortify A11.
     retired_marker_scope: str = "path"
@@ -372,6 +376,7 @@ class Config:
             allowed_doc_types=list(raw.get("allowed_doc_types", []) or []),
             allowed_path_prefixes=list(raw.get("allowed_path_prefixes", []) or []),
             exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
+            capture_keep_out=list(raw.get("capture_keep_out", []) or []),
             retired_marker_scope=raw.get("retired_marker_scope", cls.retired_marker_scope),
             banner_retirement=raw.get("banner_retirement", cls.banner_retirement) is True,
             keyword_supersede_penalty=raw.get("keyword_supersede_penalty", cls.keyword_supersede_penalty),
@@ -434,6 +439,7 @@ class Config:
             + ", ".join(q(x) for x in self.allowed_path_prefixes) + "]",
             "exclude_path_markers = ["
             + ", ".join(q(x) for x in self.exclude_path_markers) + "]",
+            "capture_keep_out = [" + ", ".join(q(x) for x in self.capture_keep_out) + "]",
             f"retired_marker_scope = {q(self.retired_marker_scope)}",
             f"banner_retirement = {str(self.banner_retirement).lower()}",
             f"keyword_supersede_penalty = {float(self.keyword_supersede_penalty)}",
