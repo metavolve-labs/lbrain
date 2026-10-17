@@ -476,7 +476,38 @@ def sweep_status(as_json):
     click.secho(f"  next epoch build: {rep['next_build_would']}", fg=("green" if have_pass or not staged else "yellow"))
 
 
-_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status]
+def embedder_or_none(cfg):
+    """The embedder, or None ONLY when the [local] extra is not installed (the cold-CI case: LocalEmbedClient raises
+    RuntimeError chained from ModuleNotFoundError). Any other failure (a wrong model, a hosted provider without its
+    key, a broken install) RAISES: a seat must never silently stop chunking its archives (CSO 0433Z condition)."""
+    try:
+        return make_embedder(cfg)
+    except RuntimeError as e:
+        if isinstance(e.__cause__, ModuleNotFoundError):
+            return None
+        raise
+
+
+@click.command(name="archive-chunks-reindex")
+def archive_chunks_reindex():
+    """Internal (run by `epoch build` in its staging home): chunk-embed every served archive that lacks chunk vectors,
+    drop chunks of superseded or shredded ones. Gated write path: refuses on a live epoch home."""
+    from .storage import reindex_chunks
+    cfg = Config.load()
+    store = _open(cfg, write=True)
+    embedder = embedder_or_none(cfg)
+    if embedder is None:
+        click.echo("archive-chunks-reindex: the [local] embedding extra is not installed; dropping only, chunking skipped")
+    try:
+        rep = reindex_chunks(ArchiveStore(store.db, store.embedding_dim), embedder.embed if embedder else None)
+    finally:
+        if embedder is not None:
+            embedder.close()
+        store.close()
+    click.echo("ARCHIVE-CHUNKS " + json.dumps(rep, sort_keys=True))
+
+
+_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status, archive_chunks_reindex]
 
 
 def register(main) -> None:

@@ -12,6 +12,8 @@ by accident. Local embedding provider; nothing leaves the machine.
 import hashlib, json, os, subprocess, sys
 from pathlib import Path
 
+import pytest
+
 from lbrain import epoch_build as eb
 from lbrain.config import Config
 from lbrain.spool import META_SUFFIX, PAYLOAD_SUFFIX, staged_count, staging_dir, swept_items, sweep_receipt_path
@@ -175,3 +177,31 @@ def test_e7_orphan_captured_at_wake_is_swept_into_the_published_epoch(tmp_path, 
     out = subprocess.run([_bin(tmp_path), "retrieve", "--txid", hit[0][0], "--out", str(tmp_path / "rt.bin")],
                          env={**os.environ, "LBRAIN_HOME": str(home)}, capture_output=True, text=True)
     assert out.returncode == 0 and (tmp_path / "rt.bin").read_bytes() == t.read_bytes(), out.stdout + out.stderr
+
+
+def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path, capsys):
+    """Chunked archive vectors through a REAL build: a long session is swept, the build's reindex step chunk-embeds it
+    in staging, and the PUBLISHED epoch carries its chunk rows with one vector each."""
+    home = _home(tmp_path)
+    long_jsonl = "".join(
+        json.dumps({"type": "user", "timestamp": f"2026-10-17T00:{i // 60:02d}:{i % 60:02d}Z",
+                    "message": {"content": f"turn {i}: the archive chunking e2e check line, with enough words to fill."}}) + "\n"
+        for i in range(400))
+    _stage(home, "sess-long", long_jsonl)
+    rep = _build(home, tmp_path, delta=False)
+    assert rep["published"] and rep["sweep"]["swept"] == 1, rep["sweep"]
+    ac = rep.get("archive_chunks") or {}
+    assert "error" not in ac and ac.get("served") == 1, ac                 # the reindex step ran in the build
+    if ac.get("skipped_no_embedder"):
+        # cold CI (no [local] extra): the reindex ran drop-only and said so loudly in the build output (CSO 0433Z)
+        assert "NOT chunk-indexed" in capsys.readouterr().out
+        pytest.skip("no embedder in this environment: the reindex ran drop-only (reported, not an error)")
+    # the ARCHIVER chunk-embedded the snapshot at capture time, so the reindex finds nothing left to do; if the
+    # archiver's write path were removed, the reindex would report chunked == 1 here (CSO PR #83 D3 / B8)
+    assert ac.get("chunked") == 0, ac
+    db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
+    con = eb._connect_vec(db)
+    n_rows = con.execute("SELECT count(*) FROM archive_chunks").fetchone()[0]
+    n_vecs = con.execute("SELECT count(*) FROM vec_archive_chunks").fetchone()[0]
+    con.close()
+    assert n_rows == n_vecs and n_rows > 1, (n_rows, n_vecs)
