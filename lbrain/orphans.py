@@ -99,11 +99,11 @@ def find_transcripts(claude_dirs=(), codex_homes=(), grok_homes=()) -> list[Tran
 
 def _kind_of(args: list[str]) -> str | None:
     a0 = os.path.basename(args[0]) if args else ""
-    if a0 == "claude" or any(a.endswith(("claude-code/cli.js", "claude-code/cli.mjs")) for a in args[:6]):
+    if a0 == "claude" or any(a.endswith(("claude-code/cli.js", "claude-code/cli.mjs")) for a in args):
         return "claude"
-    if a0 == "codex" or any(a.endswith(("codex/bin/codex.js", "@openai/codex/bin/codex")) for a in args[:6]):
+    if a0 == "codex" or any(a.endswith(("codex/bin/codex.js", "@openai/codex/bin/codex")) for a in args):
         return "codex"
-    if a0 == "grok" or any(a.endswith(("grok-cli/dist/index.js", "/bin/grok")) for a in args[:6]):
+    if a0 == "grok" or any(a.endswith(("grok-cli/dist/index.js", "/bin/grok")) for a in args):
         return "grok"
     return None
 
@@ -117,15 +117,24 @@ def _resumed_sid(args: list[str]) -> str | None:
     return None
 
 
-def _live_processes() -> list[LiveProc]:
-    """Every live claude / codex / grok process. Raises LivenessUnreadable when the table cannot be read."""
+def _live_processes(proc_root: Path | str | None = None, btime: float | None = None) -> list[LiveProc]:
+    """Every live claude / codex / grok process. Raises LivenessUnreadable when the table cannot be read.
+
+    ``proc_root`` (default /proc, or $LBRAIN_PROC_ROOT) and ``btime`` exist so the reader ITSELF can be tested
+    against a fabricated table (CSO round 2: a fail-closed path no test exercises is not a tested path).
+    Location: the kind's env key (CLAUDE_CONFIG_DIR, CODEX_HOME, GROK_HOME) from THE PROCESS'S environment, a
+    relative value resolved against the process's own cwd; without the key, the process's own HOME plus the
+    default dir. Never the scanner's home or cwd (CSO round 2 #1). If the environment cannot be read, or neither
+    the key nor HOME is in it, the location is UNKNOWN (None), which protects every location of that kind."""
+    root = Path(proc_root or os.environ.get("LBRAIN_PROC_ROOT") or "/proc")
     try:
-        with open("/proc/stat", encoding="ascii") as f:
-            boot = float(next(l for l in f if l.startswith("btime")).split()[1])
+        if btime is None:
+            with open(root / "stat", encoding="ascii") as f:
+                btime = float(next(l for l in f if l.startswith("btime")).split()[1])
         hz = os.sysconf("SC_CLK_TCK")
-        pids = [d for d in Path("/proc").iterdir() if d.name.isdigit()]
+        pids = [d for d in root.iterdir() if d.name.isdigit()]
     except (OSError, StopIteration, ValueError) as e:
-        raise LivenessUnreadable(f"/proc unreadable: {e}") from e
+        raise LivenessUnreadable(f"{root} unreadable: {e}") from e
     out: list[LiveProc] = []
     for d in pids:
         try:
@@ -140,22 +149,31 @@ def _live_processes() -> list[LiveProc]:
         key, default = HOME_KEY[kind]
         try:
             stat_fields = (d / "stat").read_text(encoding="ascii", errors="replace").rsplit(")", 1)[1].split()
-            computed = boot + int(stat_fields[19]) / hz
+            computed = btime + int(stat_fields[19]) / hz
             start = min(computed, d.stat().st_mtime)
         except FileNotFoundError:
             continue
         except (OSError, ValueError, IndexError) as e:
             raise LivenessUnreadable(f"{d}/stat unreadable: {e}") from e
-        location: Path | None
+        location: Path | None = None
         try:
-            prefix = key.encode() + b"="
-            val = next((kv[len(prefix):] for kv in (d / "environ").read_bytes().split(b"\0") if kv.startswith(prefix)), None)
-            home = val.decode(errors="replace") if val else str(Path.home() / default)
-            location = Path(home).resolve()
+            env = {}
+            for kv in (d / "environ").read_bytes().split(b"\0"):
+                for want in (key, "HOME"):
+                    pre = want.encode() + b"="
+                    if kv.startswith(pre):
+                        env[want] = kv[len(pre):].decode(errors="replace")
+            if env.get(key):
+                loc = Path(env[key])
+                if not loc.is_absolute():
+                    loc = Path(os.readlink(d / "cwd")) / loc
+                location = loc.resolve()
+            elif env.get("HOME"):
+                location = (Path(env["HOME"]) / default).resolve()
         except FileNotFoundError:
             continue
         except OSError:
-            location = None                              # unknown: protects every location of this kind
+            location = None                              # environment unreadable: unknown
         out.append(LiveProc(kind, location, start, _resumed_sid(args)))
     return out
 
@@ -246,6 +264,10 @@ def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), d
         except LivenessUnreadable as e:
             rep.errors.append(f"liveness unknown, nothing staged (fail closed): {e}")
             return rep
+    for p in live:
+        if p.location is None:
+            rep.errors.append(f"a live {p.kind} process's location could not be read; every {p.kind} location "
+                              "is treated as live (fail closed)")
     metas = _metas(home)
     seen = {m.get("sha256", "") for m in metas}
     todo = []

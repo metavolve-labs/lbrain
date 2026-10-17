@@ -310,3 +310,123 @@ def test_orphan_capture_is_titled_by_session_id_like_the_sessionend_hook(tmp_pat
     orphans.recover(cfg, home, claude_dirs=[c], live=[])
     titles = [json.loads(m.read_text())["title"] for m in staging_dir(home).glob(f"*{META_SUFFIX}")]
     assert titles == [SID_A]
+
+
+# ---- CSO round 2: the reader itself, against a fabricated process table -----------------------------------------
+
+def _fake_proc(root: Path, pid: int, argv: list[str], start_ticks: int = 100, environ: dict | None = None,
+               environ_unreadable: bool = False, cwd: Path | None = None, cmdline_unreadable: bool = False):
+    d = root / str(pid); d.mkdir(parents=True)
+    if cmdline_unreadable:
+        (d / "cmdline").mkdir()                                     # reading a directory raises: unreadable
+    else:
+        (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    fields = ["S"] + ["0"] * 18 + [str(start_ticks)] + ["0"] * 10   # field 22 (index 19 after ')') = starttime
+    (d / "stat").write_text(f"{pid} (proc) " + " ".join(fields), encoding="ascii")
+    if environ_unreadable:
+        (d / "environ").mkdir()
+    else:
+        (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in (environ or {}).items()) + b"\0")
+    if cwd is not None:
+        (d / "cwd").symlink_to(cwd)
+    return d
+
+
+def _fake_root(tmp_path):
+    root = tmp_path / "proc"; root.mkdir()
+    (root / "stat").write_text("cpu 0\nbtime 1000\n", encoding="ascii")
+    return root
+
+
+def test_reader_unreadable_environ_gives_unknown_location_and_recover_reports_it(tmp_path):
+    root = _fake_root(tmp_path)
+    _fake_proc(root, 4242, ["claude"], environ_unreadable=True)
+    live = orphans._live_processes(root)
+    assert [(p.kind, p.location) for p in live] == [("claude", None)]
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    rep = orphans.recover(cfg, home, claude_dirs=[c], live=live)
+    assert _staged_sids(home) == [] and rep.errors
+
+
+def test_reader_unreadable_cmdline_raises(tmp_path):
+    root = _fake_root(tmp_path)
+    _fake_proc(root, 4243, ["claude"], cmdline_unreadable=True)
+    with pytest.raises(orphans.LivenessUnreadable):
+        orphans._live_processes(root)
+
+
+def test_reader_start_is_clamped_to_the_proc_dir_mtime_under_a_stale_btime(tmp_path):
+    """CSO round 2 (F3 had no flipping test): a btime 2 h late must not move the start past /proc/<pid>'s mtime."""
+    root = _fake_root(tmp_path)
+    d = _fake_proc(root, 4244, ["claude"], start_ticks=100, environ={"HOME": str(tmp_path)})
+    os.utime(d, (5000, 5000))
+    live = orphans._live_processes(root, btime=5000 + 7200)        # computed start ~ 12201, i.e. 2 h after the mtime
+    assert live[0].start == pytest.approx(5000)
+
+
+def test_reader_falls_back_to_the_PROCESS_home_not_the_scanners(tmp_path):
+    """CSO round 2 #1: no GROK_HOME in the process env -> the process's own HOME/.grok, never the scanner's."""
+    root = _fake_root(tmp_path)
+    proc_home = tmp_path / "someone-else"; proc_home.mkdir()
+    _fake_proc(root, 4245, ["grok"], environ={"HOME": str(proc_home)})
+    live = orphans._live_processes(root)
+    assert [(p.kind, p.location) for p in live] == [("grok", (proc_home / ".grok").resolve())]
+
+
+def test_reader_no_key_and_no_home_is_unknown(tmp_path):
+    root = _fake_root(tmp_path)
+    _fake_proc(root, 4246, ["codex"], environ={"PATH": "/usr/bin"})
+    assert [(p.kind, p.location) for p in orphans._live_processes(root)] == [("codex", None)]
+
+
+def test_reader_resolves_a_relative_config_dir_against_the_process_cwd(tmp_path):
+    root = _fake_root(tmp_path)
+    pcwd = tmp_path / "proc-cwd"; pcwd.mkdir()
+    _fake_proc(root, 4247, ["claude"], environ={"CLAUDE_CONFIG_DIR": "rel/.claude-x"}, cwd=pcwd)
+    assert orphans._live_processes(root)[0].location == (pcwd / "rel" / ".claude-x").resolve()
+
+
+def test_reader_finds_cli_js_after_many_node_flags(tmp_path):
+    """CSO round 2 #2: the claude-code cli.js may follow any number of node flags."""
+    root = _fake_root(tmp_path)
+    argv = ["node"] + [f"--flag{i}" for i in range(9)] + ["/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]
+    _fake_proc(root, 4248, argv, environ={"HOME": str(tmp_path)})
+    assert [p.kind for p in orphans._live_processes(root)] == ["claude"]
+
+
+def test_live_grok_protects_its_sessions(tmp_path):
+    """CSO round 2: the grok kind had no liveness test."""
+    home, cfg = _home(tmp_path)
+    g = tmp_path / ".grok"
+    s = g / "sessions" / "gsess-1" / "chat_history.jsonl"; s.parent.mkdir(parents=True)
+    s.write_text(json.dumps({"timestamp": "2026-10-17T01:00:00Z"}) + "\n")
+    rep = orphans.recover(cfg, home, grok_homes=[g], live=[orphans.LiveProc("grok", g.resolve(), 0.0, None)])
+    assert _staged_sids(home) == [] and rep.live == ["gsess-1"]
+
+
+def test_older_form_when_the_captured_payload_was_drained(tmp_path):
+    """§4.2.5, the drained branch: the payload was reclaimed after its sweep; a form no larger is older."""
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    p = _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    orphans.recover(cfg, home, claude_dirs=[c], live=[])
+    for pl in staging_dir(home).glob(f"*{PAYLOAD_SUFFIX}"):
+        pl.unlink()                                                 # drained, as after a verified sweep
+    p.write_text(json.dumps({"timestamp": "2026-10-16T21:00:00Z"}) + "\n")   # different bytes, not larger
+    rep = orphans.recover(cfg, home, claude_dirs=[c], live=[])
+    assert rep.staged == [] and rep.older == 1
+
+
+def test_cli_fail_closed_exits_non_zero(tmp_path):
+    """CSO round 2 #3: the fail-closed path must report AND exit non-zero (here: an unreadable process table)."""
+    home, _ = _home(tmp_path)
+    (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\nembedding_provider = "local"\n')
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    root = _fake_root(tmp_path)
+    _fake_proc(root, 4249, ["claude"], environ_unreadable=True)
+    r = _cli(home, "--claude-config-dir", str(c), env_extra={"LBRAIN_PROC_ROOT": str(root),
+                                                              "LBRAIN_ARCHIVE_PASSPHRASE": "x" * 32})
+    assert r.returncode != 0 and not _staged_sids(home), (r.returncode, r.stdout, r.stderr)
