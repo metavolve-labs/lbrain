@@ -40,8 +40,10 @@ import time
 from pathlib import Path
 
 from .epoch import (
+    BuilderBusy,
     BuilderLock,
     EpochError,
+    current_epoch_id,
     epoch_db,
     epoch_dir,
     epochs_root,
@@ -659,6 +661,10 @@ def build(
     with BuilderLock(home) as lock:
         eid = new_epoch_id()
         report["epoch_id"] = eid
+        # Sub-second scan start, recorded in the build manifest so a follower waiting on this build
+        # (`--wait-for-builder`) can prove the scan began AFTER it was invoked; the second-resolution
+        # watermark below cannot order two events inside one second.
+        scan_start_ns = time.time_ns()
         scan_start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         # staging locality (v1.1 #3 / lesson: stage local when the home is DrvFs)
@@ -822,7 +828,8 @@ def build(
                 shutil.copy2(ident, epoch_dir(home, eid) / "identity.json")
 
             (epoch_dir(home, eid) / "build-manifest.json").write_text(json.dumps({
-                "epoch_id": eid, "scan_start": scan_start, "scan_end": scan_end,
+                "epoch_id": eid, "scan_start": scan_start, "scan_start_ns": scan_start_ns,
+                "scan_end": scan_end,
                 "delta": bool(delta and prior_db is not None),
                 "prior_db": str(prior_db) if prior_db else None,
                 "docs": sum(len(d) for d in new_inv.values()),
@@ -852,3 +859,120 @@ def build(
             shutil.rmtree(staging, ignore_errors=True)
 
     return report
+
+
+# ---------- single-flight wake refresh (`epoch build --wait-for-builder`) ----------
+
+def _lock_holder(home: Path) -> dict:
+    """What the builder lock says right now, read without acquiring it.
+    {"held": False} when no lock directory exists; otherwise pid/host and heartbeat age
+    (age None = the holder is mid-acquire, which BuilderLock treats as LIVE)."""
+    lock = BuilderLock(home)
+    if not lock.dir.exists():
+        return {"held": False}
+    out: dict = {"held": True, "pid": None, "host": None, "age": lock._meta_age()}
+    try:
+        m = json.loads(lock.meta.read_text(encoding="utf-8"))
+        out["pid"], out["host"] = m.get("pid"), m.get("host")
+    except Exception:
+        pass
+    return out
+
+
+def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None) -> dict | None:
+    """The CURRENT epoch, if it can stand in for a build this invocation would have run:
+    it is NEW (not the epoch that was CURRENT when this invocation began), it is CURRENT
+    (publication happens only after gate v2 passed), its db exists and names itself, and
+    its scan provably STARTED AFTER this invocation began. Returns None otherwise.
+
+    Scan order uses the manifest's `scan_start_ns`; an epoch built before that field
+    existed falls back to the second-resolution `scan_start`, accepted only when its
+    second is strictly later than the invocation (a same-second scan cannot be ordered,
+    so it does not count)."""
+    import calendar
+    eid = current_epoch_id(home)
+    if eid is None or eid == prior_eid:
+        return None
+    try:
+        man = json.loads((epoch_dir(home, eid) / "build-manifest.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if man.get("epoch_id") != eid:
+        return None
+    ns = man.get("scan_start_ns")
+    if isinstance(ns, int):
+        after = ns > invoked_ns
+    else:
+        try:
+            sec = calendar.timegm(time.strptime(str(man.get("scan_start")), "%Y-%m-%dT%H:%M:%SZ"))
+        except (TypeError, ValueError):
+            return None
+        after = sec * 1_000_000_000 > invoked_ns  # integers: a float divide loses the nanoseconds
+    if not after:
+        return None
+    db = epoch_db(home, eid)
+    if not db.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+        try:
+            meta = dict(con.execute(
+                "SELECT key, value FROM meta WHERE key IN ('epoch_id','watermark_scan_end')"))
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if meta.get("epoch_id") != eid or not meta.get("watermark_scan_end"):
+        return None
+    return {"epoch_id": eid, "scan_start": man.get("scan_start"), "scan_end": man.get("scan_end"),
+            "docs": man.get("docs")}
+
+
+def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
+                        poll: float = 1.0, say_every: float = 10.0, echo=print, **build_kw) -> dict:
+    """`epoch build --wait-for-builder WAIT`: when a LIVE builder holds the lock, wait for it
+    (bounded) instead of failing closed, and do not build twice for one wake.
+
+    - The lock is free, or stale: `build()` runs exactly as without the flag (stale takeover
+      is BuilderLock's existing handling, untouched).
+    - A live builder holds it: wait, saying who holds it, until the lock is released, its
+      heartbeat goes stale, or WAIT seconds pass.
+    - After a release: if the epoch now CURRENT satisfies this invocation
+      (`satisfying_epoch`), return it WITHOUT building ({"followed": True, ...}); otherwise
+      (the builder failed, or its scan began before this invocation) build.
+    - Timeout: one last acquire attempt; a still-live holder raises the existing BuilderBusy.
+    """
+    home = Path(home)
+    prior_eid = current_epoch_id(home)
+    deadline = time.monotonic() + max(0.0, float(wait))
+    last_said = None
+    leader_pid = None
+    while True:
+        try:
+            return build(home, cfg, **build_kw)
+        except BuilderBusy:
+            pass
+        # A live builder holds the lock: wait for it to finish, die, or the deadline.
+        while True:
+            h = _lock_holder(home)
+            if not h["held"]:
+                break
+            if h.get("pid") is not None:
+                leader_pid = h["pid"]
+            age = h["age"]
+            if age is not None and age > BuilderLock(home).stale_after:
+                break  # gone stale while we waited: build() takes it over, as it always has
+            now = time.monotonic()
+            if now >= deadline:
+                return build(home, cfg, **build_kw)  # one last attempt; busy => existing error
+            if last_said is None or now - last_said >= say_every:
+                beat = "acquiring" if age is None else f"heartbeat {age:.0f}s ago"
+                echo(f"  waiting for builder pid {h.get('pid') or '?'} on {h.get('host') or '?'} "
+                     f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
+                last_said = now
+            time.sleep(min(poll, max(0.0, deadline - now)))
+        sat = satisfying_epoch(home, invoked_ns, prior_eid)
+        if sat is not None:
+            sat.update({"followed": True, "leader_pid": leader_pid})
+            return sat
+        # The builder failed, or published a scan that began before this invocation: build.
