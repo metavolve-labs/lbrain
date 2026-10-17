@@ -115,10 +115,50 @@ def read_counts(cfg) -> tuple[dict, str]:
             pass
 
 
+import re as _re
+
+# Key-shaped tokens an exception message may carry (CSO review of PR #87, 2026-10-17: an
+# injected `sk-ant-...`, an env line and a newline came out verbatim in whoami). The engine
+# has no shared secret scrubber, so this set is deliberately conservative: it redacts more
+# than it needs to rather than less. Order matters: the env-assignment rule runs first so the
+# variable NAME survives (it says what kind of thing was there) while its value does not.
+_SECRET_PATTERNS = (
+    (_re.compile(r"\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)[A-Z0-9_]*)"
+                 r"(\s*[=:]\s*)(\S+)"), r"\1=[REDACTED]"),
+    (_re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "[REDACTED]"),
+    (_re.compile(r"\bBearer\s+\S+", _re.I), "Bearer [REDACTED]"),
+    (_re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), "[REDACTED]"),
+    (_re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), "[REDACTED]"),
+    (_re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED]"),
+    (_re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), "[REDACTED]"),
+    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (_re.compile(r"[A-Za-z0-9_\-+]{40,}={0,2}"), "[REDACTED]"),   # long opaque token
+)
+_REASON_CAP = 200
+
+
+def scrub_reason(text: str) -> str:
+    """One display line for an exception text: key-shaped tokens redacted, folded to a single
+    line with control and bidi characters stripped (serve.sanitize_field), capped at about
+    200 characters."""
+    from .serve import sanitize_field
+    s = str(text)
+    for pat, repl in _SECRET_PATTERNS:
+        s = pat.sub(repl, s)
+    s = sanitize_field(s, 10 * _REASON_CAP)
+    if len(s) > _REASON_CAP:
+        # Keep both ends: the head names the failure class, the tail usually names the cause
+        # ("... does not exist"); a long path in the middle is what gets elided.
+        head = _REASON_CAP * 3 // 10
+        s = s[:head].rstrip() + " … " + s[-(_REASON_CAP - head - 3):].lstrip()
+    return s
+
+
 def _counts_unknown(stats: dict | None, counts_error: str) -> str:
-    """Empty when every count is a real integer; otherwise the reason it is not."""
+    """Empty when every count is a real integer; otherwise the reason it is not (scrubbed,
+    one line, capped: it is printed by `whoami` and relayed by `lair_whoami`)."""
     if counts_error:
-        return counts_error
+        return scrub_reason(counts_error)
     missing = [k for k in _COUNT_KEYS if not isinstance((stats or {}).get(k), int)]
     if not missing:
         return ""
