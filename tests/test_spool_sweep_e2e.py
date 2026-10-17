@@ -12,6 +12,8 @@ by accident. Local embedding provider; nothing leaves the machine.
 import hashlib, json, os, subprocess, sys
 from pathlib import Path
 
+import pytest
+
 from lbrain import epoch_build as eb
 from lbrain.config import Config
 from lbrain.spool import META_SUFFIX, PAYLOAD_SUFFIX, staged_count, staging_dir, swept_items, sweep_receipt_path
