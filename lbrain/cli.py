@@ -2632,7 +2632,7 @@ def capture_orphans_cmd(claude_dirs, codex_homes, grok_homes, dry_run):
                   grok_homes=grok_homes, dry_run=dry_run)
     verb = "would stage" if dry_run else "staged"
     click.echo(f"capture-orphans: found {rep.found} · {verb} {len(rep.staged)} · already known {rep.known} · "
-               f"live (skipped) {len(rep.live)} · errors {len(rep.errors)}")
+               f"older form (skipped) {rep.older} · live (skipped) {len(rep.live)} · errors {len(rep.errors)}")
     for e in rep.errors:
         click.secho(f"  ✗ {e}", fg="red")
     n = staged_count(home)
