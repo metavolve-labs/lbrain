@@ -299,3 +299,14 @@ def test_no_declared_location_refuses(tmp_path):
     home, _ = _home(tmp_path)
     (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\nembedding_provider = "local"\n')
     assert _cli(home).returncode == 2
+
+
+def test_orphan_capture_is_titled_by_session_id_like_the_sessionend_hook(tmp_path):
+    """Archives group a session's snapshots by title (the SessionEnd hook titles a capture with its session id).
+    A recovered capture must carry the same title, or its snapshots never group with the session's others."""
+    home, cfg = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    orphans.recover(cfg, home, claude_dirs=[c], live=[])
+    titles = [json.loads(m.read_text())["title"] for m in staging_dir(home).glob(f"*{META_SUFFIX}")]
+    assert titles == [SID_A]

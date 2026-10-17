@@ -274,7 +274,9 @@ def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), d
             continue
         try:
             res = spool_capture(cfg, home, payload, session_id=t.session_id,
-                                title=f"orphan {t.kind} {t.session_id}", namespace=None)
+                                # title = the session id, exactly as the SessionEnd hook labels it: archives group a
+                                # session's snapshots by title, so a recovered capture must not carry a different one
+                                title=t.session_id, namespace=None)
             if not res.skipped:
                 rep.staged.append(t.session_id)
         except (WriteGateError, SpoolIntegrityError) as e:
