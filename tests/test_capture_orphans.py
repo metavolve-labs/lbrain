@@ -629,3 +629,34 @@ def test_capture_keep_out_round_trips_through_the_config_writer(tmp_path, monkey
     cfg.capture_keep_out = [SID_A, "/-private-proj/"]
     cfg.write()
     assert C.Config.load().capture_keep_out == [SID_A, "/-private-proj/"]
+
+
+# --- Grok's real layout: sessions/<url-encoded cwd>/<session id>/chat_history.jsonl (measured on katana 2026-10-17) ---
+
+def _grok_history(g: Path, sid: str, *, cwd_dir: str | None = "%2Fmnt%2Fc%2FUsers%2Fatmta%2Fsource%2Frepos"):
+    d = g / "sessions" / cwd_dir / sid if cwd_dir else g / "sessions" / sid
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "chat_history.jsonl"
+    p.write_text(json.dumps({"type": "user", "timestamp": "2026-10-17T07:00:00Z", "message": "hi"}) + "\n")
+    return p
+
+
+def test_grok_real_nested_layout_is_found_and_named_by_its_session_dir(tmp_path):
+    """#81 globbed one level too shallow: on the real layout it found 0 of 23 and CIO capture recovered nothing."""
+    home, cfg = _home(tmp_path)
+    g = tmp_path / ".grok"
+    sid = "01a0578b-881a-7040-9a27-1efdf5c27b1c"
+    _grok_history(g, sid)
+    (g / "sessions" / "session_search.sqlite").write_bytes(b"not a transcript")
+    rep = orphans.recover(cfg, home, grok_homes=[g], live=[])
+    assert rep.found == 1 and rep.staged == [sid] and _staged_sids(home) == [sid]
+
+
+def test_grok_flat_layout_still_found_and_deeper_files_are_not(tmp_path):
+    home, cfg = _home(tmp_path)
+    g = tmp_path / ".grok"
+    _grok_history(g, "flat-session", cwd_dir=None)
+    deep = g / "sessions" / "a" / "b" / "c"; deep.mkdir(parents=True)
+    (deep / "chat_history.jsonl").write_text("{}\n")                             # bounded: three levels down is ignored
+    rep = orphans.recover(cfg, home, grok_homes=[g], live=[], dry_run=True)
+    assert rep.found == 1 and rep.staged == ["flat-session"]
