@@ -2615,7 +2615,10 @@ def epoch_prune_cmd(keep, max_bytes):
 @click.option("--codex-home", "codex_homes", multiple=True, type=click.Path(), help="A Codex home this seat uses.")
 @click.option("--grok-home", "grok_homes", multiple=True, type=click.Path(), help="A Grok home this seat uses.")
 @click.option("--dry-run", is_flag=True, help="Report what would be staged; stage nothing.")
-def capture_orphans_cmd(claude_dirs, codex_homes, grok_homes, dry_run):
+@click.option("--since", "since", default=None,
+              help="UTC cutoff (YYYY-MM-DDTHH:MMZ or epoch seconds): skip transcripts last written before it. Launchers "
+                   "pass the wiring date so a first launch does not sweep a seat's whole history into its brain.")
+def capture_orphans_cmd(claude_dirs, codex_homes, grok_homes, dry_run, since):
     """Kill survival (b): stage this seat's transcripts that never reached the spool (a hard kill skips
     SessionEnd). Run from the launcher BEFORE the session starts; the next `epoch build` sweeps them.
     Exit 4, loudly, when captures are staged but this home has no archive passphrase: staged is not
@@ -2628,11 +2631,23 @@ def capture_orphans_cmd(claude_dirs, codex_homes, grok_homes, dry_run):
         click.secho("✗ capture-orphans: no location declared (refusing to guess a seat's transcripts)", fg="red")
         sys.exit(2)
     home = Path(CONFIG_DIR)
+    since_ts = None
+    if since:
+        import datetime as _dt
+        try:
+            since_ts = float(since)
+        except ValueError:
+            try:
+                since_ts = _dt.datetime.strptime(since, "%Y-%m-%dT%H:%MZ").replace(tzinfo=_dt.timezone.utc).timestamp()
+            except ValueError:
+                click.secho(f"✗ capture-orphans: --since {since!r} is neither YYYY-MM-DDTHH:MMZ nor epoch seconds", fg="red")
+                sys.exit(2)
     rep = recover(Config.load(), home, claude_dirs=claude_dirs, codex_homes=codex_homes,
-                  grok_homes=grok_homes, dry_run=dry_run)
+                  grok_homes=grok_homes, dry_run=dry_run, since=since_ts)
     verb = "would stage" if dry_run else "staged"
     click.echo(f"capture-orphans: found {rep.found} · {verb} {len(rep.staged)} · already known {rep.known} · "
-               f"older form (skipped) {rep.older} · live (skipped) {len(rep.live)} · errors {len(rep.errors)}")
+               f"older form (skipped) {rep.older} · before cutoff {rep.before_cutoff} · live (skipped) {len(rep.live)} · "
+               f"errors {len(rep.errors)}")
     for e in rep.errors:
         click.secho(f"  ✗ {e}", fg="red")
     n = staged_count(home)
