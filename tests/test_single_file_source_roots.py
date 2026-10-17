@@ -150,10 +150,16 @@ def test_present_root_predicate(tmp_path):
     d.mkdir()
     f = _write(tmp_path / "f.md", "# F\n")
     t = _write(tmp_path / "t.txt", "x")
+    fifo = tmp_path / "pipe.md"
+    os.mkfifo(fifo)
     assert index.source_root_present(d) and index.source_root_present(f)
-    assert not index.source_root_present(t)
+    # CSO #88 D1: a path discovery deliberately REFUSES still exists; it is present, not vanished
+    assert index.source_root_present(t) and index.source_root_present(fifo)
     assert not index.source_root_present(tmp_path / "missing.md")
     assert not index.source_root_present(tmp_path / "missing-dir")
+    # a symlink whose target is gone is the unmounted-drive shape: NOT present
+    (tmp_path / "dangling").symlink_to(tmp_path / "no-such-mount")
+    assert not index.source_root_present(tmp_path / "dangling")
 
 
 # ---------- the other walkers ----------
@@ -221,6 +227,68 @@ def test_import_prune_still_runs_when_one_root_is_a_file(tmp_path):
     p = _lbrain(home, "import")
     assert p.returncode == 0, p.stdout + p.stderr
     assert sorted(r for r, _ in _docs(home)) == ["SOLO.md", "keep.md"]
+
+
+def _prune_case(tmp_path, extra_root_maker):
+    """CSO probe88 'txt' shape: roots dir, single.md, <extra>; delete dir/b.md; prune must drop it."""
+    d = tmp_path / "dir"
+    _write(d / "a.md", "# A\n\nalpha words one.\n")
+    b = _write(d / "b.md", "# B\n\nbeta words two.\n")
+    _write(d / "c.md", "# C\n\ngamma words three.\n")
+    single = _write(tmp_path / "single.md", "# F\n\nfile root words.\n")
+    extra = extra_root_maker(tmp_path)
+    home = _legacy_home(tmp_path, [d, single, extra])
+    p = _lbrain(home, "import")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert sorted(r for r, _ in _docs(home)) == ["a.md", "b.md", "c.md", "single.md"]
+    b.unlink()
+    p = _lbrain(home, "import", "--prune")
+    assert p.returncode == 0, p.stdout + p.stderr
+    return sorted(r for r, _ in _docs(home)), p
+
+
+def test_a_refused_non_md_file_root_does_not_disable_prune(tmp_path):
+    docs, p = _prune_case(tmp_path, lambda t: _write(t / "notes.txt", "plain text\n"))
+    assert docs == ["a.md", "c.md", "single.md"], (docs, p.stdout + p.stderr)
+    assert "prune skipped" not in p.stdout + p.stderr
+
+
+def test_a_refused_fifo_root_does_not_disable_prune(tmp_path):
+    def mk(t):
+        f = t / "pipe.md"
+        os.mkfifo(f)
+        return f
+    docs, p = _prune_case(tmp_path, mk)
+    assert docs == ["a.md", "c.md", "single.md"], (docs, p.stdout + p.stderr)
+
+
+def test_a_missing_root_still_skips_prune_and_says_so(tmp_path):
+    """Negative control + CSO #88 D2: a genuinely missing root keeps the home-wide skip (the
+    unmounted-drive guard) but the skip is no longer silent: it names the root."""
+    d = tmp_path / "dir"
+    _write(d / "a.md", "# A\n\nalpha\n")
+    b = _write(d / "b.md", "# B\n\nbeta\n")
+    gone = _write(tmp_path / "gone.md", "# Gone\n\ngone\n")
+    home = _legacy_home(tmp_path, [d, gone])
+    assert _lbrain(home, "import").returncode == 0
+    gone.unlink()
+    b.unlink()
+    p = _lbrain(home, "import", "--prune")
+    assert p.returncode == 0, p.stdout + p.stderr
+    out = p.stdout + p.stderr
+    assert re.search(rf"prune skipped: source root {re.escape(str(gone))} missing", out), out
+    # nothing pruned while a root is missing: the guard itself is unchanged
+    assert sorted(r for r, _ in _docs(home)) == ["a.md", "b.md", "gone.md"]
+
+
+def test_prune_unreachable_says_so_when_a_root_is_missing(tmp_path):
+    src = tmp_path / "lairs"
+    _write(src / "keep.md", "# Keep\n\nkeep\n")
+    home = _legacy_home(tmp_path, [src, tmp_path / "vanished-dir"])
+    assert _lbrain(home, "import").returncode == 0
+    p = _lbrain(home, "prune-unreachable")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "prune skipped: source root" in p.stdout + p.stderr and "vanished-dir" in p.stdout + p.stderr
 
 
 def test_prune_unreachable_still_lists_when_one_root_is_a_file(tmp_path):

@@ -600,6 +600,7 @@ class Store:
             from .index import source_root_present
             for root in source_roots:
                 if not source_root_present(root):
+                    _say_prune_skipped(root, "import --prune")
                     return []  # a source root vanished → mount gone, not docs; skip prune
 
         from pathlib import Path as _Path
@@ -728,6 +729,7 @@ class Store:
         from .index import source_root_present
         for root in roots:
             if not source_root_present(root):
+                _say_prune_skipped(root, "prune-unreachable")
                 return []  # a source root vanished → mount gone, not docs; skip prune
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
@@ -1100,6 +1102,14 @@ class Store:
 
     def close(self) -> None:
         self.db.close()
+
+
+def _say_prune_skipped(root, which: str) -> None:
+    """A vanished root skips prune for the WHOLE home (the unmounted-drive guard). That is
+    the safe direction, but a silent skip leaves deleted docs served with no sign of why
+    (CSO review of PR #88, D2): name the root."""
+    print(f"[lbrain] prune skipped: source root {root} missing; {which} removed nothing "
+          "(a vanished root reads as an unmounted drive, not as deleted docs)", file=sys.stderr)
 
 
 def _safe_meta(meta: dict) -> dict:

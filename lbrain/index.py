@@ -436,14 +436,16 @@ def _is_file_root(root: Path) -> bool:
 
 
 def source_root_present(root) -> bool:
-    """True when a configured source root can be walked: a directory, or an existing
-    regular .md file. Every guard that asks "is this root still there" (currency,
+    """True when a configured source root is still THERE: any existing path (followed
+    through symlinks). Every guard that asks "is this root still there" (currency,
     prune, unreachable prune, the epoch deletion manifest) must ask THIS, not is_dir():
-    a file root answered "missing" there and disabled every prune for the home."""
-    r = Path(root)
-    if r.is_dir():
-        return True
-    return r.suffix == ".md" and r.is_file()
+    a file root answered "missing" there and disabled every prune for the home.
+
+    Presence is not indexability. A path discovery deliberately refuses (a non-.md
+    file, a FIFO) still exists, so it is present, not vanished: answering False made
+    one refused root disable prune home-wide (CSO review of PR #88, D1). A dangling
+    symlink is NOT present: that is the unmounted-drive shape the guards exist for."""
+    return Path(root).exists()
 
 
 def _discover_file_root(root: Path) -> list[Path]:
