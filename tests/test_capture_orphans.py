@@ -602,8 +602,8 @@ def test_keep_out_path_marker_excludes_and_a_bare_fragment_does_not(tmp_path):
     _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z", project="-private-proj")
     _claude_transcript(c, SID_B, "2026-10-16T21:00:00Z", project="-proj")
     _claude_transcript(c, SID_C, "2026-10-16T21:00:00Z", project="-proj")
-    rep = orphans.recover(_cfg_keep(home, ["/-private-proj/", "cccccccc", "", "   "]), home, claude_dirs=[c], live=[],
-                          dry_run=True)
+    rep = orphans.recover(_cfg_keep(home, [" /-private-proj/ ", "cccccccc", "", "   "]), home, claude_dirs=[c],
+                          live=[], dry_run=True)                          # hand-edited TOML: surrounding blanks
     # the marker removes A; "cccccccc" is neither a whole id nor a path marker, so C is staged; blanks match nothing
     assert sorted(rep.staged) == [SID_B, SID_C] and rep.kept_out == 1
 

@@ -276,9 +276,7 @@ def is_kept_out(t: Transcript, keep_out) -> bool:
     """The operator's named exclusions: an exact session id, or (an entry with "/") a substring of the path."""
     path = str(t.path)
     for e in keep_out:
-        e = str(e).strip()
-        if not e:
-            continue
+        e = str(e).strip()                          # a blank entry can equal no id and holds no "/": it matches nothing
         if e == t.session_id or ("/" in e and e in path):
             return True
     return False
