@@ -2530,9 +2530,10 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
     import time as _time
 
     from .epoch import BuilderBusy, EpochError
-    from .epoch_build import build, build_single_flight
+    from .epoch_build import UNSTABLE_CONFIG, build, build_single_flight, config_sha
 
     invoked_ns = _time.time_ns()
+    sha_before = config_sha(CONFIG_DIR) if wait_for_builder is not None else None
     cfg = Config.load()
     kw = dict(delta=not full, confirm_source_removed=confirm_source_removed,
               prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
@@ -2541,6 +2542,10 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
         if wait_for_builder is None:
             report = build(CONFIG_DIR, cfg, **kw)
         else:
+            # The config this command LOADED, bracketed: a write landing during Config.load()
+            # makes the sha UNSTABLE, which no epoch can match (CSO #89 D2: the ms race).
+            sha_after = config_sha(CONFIG_DIR)
+            kw["config_sha"] = sha_before if sha_before == sha_after else UNSTABLE_CONFIG
             report = build_single_flight(CONFIG_DIR, cfg, wait=wait_for_builder, invoked_ns=invoked_ns,
                                          echo=click.echo, **kw)
     except BuilderBusy as e:

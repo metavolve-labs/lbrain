@@ -32,6 +32,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import struct
 import subprocess
@@ -43,6 +44,7 @@ from .epoch import (
     BuilderBusy,
     BuilderLock,
     EpochError,
+    _boot_id,
     current_epoch_id,
     epoch_db,
     epoch_dir,
@@ -650,10 +652,21 @@ def build(
     lbrain_bin: str = "lbrain",
     scratch: Path | None = None,
     sweep: bool = True,
+    config_sha: str | None = None,
 ) -> dict:
     """Build → validate → swap. Returns a report dict; raises EpochError with the
-    staging retained as .failed forensics on any gate refusal."""
+    staging retained as .failed forensics on any gate refusal.
+
+    ``config_sha``: the sha256 of the config.toml bytes the caller loaded ``cfg`` from (the
+    CLI passes it; UNSTABLE_CONFIG when the file changed under the load). When None it is
+    taken here, at entry. Recorded in the manifest so a follower can tell whether this
+    build ran on ITS config (`--wait-for-builder`)."""
     home = Path(home)
+    if config_sha is None:
+        config_sha = _config_file_sha(home)
+    flags = build_flags(delta=delta, confirm_source_removed=confirm_source_removed,
+                        prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
+                        keep=keep, max_bytes=max_bytes, sweep=sweep)
     sources = [str(Path(s)) for s in cfg.sources]
     confirmed = {str(Path(s)) for s in confirm_source_removed}
     report: dict = {"home": str(home)}
@@ -692,7 +705,9 @@ def build(
                 _sqlite_snapshot(prior_db, staging_db)  # byte-copy, never hardlink (D1)
 
             # staging home config = the home's, with db_path repointed
-            raw = (home / "config.toml").read_text(encoding="utf-8")
+            raw_bytes = (home / "config.toml").read_bytes()
+            staged_sha = hashlib.sha256(raw_bytes).hexdigest()
+            raw = raw_bytes.decode("utf-8")
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
             (staging / "config.toml").write_text(raw, encoding="utf-8")
 
@@ -835,6 +850,14 @@ def build(
                 "docs": sum(len(d) for d in new_inv.values()),
                 "source_digests": {s: _source_digest(d) for s, d in new_inv.items()},
                 "confirmed_removed": sorted(confirmed),
+                # what a `--wait-for-builder` follower must match before adopting this epoch
+                # (CSO review of #89, D1-D3): the requested flags, the config it was loaded
+                # from AND the config its import child actually read, and where it ran.
+                "build_flags": flags,
+                "config_sha256": config_sha,
+                "config_sha256_staged": staged_sha,
+                "builder_host": socket.gethostname(),
+                "builder_boot_id": _boot_id(),
             }, indent=2) + "\n", encoding="utf-8")
 
             caveat = publish(home, eid)
@@ -879,7 +902,34 @@ def _lock_holder(home: Path) -> dict:
     return out
 
 
-def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None) -> dict | None:
+UNSTABLE_CONFIG = "unstable"
+
+
+def _config_file_sha(home: Path) -> str:
+    """sha256 of the home's config.toml bytes ("" when unreadable)."""
+    try:
+        return hashlib.sha256((Path(home) / "config.toml").read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+config_sha = _config_file_sha   # public name; build() has a parameter of the same name
+
+
+def build_flags(*, delta: bool = True, confirm_source_removed=(), prune_unreachable: bool = False,
+                confirm_delist: bool = False, keep: int = 3, max_bytes: int | None = None,
+                sweep: bool = True) -> dict:
+    """The requested build flags, canonical and JSON-stable (defaults = build()'s defaults).
+    `delta` is what was ASKED (not --full), not whether a prior epoch existed."""
+    return {"delta": bool(delta),
+            "confirm_source_removed": sorted(str(Path(s)) for s in (confirm_source_removed or ())),
+            "prune_unreachable": bool(prune_unreachable), "confirm_delist": bool(confirm_delist),
+            "keep": int(keep), "max_bytes": None if max_bytes is None else int(max_bytes),
+            "sweep": bool(sweep)}
+
+
+def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None, *,
+                     flags: dict, config_sha: str) -> dict | None:
     """The CURRENT epoch, if it can stand in for a build this invocation would have run:
     it is NEW (not the epoch that was CURRENT when this invocation began), it is CURRENT
     (publication happens only after gate v2 passed), its db exists and names itself, and
@@ -888,7 +938,13 @@ def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None) -> dict
     Scan order uses the manifest's `scan_start_ns`; an epoch built before that field
     existed falls back to the second-resolution `scan_start`, accepted only when its
     second is strictly later than the invocation (a same-second scan cannot be ordered,
-    so it does not count)."""
+    so it does not count).
+
+    And it must be the build this invocation would have run (CSO review of #89): the same
+    requested `flags`, built from the same config (`config_sha` equals both the config the
+    leader loaded and the config its import read; an UNSTABLE or unreadable config never
+    matches), on this host in this boot (scan order is a wall-clock comparison, meaningful
+    only on one clock). A manifest that predates any of these fields never counts."""
     import calendar
     eid = current_epoch_id(home)
     if eid is None or eid == prior_eid:
@@ -898,6 +954,14 @@ def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None) -> dict
     except Exception:
         return None
     if man.get("epoch_id") != eid:
+        return None
+    if man.get("build_flags") != json.loads(json.dumps(flags)):
+        return None
+    if (not config_sha or config_sha == UNSTABLE_CONFIG
+            or man.get("config_sha256") != config_sha or man.get("config_sha256_staged") != config_sha):
+        return None
+    boot = _boot_id()
+    if man.get("builder_host") != socket.gethostname() or not boot or man.get("builder_boot_id") != boot:
         return None
     ns = man.get("scan_start_ns")
     if isinstance(ns, int):
@@ -944,6 +1008,12 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
     """
     home = Path(home)
     prior_eid = current_epoch_id(home)
+    if build_kw.get("config_sha") is None:
+        build_kw["config_sha"] = config_sha(home)
+    my_sha = build_kw["config_sha"]
+    my_flags = build_flags(**{k: v for k, v in build_kw.items()
+                              if k in ("delta", "confirm_source_removed", "prune_unreachable",
+                                       "confirm_delist", "keep", "max_bytes", "sweep")})
     deadline = time.monotonic() + max(0.0, float(wait))
     last_said = None
     leader_pid = None
@@ -971,7 +1041,7 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
                      f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
                 last_said = now
             time.sleep(min(poll, max(0.0, deadline - now)))
-        sat = satisfying_epoch(home, invoked_ns, prior_eid)
+        sat = satisfying_epoch(home, invoked_ns, prior_eid, flags=my_flags, config_sha=my_sha)
         if sat is not None:
             sat.update({"followed": True, "leader_pid": leader_pid})
             return sat

@@ -262,28 +262,35 @@ def test_manifest_records_a_subsecond_scan_start(tmp_path):
 
 # ---------- unit: what counts as satisfying ----------
 
+def _sat(home, invoked, prior, **over):
+    """satisfying_epoch as a follower with DEFAULT build flags and the home's current config."""
+    kw = dict(flags=epoch_build.build_flags(), config_sha=epoch_build.config_sha(home))
+    kw.update(over)
+    return epoch_build.satisfying_epoch(home, invoked, prior, **kw)
+
+
 def test_satisfying_epoch_rules(tmp_path):
     home, cfg = _mk_home(tmp_path)
     invoked = time.time_ns()
     r = epoch_build.build(home, cfg)
     eid = r["epoch_id"]
-    assert epoch_build.satisfying_epoch(home, invoked, None)["epoch_id"] == eid
+    assert _sat(home, invoked, None)["epoch_id"] == eid
     # the epoch that was already CURRENT when the follower began never counts
-    assert epoch_build.satisfying_epoch(home, invoked, eid) is None
+    assert _sat(home, invoked, eid) is None
     # a scan that began before the invocation never counts
-    assert epoch_build.satisfying_epoch(home, time.time_ns(), None) is None
+    assert _sat(home, time.time_ns(), None) is None
     # a manifest without scan_start_ns falls back to whole seconds, strictly later only
     mp = epoch.epoch_dir(home, eid) / "build-manifest.json"
     man = json.loads(mp.read_text())
     ns = man.pop("scan_start_ns")
     mp.write_text(json.dumps(man))
     sec_ns = (ns // 1_000_000_000) * 1_000_000_000
-    assert epoch_build.satisfying_epoch(home, sec_ns, None) is None             # same second: unordered
-    assert epoch_build.satisfying_epoch(home, sec_ns - 1, None) is not None     # strictly earlier second
+    assert _sat(home, sec_ns, None) is None             # same second: unordered
+    assert _sat(home, sec_ns - 1, None) is not None     # strictly earlier second
     # a manifest naming another epoch, or an epoch db that is missing, never counts
     man["epoch_id"] = "someone-else"
     mp.write_text(json.dumps(man))
-    assert epoch_build.satisfying_epoch(home, 0, None) is None
+    assert _sat(home, 0, None) is None
 
 
 def test_satisfying_epoch_requires_the_published_db(tmp_path):
@@ -292,7 +299,7 @@ def test_satisfying_epoch_requires_the_published_db(tmp_path):
     eid = epoch_build.build(home, cfg)["epoch_id"]
     db = epoch.epoch_db(home, eid)
     db.rename(db.with_name("moved.db"))
-    assert epoch_build.satisfying_epoch(home, invoked, None) is None
+    assert _sat(home, invoked, None) is None
     # and checking must never CREATE it (an sqlite open of a missing path makes an empty file)
     assert not db.exists()
 
@@ -306,4 +313,199 @@ def test_satisfying_epoch_requires_the_db_to_name_itself(tmp_path):
     con.execute("UPDATE meta SET value='other' WHERE key='epoch_id'")
     con.commit()
     con.close()
-    assert epoch_build.satisfying_epoch(home, invoked, None) is None
+    assert _sat(home, invoked, None) is None
+
+
+# ---------- CSO review of #89 (2026-10-17T2234Z): follow only an IDENTICAL build ----------
+
+def _epoch_docs(home):
+    import sqlite3
+    db = epoch.epoch_db(home, epoch.current_epoch_id(home))
+    con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+    try:
+        return sorted(r[0] for r in con.execute("SELECT abs_path FROM docs"))
+    finally:
+        con.close()
+
+
+def _follow_while_leader_held(monkeypatch, home, cfg, *follower_args, between=None):
+    go, t, out = _leader_held_at(monkeypatch, home, cfg, "new_epoch_id")
+    if between:
+        between()
+    f = _Follower(home, "--wait-for-builder", "120", *follower_args)
+    f.wait_for("waiting for builder pid")
+    go.set()
+    rc, text = f.finish()
+    t.join(300)
+    assert "error" not in out, out
+    return rc, text, out["report"]["epoch_id"]
+
+
+def test_d1_follower_with_prune_unreachable_does_not_adopt_a_leader_without_it(tmp_path, monkeypatch):
+    """CSO probe test_flag_drift_prune_unreachable."""
+    home, cfgX = _mk_home(tmp_path)
+    old = tmp_path / "old"
+    old.mkdir()
+    (old / "stale.md").write_text("# Stale\n\nThis source was removed from config.\n")
+    raw1 = (home / "config.toml").read_text()
+    (home / "config.toml").write_text(raw1.replace(f'sources = ["{cfgX.sources[0]}"]',
+                                                   f'sources = ["{cfgX.sources[0]}", "{old}"]'))
+    epoch_build.build(home, SimpleNamespace(sources=[cfgX.sources[0], str(old)], embedding_dim=DIM,
+                                            db_path=cfgX.db_path))
+    (home / "config.toml").write_text(raw1)                 # old source dropped from config
+    assert any(p.endswith("stale.md") for p in _epoch_docs(home))
+    rc, text, leader = _follow_while_leader_held(monkeypatch, home, cfgX, "--prune-unreachable")
+    assert rc == 0, text
+    assert "SATISFIED" not in text and re.search(r"epoch (\S+) PUBLISHED", text), text
+    assert not any(p.endswith("stale.md") for p in _epoch_docs(home))
+
+
+def test_d1_follower_with_full_does_not_adopt_a_delta_leader(tmp_path, monkeypatch):
+    """CSO probe test_flag_drift_full."""
+    home, cfg = _mk_home(tmp_path)
+    epoch_build.build(home, cfg)
+    rc, text, leader = _follow_while_leader_held(monkeypatch, home, cfg, "--full")
+    assert rc == 0, text
+    assert "SATISFIED" not in text, text
+    man = json.loads((epoch.epoch_dir(home, epoch.current_epoch_id(home)) / "build-manifest.json").read_text())
+    assert man["delta"] is False and man["build_flags"]["delta"] is False
+
+
+def test_d1_follower_with_no_sweep_does_not_adopt_a_sweeping_leader(tmp_path, monkeypatch):
+    home, cfg = _mk_home(tmp_path)
+    rc, text, leader = _follow_while_leader_held(monkeypatch, home, cfg, "--no-sweep")
+    assert rc == 0 and "SATISFIED" not in text, text
+
+
+def test_d2_config_changed_after_the_leader_loaded_it_is_not_adopted(tmp_path, monkeypatch):
+    """CSO probe a1: an exclude marker added after the leader loaded its config."""
+    home, cfg = _mk_home(tmp_path)
+    epoch_build.build(home, cfg)
+    add_marker = lambda: (home / "config.toml").write_text(
+        (home / "config.toml").read_text() + 'exclude_path_markers = ["/beta.md"]\n')
+    rc, text, leader = _follow_while_leader_held(monkeypatch, home, cfg, between=add_marker)
+    assert rc == 0, text
+    assert "SATISFIED" not in text, text
+    assert not any(p.endswith("beta.md") for p in _epoch_docs(home))
+
+
+def test_d2_source_added_after_the_leader_loaded_config_is_not_adopted(tmp_path, monkeypatch):
+    """CSO probe a2: the leader's manifest would omit a source its db serves."""
+    home, cfg = _mk_home(tmp_path)
+    epoch_build.build(home, cfg)
+    src2 = tmp_path / "src2"
+    src2.mkdir()
+    (src2 / "newsrc.md").write_text("# New\n\nA brand new source document, words.\n")
+
+    def add_source():
+        raw = (home / "config.toml").read_text()
+        (home / "config.toml").write_text(raw.replace(f'sources = ["{cfg.sources[0]}"]',
+                                                      f'sources = ["{cfg.sources[0]}", "{src2}"]'))
+    rc, text, leader = _follow_while_leader_held(monkeypatch, home, cfg, between=add_source)
+    assert rc == 0 and "SATISFIED" not in text, text
+    man = json.loads((epoch.epoch_dir(home, epoch.current_epoch_id(home)) / "build-manifest.json").read_text())
+    assert str(src2) in man["source_digests"]
+
+
+def test_manifest_records_flags_config_and_builder_identity(tmp_path):
+    home, cfg = _mk_home(tmp_path)
+    eid = epoch_build.build(home, cfg, prune_unreachable=True, keep=5)["epoch_id"]
+    man = json.loads((epoch.epoch_dir(home, eid) / "build-manifest.json").read_text())
+    assert man["build_flags"] == json.loads(json.dumps(
+        epoch_build.build_flags(prune_unreachable=True, keep=5)))
+    assert man["config_sha256"] == man["config_sha256_staged"] == epoch_build.config_sha(home)
+    assert man["builder_host"] == socket.gethostname()
+    assert man["builder_boot_id"] == epoch._boot_id()
+
+
+def test_unit_each_identity_field_must_match(tmp_path):
+    home, cfg = _mk_home(tmp_path)
+    invoked = time.time_ns()
+    eid = epoch_build.build(home, cfg)["epoch_id"]
+    assert _sat(home, invoked, None)["epoch_id"] == eid                       # control
+    for flag, val in (("delta", False), ("prune_unreachable", True), ("confirm_delist", True),
+                      ("sweep", False), ("keep", 4), ("max_bytes", 10),
+                      ("confirm_source_removed", ("/x",))):
+        assert _sat(home, invoked, None, flags=epoch_build.build_flags(**{flag: val})) is None, flag
+    assert _sat(home, invoked, None, config_sha="0" * 64) is None
+    assert _sat(home, invoked, None, config_sha=epoch_build.UNSTABLE_CONFIG) is None
+    mp = epoch.epoch_dir(home, eid) / "build-manifest.json"
+    base = mp.read_text()
+    for key, val in (("builder_host", "elsewhere"), ("builder_boot_id", "other-boot"),
+                     ("builder_boot_id", ""), ("config_sha256_staged", "f" * 64)):
+        man = json.loads(base)
+        man[key] = val
+        mp.write_text(json.dumps(man))
+        assert _sat(home, invoked, None) is None, (key, val)
+    for key in ("build_flags", "config_sha256", "builder_host", "builder_boot_id"):
+        man = json.loads(base)
+        del man[key]
+        mp.write_text(json.dumps(man))
+        assert _sat(home, invoked, None) is None, key                        # an older manifest never counts
+    mp.write_text(base)
+    assert _sat(home, invoked, None)["epoch_id"] == eid
+
+
+def test_unit_an_unstable_config_never_matches_even_itself(tmp_path):
+    home, cfg = _mk_home(tmp_path)
+    invoked = time.time_ns()
+    eid = epoch_build.build(home, cfg, config_sha=epoch_build.UNSTABLE_CONFIG)["epoch_id"]
+    man = json.loads((epoch.epoch_dir(home, eid) / "build-manifest.json").read_text())
+    man["config_sha256_staged"] = epoch_build.UNSTABLE_CONFIG
+    (epoch.epoch_dir(home, eid) / "build-manifest.json").write_text(json.dumps(man))
+    assert _sat(home, invoked, None, config_sha=epoch_build.UNSTABLE_CONFIG) is None
+
+
+def test_unit_an_unknown_boot_id_never_matches_even_itself(tmp_path, monkeypatch):
+    """Off Linux there is no boot_id; two empty strings are not proof of one clock."""
+    monkeypatch.setattr(epoch_build, "_boot_id", lambda: "")
+    home, cfg = _mk_home(tmp_path)
+    invoked = time.time_ns()
+    eid = epoch_build.build(home, cfg)["epoch_id"]
+    man = json.loads((epoch.epoch_dir(home, eid) / "build-manifest.json").read_text())
+    assert man["builder_boot_id"] == ""
+    assert _sat(home, invoked, None) is None
+
+
+def test_cli_a_config_written_during_load_is_unstable(monkeypatch):
+    """The CLI brackets Config.load() with two reads; a write between them must yield UNSTABLE
+    (no epoch can match it), never the pre-write sha (CSO #89 D2, the ms race)."""
+    import lbrain.cli as cli
+    from click.testing import CliRunner
+    cfgp = cli.CONFIG_DIR / "config.toml"
+    cfgp.write_text('sources = []\n')
+    real_load = cli.Config.load
+
+    def load_and_change(*a, **k):
+        c = real_load(*a, **k)
+        cfgp.write_text('sources = []\n# changed during load\n')
+        return c
+
+    seen = {}
+
+    def fake_single_flight(home, cfg, **kw):
+        seen.update(kw)
+        return {"followed": True, "epoch_id": "x", "scan_start": "s", "scan_end": "e"}
+
+    monkeypatch.setattr(cli.Config, "load", staticmethod(load_and_change))
+    monkeypatch.setattr(epoch_build, "build_single_flight", fake_single_flight)
+    res = CliRunner().invoke(cli.main, ["epoch", "build", "--wait-for-builder", "1"])
+    assert res.exit_code == 0, res.output
+    assert seen["config_sha"] == epoch_build.UNSTABLE_CONFIG, seen
+
+
+def test_cli_a_stable_config_passes_its_sha(monkeypatch):
+    """Control for the bracket: no write during load -> the real sha."""
+    import lbrain.cli as cli
+    from click.testing import CliRunner
+    (cli.CONFIG_DIR / "config.toml").write_text('sources = []\n')
+    seen = {}
+
+    def fake_single_flight(home, cfg, **kw):
+        seen.update(kw)
+        return {"followed": True, "epoch_id": "x", "scan_start": "s", "scan_end": "e"}
+
+    monkeypatch.setattr(epoch_build, "build_single_flight", fake_single_flight)
+    res = CliRunner().invoke(cli.main, ["epoch", "build", "--wait-for-builder", "1"])
+    assert res.exit_code == 0, res.output
+    assert seen["config_sha"] == epoch_build.config_sha(cli.CONFIG_DIR)
