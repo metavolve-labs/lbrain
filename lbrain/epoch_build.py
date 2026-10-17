@@ -723,6 +723,10 @@ def build(
                     out = _run_cli(["archive-chunks-reindex"], staging, lbrain_bin, lock=lock)
                     m = re.findall(r"^ARCHIVE-CHUNKS (\{.*\})$", out, flags=re.M)
                     report["archive_chunks"] = json.loads(m[-1]) if m else {"error": "no ARCHIVE-CHUNKS line"}
+                    if report["archive_chunks"].get("skipped_no_embedder"):
+                        print(f"[lbrain] WARNING: epoch build: {report['archive_chunks']['skipped_no_embedder']} served "
+                              "archive(s) NOT chunk-indexed: no [local] embedding extra (deep recall uses whole-snapshot "
+                              "vectors for them)")
                 except Exception as e:
                     report["archive_chunks"] = {"error": f"{type(e).__name__}: {str(e)[-300:]}"}
                     print(f"[lbrain] epoch build: archive chunk reindex FAILED ({report['archive_chunks']['error'][:160]}); "

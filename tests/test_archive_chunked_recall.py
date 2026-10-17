@@ -229,3 +229,27 @@ def test_carry_does_not_abort_on_a_shredded_archives_vectorless_chunk(tmp_path):
     epoch_build._connect_vec(staging).close()
     epoch_build._carry_archive_index(tmp_path / "prior.db", staging)
     assert [r[0] for r in _store(staging).db.execute("SELECT text FROM archive_chunks")] == ["live chunk"]
+
+
+def test_embedder_or_none_tolerates_only_the_missing_extra(monkeypatch):
+    """CSO 0433Z: only the missing-[local]-extra case becomes None; any other embedder failure raises."""
+    from lbrain.archive import cli as acli
+
+    def missing_extra(cfg):
+        try:
+            raise ModuleNotFoundError("No module named 'fastembed'")
+        except ModuleNotFoundError as e:
+            raise RuntimeError("local embeddings need the extra: pip install 'lbrain[local]'") from e
+
+    def wrong_model(cfg):
+        raise RuntimeError("unknown model 'no-such-model'")
+
+    def no_key(cfg):
+        raise ValueError("gemini provider needs an API key")
+
+    monkeypatch.setattr(acli, "make_embedder", missing_extra)
+    assert acli.embedder_or_none(object()) is None
+    for bad in (wrong_model, no_key):
+        monkeypatch.setattr(acli, "make_embedder", bad)
+        with pytest.raises(Exception):
+            acli.embedder_or_none(object())

@@ -177,7 +177,7 @@ def test_e7_orphan_captured_at_wake_is_swept_into_the_published_epoch(tmp_path, 
     assert out.returncode == 0 and (tmp_path / "rt.bin").read_bytes() == t.read_bytes(), out.stdout + out.stderr
 
 
-def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path):
+def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path, capsys):
     """Chunked archive vectors through a REAL build: a long session is swept, the build's reindex step chunk-embeds it
     in staging, and the PUBLISHED epoch carries its chunk rows with one vector each."""
     home = _home(tmp_path)
@@ -191,7 +191,8 @@ def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path):
     ac = rep.get("archive_chunks") or {}
     assert "error" not in ac and ac.get("served") == 1, ac                 # the reindex step ran in the build
     if ac.get("skipped_no_embedder"):
-        # cold CI (no [local] extra): the reindex ran drop-only and said so; nothing failed, nothing to chunk with
+        # cold CI (no [local] extra): the reindex ran drop-only and said so loudly in the build output (CSO 0433Z)
+        assert "NOT chunk-indexed" in capsys.readouterr().out
         pytest.skip("no embedder in this environment: the reindex ran drop-only (reported, not an error)")
     # the ARCHIVER chunk-embedded the snapshot at capture time, so the reindex finds nothing left to do; if the
     # archiver's write path were removed, the reindex would report chunked == 1 here (CSO PR #83 D3 / B8)
