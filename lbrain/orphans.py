@@ -9,7 +9,7 @@ that the spool has never seen in their current form and stages them through the 
 What it must never do (CSO §4.2 negative controls), and how:
 - another seat's transcript: it scans ONLY the locations the launcher declares for this seat;
 - a file that is not a transcript: Claude Code `<cfg>/projects/<project>/<uuid>.jsonl`, Codex
-  `<codex>/sessions/**/rollout-*<uuid>.jsonl`, Grok `<grok>/sessions/<id>/chat_history.jsonl`, nothing else; a
+  `<codex>/sessions/**/rollout-*<uuid>.jsonl`, Grok `<grok>/sessions/[<cwd>/]<id>/chat_history.jsonl`, nothing else; a
   symlink, or a path that resolves outside its declared location, is never followed;
 - a LIVE session. Claude Code does not keep its transcript open (measured 2026-10-16), so liveness is read from
   the process table, and the read FAILS CLOSED: if /proc cannot be read, or a matching process's environment
@@ -93,7 +93,11 @@ def find_transcripts(claude_dirs=(), codex_homes=(), grok_homes=()) -> list[Tran
             if m and _inside(p, c):
                 out.append(Transcript(p, "codex", m.group(1), c))
     for c in map(Path, grok_homes):
-        for p in sorted((c / "sessions").glob("*/chat_history.jsonl")):
+        # Grok writes <grok>/sessions/<url-encoded cwd>/<session id>/chat_history.jsonl (measured on katana 2026-10-17:
+        # 23 transcripts, all at that depth); the flat <sessions>/<id>/ form is kept. Bounded globs, never a recursive
+        # walk. The session id is the directory name, as the Grok capture hook (grok-compact-telemetry.sh) names it.
+        hits = set((c / "sessions").glob("*/chat_history.jsonl")) | set((c / "sessions").glob("*/*/chat_history.jsonl"))
+        for p in sorted(hits):
             if _inside(p, c):
                 out.append(Transcript(p, "grok", p.parent.name, c))
     return out
