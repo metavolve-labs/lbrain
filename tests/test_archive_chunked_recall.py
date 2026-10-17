@@ -148,6 +148,7 @@ def test_shred_removes_chunk_text_and_vectors(tmp_path, purge):
     st.write_archive_chunks("a", ["secret line one\n", "secret line two\n"], [_vec(1, 0), _vec(0, 1)])
     st.mark_archive_shredded("a", purge_snapshot=purge)
     assert _chunk_counts(st, "a") == (0, 0)
+    assert st.db.execute("SELECT count(*) FROM vec_archive_chunks").fetchone()[0] == 0   # no orphaned vector either (P1b)
     assert st.search_archives(_vec(0, 1), k=3) == []
 
 
@@ -181,3 +182,50 @@ def test_every_chunk_after_the_first_starts_on_a_line():
     text = "".join(f"line {i:04d} with a few words of session text here\n" for i in range(500))
     chunks = chunk_snapshot(text)
     assert len(chunks) > 5 and all(c.startswith("line ") for c in chunks)
+
+
+
+def test_reindex_without_an_embedder_still_drops_and_reports_the_skip(tmp_path):
+    """CI-cold / no-embedder installs: the reindex must still DROP superseded and shredded chunks (the privacy half
+    needs no embedder) and report the chunking it skipped, never an error."""
+    st = _store(tmp_path / "a.db")
+    _add(st, "old", "sess-A", "short\n" * 600, 100, _vec(1, 0))
+    _add(st, "new", "sess-A", "longer\n" * 900, 200, _vec(1, 0))
+    st.write_archive_chunks("old", ["stale chunk"], _fake_embed(["stale chunk"]))
+    rep = reindex_chunks(st, None)
+    ids = {r[0]: r[1] for r in st.db.execute("SELECT txid, archive_id FROM archives")}
+    assert ids["old"] not in st.chunked_archive_ids() and rep["dropped_archives"] == 1
+    assert rep["chunked"] == 0 and rep["skipped_no_embedder"] == 1
+
+
+
+def test_long_lines_never_start_a_chunk_mid_word():
+    """CSO 0419Z #1: with lines longer than the 200-char overlap, the only newline in the overlap is often the
+    previous chunk's own terminator; the next start must fall back to a word start, never mid-word."""
+    import random
+    rnd = random.Random(7)
+    words = ["provenance", "archive", "session", "snapshot", "kraken", "liquidity", "recheck", "fee", "offset", "a545"]
+    text = "".join(" ".join(rnd.choice(words) for _ in range(rnd.randint(40, 80))) + "\n" for _ in range(120))
+    chunks = chunk_snapshot(text)
+    assert len(chunks) > 10
+    starts_ok = [text[text.index(c) - 1] in "\n " if text.index(c) > 0 else True for c in chunks]
+    assert all(starts_ok), f"{starts_ok.count(False)} of {len(chunks)} chunks start mid-word"
+    assert all(c.endswith(("\n", " ")) for c in chunks[:-1])
+
+
+def test_carry_does_not_abort_on_a_shredded_archives_vectorless_chunk(tmp_path):
+    """CSO 0419Z #4: shredded rows are filtered BEFORE the missing-vector check, so a legacy shredded archive with a
+    vectorless chunk does not abort the build."""
+    prior = _store(tmp_path / "prior.db")
+    _add(prior, "live", "sess-L", "live\n", 10, _vec(1, 0))
+    _add(prior, "gone", "sess-G", "gone\n", 10, _vec(0, 1))
+    prior.write_archive_chunks("live", ["live chunk"], [_vec(1, 0)])
+    prior.write_archive_chunks("gone", ["gone chunk"], [_vec(0, 1)])
+    gid = prior.db.execute("SELECT c.chunk_id FROM archive_chunks c JOIN archives a ON a.archive_id = c.archive_id "
+                           "WHERE a.txid = 'gone'").fetchone()[0]
+    prior.db.execute("DELETE FROM vec_archive_chunks WHERE rowid = ?", (gid,))
+    prior.db.execute("UPDATE archives SET shredded = 1 WHERE txid = 'gone'"); prior.db.commit(); prior.db.close()
+    staging = tmp_path / "staging.db"
+    epoch_build._connect_vec(staging).close()
+    epoch_build._carry_archive_index(tmp_path / "prior.db", staging)
+    assert [r[0] for r in _store(staging).db.execute("SELECT text FROM archive_chunks")] == ["live chunk"]

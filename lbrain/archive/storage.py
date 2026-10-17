@@ -272,8 +272,10 @@ class ArchiveStore:
 
 
 def chunk_snapshot(text: str, size: int = 1800, overlap: int = 200) -> list[str]:
-    """Deterministic overlapping windows over a snapshot, cut at the last newline inside a window when there is one
-    (so a chunk ends between turns, not mid-line). About 1,800 chars stays inside a 512-token embedder's reach."""
+    """Deterministic overlapping windows over a snapshot. About 1,800 chars stays inside a 512-token embedder's reach.
+    A chunk ENDS at the last newline in its second half, else the last space there (never mid-word when a boundary
+    exists). The next chunk STARTS inside the overlap at a line start, else a word start (CSO 0419Z: a newline that
+    is only the previous chunk's own terminator does not count), else exactly where the previous chunk ended."""
     text = text or ""
     if len(text) <= size:
         return [text] if text.strip() else []
@@ -283,28 +285,39 @@ def chunk_snapshot(text: str, size: int = 1800, overlap: int = 200) -> list[str]
         if end < len(text):
             nl = text.rfind("\n", i + size // 2, end)
             if nl != -1:
-                end = nl + 1  # keep the newline: a chunk ends between lines
+                end = nl + 1                        # keep the newline: a chunk ends between lines
+            else:
+                sp = text.rfind(" ", i + size // 2, end)
+                if sp != -1:
+                    end = sp + 1                    # no line break: end between words
         piece = text[i:end]
         if piece.strip():
             out.append(piece)
         if end >= len(text):
             break
-        nxt = max(end - overlap, i + 1)
-        nl2 = text.find("\n", nxt, end)            # start the next chunk on a line boundary inside the overlap (D2)
-        i = nl2 + 1 if nl2 != -1 and nl2 + 1 < end else nxt
+        lo = max(end - overlap, i + 1)
+        nl2 = text.find("\n", lo, end - 1)         # a line start INSIDE the overlap (not the chunk's own terminator)
+        if nl2 != -1:
+            i = nl2 + 1
+        else:
+            sp2 = text.find(" ", lo, end - 1)
+            i = sp2 + 1 if sp2 != -1 else end       # a word start, else no overlap rather than a mid-word start
     return out
 
 
 def reindex_chunks(astore: "ArchiveStore", embed) -> dict:
     """Bring the chunk index to the minimal state: every SERVED archive (not shredded, not superseded) has chunk
     vectors; no superseded or shredded archive keeps any (chunks are derived index data, never the record: the
-    snapshot and the ciphertext stay). ``embed`` is ``list[str] -> list[bytes]``. Returns counts."""
+    snapshot and the ciphertext stay). ``embed`` is ``list[str] -> list[bytes]``, or None when no embedder is
+    available: the drops still run (they need no embedder, and they are the privacy half), chunking is skipped and
+    counted. Returns counts."""
     served = {r[0]: r[1] for r in astore.db.execute(
         "SELECT archive_id, snapshot FROM archives WHERE shredded = 0")}
     for aid in astore.superseded_ids():
         served.pop(aid, None)
     have = astore.chunked_archive_ids()
-    rep = {"served": len(served), "chunked": 0, "chunks": 0, "dropped_archives": 0, "dropped_chunks": 0}
+    rep = {"served": len(served), "chunked": 0, "chunks": 0, "dropped_archives": 0, "dropped_chunks": 0,
+           "skipped_no_embedder": 0}
     for aid in sorted(have - set(served)):                        # superseded or shredded: drop derived chunks
         ids = [r[0] for r in astore.db.execute("SELECT chunk_id FROM archive_chunks WHERE archive_id = ?", (aid,))]
         for cid in ids:
@@ -317,6 +330,9 @@ def reindex_chunks(astore: "ArchiveStore", embed) -> dict:
             continue
         chunks = chunk_snapshot(snap)
         if not chunks:
+            continue
+        if embed is None:
+            rep["skipped_no_embedder"] += 1
             continue
         txid = astore.db.execute("SELECT txid FROM archives WHERE archive_id = ?", (aid,)).fetchone()[0]
         rep["chunks"] += astore.write_archive_chunks(txid, chunks, embed(chunks))

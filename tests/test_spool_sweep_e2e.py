@@ -162,6 +162,9 @@ def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path):
     assert rep["published"] and rep["sweep"]["swept"] == 1, rep["sweep"]
     ac = rep.get("archive_chunks") or {}
     assert "error" not in ac and ac.get("served") == 1, ac                 # the reindex step ran in the build
+    if ac.get("skipped_no_embedder"):
+        # cold CI (no [local] extra): the reindex ran drop-only and said so; nothing failed, nothing to chunk with
+        pytest.skip("no embedder in this environment: the reindex ran drop-only (reported, not an error)")
     # the ARCHIVER chunk-embedded the snapshot at capture time, so the reindex finds nothing left to do; if the
     # archiver's write path were removed, the reindex would report chunked == 1 here (CSO PR #83 D3 / B8)
     assert ac.get("chunked") == 0, ac

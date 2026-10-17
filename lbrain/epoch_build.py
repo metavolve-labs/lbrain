@@ -456,15 +456,15 @@ def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
             raise EpochError(f"prior archive chunk index unreadable ({type(e).__name__}: {str(e)[:160]}); refusing to publish a candidate without it")
         finally:
             pc2.close()
-        if crow:
+        shredded_ids = {r["archive_id"] for r in rows if r.get("shredded")}
+        crow = [r for r in crow if r["archive_id"] not in shredded_ids]   # never carry a shredded archive's text (D1),
+        if crow:                                                          # and filter BEFORE judging vectors (CSO 0419Z #4)
             missing = sorted({r["chunk_id"] for r in crow} - set(cvec))
             if missing:
                 raise EpochError(f"prior archive chunk index: {len(missing)} chunk row(s) have no vector ({missing[:5]}); refusing a carry that would lose them")
             if any(len(b) != width * 4 for b in cvec.values()):
                 raise EpochError(f"prior archive chunk index: vector bytes do not match the width {width}; refusing the carry")
             st._ensure_chunk_schema()
-            shredded_ids = {r["archive_id"] for r in rows if r.get("shredded")}
-            crow = [r for r in crow if r["archive_id"] not in shredded_ids]   # never carry a shredded archive's text (D1)
             for r in crow:
                 con.execute("INSERT OR IGNORE INTO archive_chunks (chunk_id, archive_id, ord, text) VALUES (?, ?, ?, ?)",
                             (r["chunk_id"], r["archive_id"], r["ord"], r["text"]))

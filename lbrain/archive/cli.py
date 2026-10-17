@@ -483,11 +483,16 @@ def archive_chunks_reindex():
     from .storage import reindex_chunks
     cfg = Config.load()
     store = _open(cfg, write=True)
-    embedder = make_embedder(cfg)
     try:
-        rep = reindex_chunks(ArchiveStore(store.db, store.embedding_dim), embedder.embed)
+        embedder = make_embedder(cfg)
+    except Exception as e:      # no embedder in this install (e.g. no local extra): drop-only, chunking skipped
+        embedder = None
+        click.echo(f"archive-chunks-reindex: no embedder ({type(e).__name__}); dropping only, chunking skipped")
+    try:
+        rep = reindex_chunks(ArchiveStore(store.db, store.embedding_dim), embedder.embed if embedder else None)
     finally:
-        embedder.close()
+        if embedder is not None:
+            embedder.close()
         store.close()
     click.echo("ARCHIVE-CHUNKS " + json.dumps(rep, sort_keys=True))
 
