@@ -105,20 +105,45 @@ class ArchiveStore:
         self.db.execute("UPDATE archives SET embedded = 1 WHERE archive_id = ?", (aid,))
         self.db.commit()
 
-    def search_archives(self, q_vec: bytes, k: int = 5, namespace: str | None = None) -> list:
+    def superseded_ids(self) -> set[int]:
+        """Archive rows superseded by a NEWER snapshot of the same session, not shredded, same namespace.
+
+        A session is captured whole at every SessionEnd and boundary, so one session becomes many archives
+        (measured on a live home: 104 archives were 8 sessions). A transcript only grows, so the largest snapshot
+        of a title (the session id) is its newest; every smaller one is superseded. NON-DESTRUCTIVE: superseded
+        rows stay in the table and stay retrievable by txid; recall just stops serving them. Shredding them is a
+        separate, explicit decision. Ties in size keep the most recently created row."""
+        rows = self.db.execute(
+            "SELECT archive_id, title, namespace, n_bytes, created FROM archives "
+            "WHERE shredded = 0 AND title != ''"
+        ).fetchall()
+        best: dict[tuple[str, str], tuple[int, float, int]] = {}
+        for r in rows:
+            key = (r["title"], r["namespace"])
+            cand = (r["n_bytes"], r["created"], r["archive_id"])
+            if key not in best or cand > best[key]:
+                best[key] = cand
+        keep = {v[2] for v in best.values()}
+        return {r["archive_id"] for r in rows if r["archive_id"] not in keep}
+
+    def search_archives(self, q_vec: bytes, k: int = 5, namespace: str | None = None,
+                        include_superseded: bool = False) -> list:
         """Semantic recall over archive snapshots (the read surface of Tier-2).
-        Shredded archives are excluded — the snapshot survives but the record is gone."""
+        Shredded archives are excluded — the snapshot survives but the record is gone. Superseded snapshots (an
+        older, smaller capture of a session that has a newer one) are excluded unless ``include_superseded``, so a
+        session that was captured N times occupies one result, not N."""
+        skip = set() if include_superseded else self.superseded_ids()
         rows = self.db.execute(
             "SELECT a.archive_id, a.txid, a.title, a.snapshot, a.namespace, a.created, "
             "       a.n_bytes, a.shredded, a.transport, "
             "       vec_distance_cosine(v.embedding, ?) AS dist "
             "FROM vec_archives v JOIN archives a ON a.archive_id = v.rowid "
             "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist",
-            (q_vec, q_vec, max(k * 3, 15)),
+            (q_vec, q_vec, max(k * 3, 15) + len(skip)),
         ).fetchall()
         out = []
         for r in rows:
-            if r["shredded"]:
+            if r["shredded"] or r["archive_id"] in skip:
                 continue
             if namespace and r["namespace"] != namespace:
                 continue
