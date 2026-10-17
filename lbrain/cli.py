@@ -2609,6 +2609,44 @@ def epoch_prune_cmd(keep, max_bytes):
     click.echo(f"pruned: {len(removed)}" + (f" — {', '.join(removed)}" if removed else ""))
 
 
+@main.command(name="capture-orphans")
+@click.option("--claude-config-dir", "claude_dirs", multiple=True, type=click.Path(),
+              help="A Claude Code config dir THIS seat uses (repeatable). Only declared locations are scanned.")
+@click.option("--codex-home", "codex_homes", multiple=True, type=click.Path(), help="A Codex home this seat uses.")
+@click.option("--grok-home", "grok_homes", multiple=True, type=click.Path(), help="A Grok home this seat uses.")
+@click.option("--dry-run", is_flag=True, help="Report what would be staged; stage nothing.")
+def capture_orphans_cmd(claude_dirs, codex_homes, grok_homes, dry_run):
+    """Kill survival (b): stage this seat's transcripts that never reached the spool (a hard kill skips
+    SessionEnd). Run from the launcher BEFORE the session starts; the next `epoch build` sweeps them.
+    Exit 4, loudly, when captures are staged but this home has no archive passphrase: staged is not
+    recovered, because without the passphrase the sweep never reaches the brain (CSO plan §4.7)."""
+    from .archive.config import archive_passphrase
+    from .orphans import recover
+    from .spool import staged_count
+
+    if not (claude_dirs or codex_homes or grok_homes):
+        click.secho("✗ capture-orphans: no location declared (refusing to guess a seat's transcripts)", fg="red")
+        sys.exit(2)
+    home = Path(CONFIG_DIR)
+    rep = recover(Config.load(), home, claude_dirs=claude_dirs, codex_homes=codex_homes,
+                  grok_homes=grok_homes, dry_run=dry_run)
+    verb = "would stage" if dry_run else "staged"
+    click.echo(f"capture-orphans: found {rep.found} · {verb} {len(rep.staged)} · already known {rep.known} · "
+               f"older form (skipped) {rep.older} · live (skipped) {len(rep.live)} · errors {len(rep.errors)}")
+    for e in rep.errors:
+        click.secho(f"  ✗ {e}", fg="red")
+    n = staged_count(home)
+    try:
+        has_pass = bool(archive_passphrase())
+    except Exception:
+        has_pass = False
+    if n and not has_pass:
+        click.secho(f"✗ {n} capture(s) staged at {home} but NO archive passphrase: they will not reach the brain. "
+                    "Set LBRAIN_ARCHIVE_PASSPHRASE in <home>/env.", fg="red")
+        sys.exit(4)
+    sys.exit(1 if rep.errors else 0)
+
+
 # The `python -m lbrain.cli` entry point. MUST stay the last statement in this
 # file: it used to sit mid-module (line 943 at d58b45f), so main() was dispatched
 # before the rest of the file had been executed and EVERY command defined below it

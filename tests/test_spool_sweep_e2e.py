@@ -149,6 +149,34 @@ def test_v5_build_passes_the_configured_embedding_width_to_the_sweep(tmp_path, m
     assert seen["dim"] == 384 == Config.load().embedding_dim
 
 
+def test_e7_orphan_captured_at_wake_is_swept_into_the_published_epoch(tmp_path, monkeypatch):
+    """Kill survival (b), CSO plan §4.1 end to end (review 2026-10-17T0137Z: '4.1 tests staging only'): a transcript a
+    hard kill kept out of the spool is staged by `orphans.recover`, the real build sweeps it, and its content (a
+    unique nonce) is in the PUBLISHED epoch's archive and round-trips through `retrieve`. Served-via-MCP is the
+    same archive table read by lair_deep_recall; that read path is not exercised here."""
+    from types import SimpleNamespace
+    from lbrain import orphans
+    monkeypatch.delenv("LBRAIN_SEAT", raising=False)
+    home = _home(tmp_path)
+    nonce = "relay-nonce-7f3a9c2e"
+    cfg_dir = tmp_path / ".claude-killed"
+    sid = "dddddddd-0000-4000-8000-000000000004"
+    t = cfg_dir / "projects" / "-proj" / f"{sid}.jsonl"; t.parent.mkdir(parents=True)
+    t.write_text(_jsonl(nonce))
+    rep = orphans.recover(SimpleNamespace(db_path=home / "brain.db"), home, claude_dirs=[cfg_dir], live=[])
+    assert rep.staged == [sid], rep
+    built = _build(home, tmp_path, delta=False)
+    assert built["published"] and built["sweep"]["swept"] == 1, built["sweep"]
+    db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
+    con = eb._connect_vec(db)
+    rows = con.execute("SELECT txid, snapshot FROM archives").fetchall(); con.close()
+    hit = [r for r in rows if nonce in (r[1] or "")]
+    assert hit, "the orphan's content is not in the published epoch's archive"
+    out = subprocess.run([_bin(tmp_path), "retrieve", "--txid", hit[0][0], "--out", str(tmp_path / "rt.bin")],
+                         env={**os.environ, "LBRAIN_HOME": str(home)}, capture_output=True, text=True)
+    assert out.returncode == 0 and (tmp_path / "rt.bin").read_bytes() == t.read_bytes(), out.stdout + out.stderr
+
+
 def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path):
     """Chunked archive vectors through a REAL build: a long session is swept, the build's reindex step chunk-embeds it
     in staging, and the PUBLISHED epoch carries its chunk rows with one vector each."""
