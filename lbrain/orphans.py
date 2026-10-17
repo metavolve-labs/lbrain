@@ -68,6 +68,7 @@ class OrphanReport:
     known: int = 0
     older: int = 0
     before_cutoff: int = 0
+    kept_out: int = 0
     live: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -271,6 +272,18 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def is_kept_out(t: Transcript, keep_out) -> bool:
+    """The operator's named exclusions: an exact session id, or (an entry with "/") a substring of the path."""
+    path = str(t.path)
+    for e in keep_out:
+        e = str(e).strip()
+        if not e:
+            continue
+        if e == t.session_id or ("/" in e and e in path):
+            return True
+    return False
+
+
 def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), dry_run=False,
             live=None, since: float | None = None) -> OrphanReport:
     """Stage this seat's orphaned transcripts. ``since`` (epoch seconds): skip transcripts last written before it.
@@ -297,8 +310,12 @@ def recover(cfg, home: Path, *, claude_dirs=(), codex_homes=(), grok_homes=(), d
     metas = _metas(home)
     seen = {m.get("sha256", "") for m in metas}
     todo = []
+    keep_out = list(getattr(cfg, "capture_keep_out", None) or [])
     for t in find_transcripts(claude_dirs, codex_homes, grok_homes):
         rep.found += 1
+        if is_kept_out(t, keep_out):                     # first: a named exclusion beats every other rule
+            rep.kept_out += 1
+            continue
         if is_live(t, live):
             rep.live.append(t.session_id)
             continue

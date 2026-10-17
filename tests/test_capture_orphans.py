@@ -567,3 +567,65 @@ def test_cli_since_accepts_utc_minute_and_epoch_and_refuses_garbage(tmp_path):
         assert "before cutoff 1" in r.stdout and "would stage 1" in r.stdout.lower(), (since, r.stdout)
     bad = _cli(home, "--claude-config-dir", str(c), "--dry-run", "--since", "yesterday")
     assert bad.returncode == 2 and "--since" in (bad.stdout + bad.stderr), (bad.stdout, bad.stderr)
+
+
+# --- capture_keep_out: a named exclusion, never a side effect of a timestamp (CSO, PR #84 review) ------------------
+
+def _cfg_keep(home, keep):
+    return SimpleNamespace(db_path=home / "brain.db", capture_keep_out=keep)
+
+
+def test_kept_out_session_touched_to_now_is_not_staged_past_the_cutoff(tmp_path):
+    """The CSO's case: an rsync/copy/AV touch pushes an old private transcript past the cutoff. Named = never staged."""
+    home, _ = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    priv = _claude_transcript(c, SID_A, "2026-10-01T00:00:00Z")
+    pub = _claude_transcript(c, SID_B, "2026-10-17T07:00:00Z")
+    now = time.time()
+    os.utime(priv, (now, now)); os.utime(pub, (now, now))
+    rep = orphans.recover(_cfg_keep(home, [SID_A]), home, claude_dirs=[c], live=[], since=now - 3600)
+    assert rep.staged == [SID_B] and rep.kept_out == 1 and _staged_sids(home) == [SID_B]
+
+
+def test_keep_out_holds_without_a_cutoff_too(tmp_path):
+    """A deliberate backfill (no --since) still honours the list."""
+    home, _ = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-01T00:00:00Z")
+    rep = orphans.recover(_cfg_keep(home, [SID_A]), home, claude_dirs=[c], live=[])
+    assert rep.staged == [] and rep.kept_out == 1 and _staged_sids(home) == []
+
+
+def test_keep_out_path_marker_excludes_and_a_bare_fragment_does_not(tmp_path):
+    home, _ = _home(tmp_path)
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z", project="-private-proj")
+    _claude_transcript(c, SID_B, "2026-10-16T21:00:00Z", project="-proj")
+    _claude_transcript(c, SID_C, "2026-10-16T21:00:00Z", project="-proj")
+    rep = orphans.recover(_cfg_keep(home, ["/-private-proj/", "cccccccc", "", "   "]), home, claude_dirs=[c], live=[],
+                          dry_run=True)
+    # the marker removes A; "cccccccc" is neither a whole id nor a path marker, so C is staged; blanks match nothing
+    assert sorted(rep.staged) == [SID_B, SID_C] and rep.kept_out == 1
+
+
+def test_cli_reads_capture_keep_out_from_config_toml(tmp_path):
+    home, _ = _home(tmp_path)
+    (home / "config.toml").write_text(f'db_path = "{home / "brain.db"}"\nembedding_provider = "local"\n'
+                                      f'capture_keep_out = ["{SID_A}"]\n')
+    c = tmp_path / ".claude-seat"
+    _claude_transcript(c, SID_A, "2026-10-16T21:00:00Z")
+    _claude_transcript(c, SID_B, "2026-10-16T21:00:00Z")
+    r = _cli(home, "--claude-config-dir", str(c), "--dry-run")
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    assert "kept out 1" in r.stdout and "would stage 1" in r.stdout, r.stdout
+
+
+def test_capture_keep_out_round_trips_through_the_config_writer(tmp_path, monkeypatch):
+    """Config.write() must not silently drop the list: a rewrite would re-open every named exclusion."""
+    from lbrain import config as C
+    monkeypatch.setattr(C, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(C, "CONFIG_PATH", tmp_path / "config.toml")
+    cfg = C.Config(db_path=str(tmp_path / "b.db"))
+    cfg.capture_keep_out = [SID_A, "/-private-proj/"]
+    cfg.write()
+    assert C.Config.load().capture_keep_out == [SID_A, "/-private-proj/"]
