@@ -86,6 +86,45 @@ def _serving_db(cfg) -> str:
     return serving_db_path(cfg)
 
 
+_COUNT_KEYS = ("docs", "chunks", "embedded")
+
+
+def read_counts(cfg) -> tuple[dict, str]:
+    """Read the store counts through THE SAME entry point `lbrain stats` uses.
+
+    Returns ``(stats, reason)``: ``reason`` is empty when the counts were read, and
+    otherwise names the failure. `whoami` and `lair_whoami` used to wrap this in a bare
+    ``except Exception: pass`` and then print the missing keys as Python ``None``
+    (CCO home, 2026-10-17: ``None docs`` beside a `stats` of 1543 docs on the same
+    epoch). A trust command that swallows its own failure prints a value that looks
+    like data and names no cause.
+    """
+    from .epoch import open_store
+    try:
+        store = open_store(cfg)
+    except Exception as e:  # noqa: BLE001 -- reported, never swallowed
+        return {}, f"store did not open: {type(e).__name__}: {e}"
+    try:
+        return store.stats(), ""
+    except Exception as e:  # noqa: BLE001
+        return {}, f"count query failed: {type(e).__name__}: {e}"
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 -- the counts (or the reason) are already in hand
+            pass
+
+
+def _counts_unknown(stats: dict | None, counts_error: str) -> str:
+    """Empty when every count is a real integer; otherwise the reason it is not."""
+    if counts_error:
+        return counts_error
+    missing = [k for k in _COUNT_KEYS if not isinstance((stats or {}).get(k), int)]
+    if not missing:
+        return ""
+    return f"store reported no {', '.join(missing)}"
+
+
 def _identity_note(ident) -> str:
     """The one line a consuming agent must read before trusting anything above."""
     if ident is None:
@@ -140,7 +179,7 @@ def _coverage(cfg) -> tuple[int | None, str]:
         return None, ""
 
 
-def describe(cfg, stats: dict | None = None) -> dict:
+def describe(cfg, stats: dict | None = None, counts_error: str = "") -> dict:
     """The structured answer to 'who am I and what am I trusted for?'.
 
     Returns plain data so the CLI and the MCP tool render the SAME facts — the
@@ -175,6 +214,9 @@ def describe(cfg, stats: dict | None = None) -> dict:
             "docs": (stats or {}).get("docs"),
             "chunks": (stats or {}).get("chunks"),
             "embedded": (stats or {}).get("embedded"),
+            # Empty when the three counts above are real; otherwise WHY they are not, so no
+            # surface ever renders a bare None as if it were a count.
+            "counts_unknown": _counts_unknown(stats, counts_error),
         },
         # A-585 (2026-09-13): a receipt taken from a LONG-RUNNING process measures the code that
         # process LOADED, not the code on disk. Measured that day: all five live seat MCP children
