@@ -423,6 +423,67 @@ def is_excluded_path(p: Path) -> bool:
     return any(m in s for m in _EXTRA_MARKERS)
 
 
+def _is_file_root(root: Path) -> bool:
+    """A source root that names a single FILE rather than a tree: anything on disk
+    that is not a directory (a symlink included, dangling or not), or a missing path
+    spelled as a markdown file. A missing path WITHOUT a .md suffix keeps the
+    directory-root behavior (the unmounted-drive case the survey reports)."""
+    if root.is_symlink():
+        return not root.is_dir()
+    if root.exists():
+        return not root.is_dir()
+    return root.suffix == ".md"
+
+
+def source_root_present(root) -> bool:
+    """True when a configured source root can be walked: a directory, or an existing
+    regular .md file. Every guard that asks "is this root still there" (currency,
+    prune, unreachable prune, the epoch deletion manifest) must ask THIS, not is_dir():
+    a file root answered "missing" there and disabled every prune for the home."""
+    r = Path(root)
+    if r.is_dir():
+        return True
+    return r.suffix == ".md" and r.is_file()
+
+
+def _discover_file_root(root: Path) -> list[Path]:
+    """One configured FILE source: the file itself, under the same exclusion check
+    and the same symlink-escape refusal as a file found under a directory root.
+    Anything that keeps it from being indexed is said on stderr, never a silent 0."""
+    if is_excluded_path(root):
+        return []
+    if not root.exists() and not root.is_symlink():
+        print(f"[lbrain] WARNING: source file {root} does not exist; 0 docs indexed from it.",
+              file=sys.stderr)
+        return []
+    if root.suffix != ".md":
+        print(f"[lbrain] WARNING: source {root} is a file but not a .md file; not indexed.",
+              file=sys.stderr)
+        return []
+    try:
+        rp = root.resolve()
+        anchor = root.parent.resolve() / root.name
+    except OSError as e:
+        print(f"[lbrain] SKIPPED {root}: cannot resolve ({e}).", file=sys.stderr)
+        return []
+    # The root that offered the file is its own directory entry: a symlinked file root
+    # resolves to some OTHER path (even a sibling), so rp != anchor refuses it exactly as
+    # an escaping symlink under a directory root is refused. A symlinked PARENT
+    # directory is allowed, as a symlinked directory root is (anchor resolves it too).
+    if rp != anchor:
+        print(
+            f"[lbrain] SKIPPED {root}: resolves outside its source root "
+            f"({rp}). Symlinks may not escape the corpus.",
+            file=sys.stderr,
+        )
+        return []
+    if not rp.is_file():
+        print(f"[lbrain] WARNING: source {root} is not a regular file; not indexed.",
+              file=sys.stderr)
+        return []
+    return [root]
+
+
 def discover(roots: list[Path]) -> list[Path]:
     """Find indexable *.md under each root, refusing any path that resolves
     outside the root that offered it, and skipping pre-change backup trees and
@@ -438,6 +499,9 @@ def discover(roots: list[Path]) -> list[Path]:
     """
     paths: list[Path] = []
     for root in roots:
+        if _is_file_root(root):
+            paths.extend(_discover_file_root(root))
+            continue
         if not root.exists():
             continue
         try:
@@ -585,7 +649,12 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         # re-synthesis. The date has to live in the content, like every other tier here.
         fm_claim_date = _norm_date(meta.get("generated"))
 
-    rel = str(path.relative_to(repo_root)) if repo_root and repo_root in path.parents else str(path)
+    if repo_root and repo_root in path.parents:
+        rel = str(path.relative_to(repo_root))
+    elif repo_root and path == repo_root:
+        rel = path.name  # a single-file source root: the file is its own root
+    else:
+        rel = str(path)
     # Split on BOTH separators: on Windows `rel` is "TOPIC\000-PRIORITY-Y\LAIR.md",
     # so rel.split("/") returned the whole string as one element and the
     # 000-PRIORITY boost silently never fired — a ranking difference with no

@@ -597,8 +597,9 @@ class Store:
         import os
 
         if source_roots:
+            from .index import source_root_present
             for root in source_roots:
-                if not os.path.isdir(str(root)):
+                if not source_root_present(root):
                     return []  # a source root vanished → mount gone, not docs; skip prune
 
         from pathlib import Path as _Path
@@ -724,8 +725,9 @@ class Store:
         roots = [_norm_path(r) for r in (source_roots or [])]
         if not roots:
             return []  # no sources configured → nothing is reachable by definition; refuse to guess
+        from .index import source_root_present
         for root in roots:
-            if not os.path.isdir(root):
+            if not source_root_present(root):
                 return []  # a source root vanished → mount gone, not docs; skip prune
 
         rows = self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall()
