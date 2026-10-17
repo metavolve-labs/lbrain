@@ -388,6 +388,18 @@ def _retain_failed(staging: Path, fdir: Path) -> None:
         shutil.rmtree(k, ignore_errors=True)
 
 
+def _has_archives(db_path: Path) -> bool:
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            return bool(con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='archives'").fetchone())
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+
+
 def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
     """Copy the Tier-2 archive index (archives rows, their FTS rows and vectors) from the prior epoch into a full-build
     candidate. Returns rows carried (0 when the prior has no archive tables). Content-addressed rows: INSERT OR IGNORE."""
@@ -433,6 +445,29 @@ def _carry_archive_index(prior_db: Path, staging_db: Path) -> int:
                     con.execute("DELETE FROM vec_archives WHERE rowid = ?", (aid,))
                     con.execute("INSERT INTO vec_archives (rowid, embedding) VALUES (?, ?)", (aid, vecs[aid]))
             n += 1
+        # chunked archive vectors (2026-10-17): carried like the rows above, same integrity rule (every chunk row's
+        # vector reads back at the declared width, or the carry aborts; no silent drop). Absent in the prior: 0.
+        pc2 = _connect_vec(prior_db); pc2.row_factory = sqlite3.Row
+        try:
+            has_c = {r[0] for r in pc2.execute("SELECT name FROM sqlite_master WHERE name IN ('archive_chunks','vec_archive_chunks')")}
+            crow = [dict(r) for r in pc2.execute("SELECT * FROM archive_chunks")] if has_c == {"archive_chunks", "vec_archive_chunks"} else []
+            cvec = {r[0]: r[1] for r in pc2.execute("SELECT rowid, embedding FROM vec_archive_chunks")} if crow else {}
+        except Exception as e:
+            raise EpochError(f"prior archive chunk index unreadable ({type(e).__name__}: {str(e)[:160]}); refusing to publish a candidate without it")
+        finally:
+            pc2.close()
+        if crow:
+            missing = sorted({r["chunk_id"] for r in crow} - set(cvec))
+            if missing:
+                raise EpochError(f"prior archive chunk index: {len(missing)} chunk row(s) have no vector ({missing[:5]}); refusing a carry that would lose them")
+            if any(len(b) != width * 4 for b in cvec.values()):
+                raise EpochError(f"prior archive chunk index: vector bytes do not match the width {width}; refusing the carry")
+            st._ensure_chunk_schema()
+            for r in crow:
+                con.execute("INSERT OR IGNORE INTO archive_chunks (chunk_id, archive_id, ord, text) VALUES (?, ?, ?, ?)",
+                            (r["chunk_id"], r["archive_id"], r["ord"], r["text"]))
+                con.execute("DELETE FROM vec_archive_chunks WHERE rowid = ?", (r["chunk_id"],))
+                con.execute("INSERT INTO vec_archive_chunks (rowid, embedding) VALUES (?, ?)", (r["chunk_id"], cvec[r["chunk_id"]]))
         con.commit(); return n
     finally:
         con.close()
@@ -678,6 +713,19 @@ def build(
                 report["archive_index_carried"] = _carry_archive_index(prior_db, staging_db)
             swept_plan = _sweep_spool(home, staging, lbrain_bin, lock, report, dim=int(getattr(cfg, "embedding_dim", 0) or 0)) if sweep else []
             lock.heartbeat()
+            # Chunked archive vectors (2026-10-17): every served archive gets chunk vectors, superseded/shredded ones
+            # drop theirs (derived index data only). Runs in STAGING, the only write path. The chunk index is derived,
+            # so a failure here is reported loudly and the build publishes; recall falls back to the single vector.
+            if _has_archives(staging_db):
+                try:
+                    out = _run_cli(["archive-chunks-reindex"], staging, lbrain_bin, lock=lock)
+                    m = re.findall(r"^ARCHIVE-CHUNKS (\{.*\})$", out, flags=re.M)
+                    report["archive_chunks"] = json.loads(m[-1]) if m else {"error": "no ARCHIVE-CHUNKS line"}
+                except Exception as e:
+                    report["archive_chunks"] = {"error": f"{type(e).__name__}: {str(e)[-300:]}"}
+                    print(f"[lbrain] epoch build: archive chunk reindex FAILED ({report['archive_chunks']['error'][:160]}); "
+                          "recall falls back to whole-snapshot vectors")
+                lock.heartbeat()
             # Orphan derived-state sweep: the FIRST production build was refused by
             # the gate over 14 vectors with no chunk — historical debris the live
             # main brain had carried invisibly (an old delete path missed vec

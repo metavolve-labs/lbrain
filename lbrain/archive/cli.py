@@ -476,7 +476,23 @@ def sweep_status(as_json):
     click.secho(f"  next epoch build: {rep['next_build_would']}", fg=("green" if have_pass or not staged else "yellow"))
 
 
-_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status]
+@click.command(name="archive-chunks-reindex")
+def archive_chunks_reindex():
+    """Internal (run by `epoch build` in its staging home): chunk-embed every served archive that lacks chunk vectors,
+    drop chunks of superseded or shredded ones. Gated write path: refuses on a live epoch home."""
+    from .storage import reindex_chunks
+    cfg = Config.load()
+    store = _open(cfg, write=True)
+    embedder = make_embedder(cfg)
+    try:
+        rep = reindex_chunks(ArchiveStore(store.db, store.embedding_dim), embedder.embed)
+    finally:
+        embedder.close()
+        store.close()
+    click.echo("ARCHIVE-CHUNKS " + json.dumps(rep, sort_keys=True))
+
+
+_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status, archive_chunks_reindex]
 
 
 def register(main) -> None:

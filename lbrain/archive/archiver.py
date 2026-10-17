@@ -591,6 +591,13 @@ class Archiver:
                 self.astore.write_archive_embedding(txid, self.embedder.embed_one(snapshot))
             except Exception:
                 pass  # embedding is best-effort; snapshot is still FTS-searchable
+            try:
+                from .storage import chunk_snapshot
+                chunks = chunk_snapshot(snapshot)
+                if chunks:
+                    self.astore.write_archive_chunks(txid, chunks, self.embedder.embed(chunks))
+            except Exception:
+                pass  # chunk vectors are best-effort too; the whole-snapshot vector still serves
 
         return ArchiveResult(
             txid=txid, namespace=namespace, title=title, n_bytes=len(payload),

@@ -147,3 +147,25 @@ def test_v5_build_passes_the_configured_embedding_width_to_the_sweep(tmp_path, m
     rep = _build(home, tmp_path, delta=False)
     assert rep["published"] and rep["sweep"]["swept"] == 1
     assert seen["dim"] == 384 == Config.load().embedding_dim
+
+
+def test_e8_build_chunk_indexes_the_archive_it_sweeps(tmp_path):
+    """Chunked archive vectors through a REAL build: a long session is swept, the build's reindex step chunk-embeds it
+    in staging, and the PUBLISHED epoch carries its chunk rows with one vector each."""
+    home = _home(tmp_path)
+    long_jsonl = "".join(
+        json.dumps({"type": "user", "timestamp": f"2026-10-17T00:{i // 60:02d}:{i % 60:02d}Z",
+                    "message": {"content": f"turn {i}: the archive chunking e2e check line, with enough words to fill."}}) + "\n"
+        for i in range(400))
+    _stage(home, "sess-long", long_jsonl)
+    rep = _build(home, tmp_path, delta=False)
+    assert rep["published"] and rep["sweep"]["swept"] == 1, rep["sweep"]
+    ac = rep.get("archive_chunks") or {}
+    assert "error" not in ac and ac.get("served") == 1, ac                 # the reindex step ran in the build
+    # the capture itself chunk-embedded the snapshot at sweep time, so the reindex finds nothing left to do
+    db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
+    con = eb._connect_vec(db)
+    n_rows = con.execute("SELECT count(*) FROM archive_chunks").fetchone()[0]
+    n_vecs = con.execute("SELECT count(*) FROM vec_archive_chunks").fetchone()[0]
+    con.close()
+    assert n_rows == n_vecs and n_rows > 1, (n_rows, n_vecs)

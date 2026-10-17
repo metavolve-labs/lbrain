@@ -126,28 +126,95 @@ class ArchiveStore:
         keep = {v[2] for v in best.values()}
         return {r["archive_id"] for r in rows if r["archive_id"] not in keep}
 
+    # ---- chunked archive vectors (2026-10-17) ------------------------------------------------------------------
+    # One vector per archive embeds only what the embedder reads of the snapshot: for a 512-token model that is the
+    # OPENING of a multi-MB session, so deep recall could only ever match how a session began (measured on a live
+    # home: three snapshots of one session tied at the same distance, previewing its first user line). Each snapshot
+    # is also split into overlapping chunks, each with its own vector; recall takes an archive's best chunk.
+    # The chunk tables are created ONLY on write paths: recall opens epoch databases immutable, and an older epoch
+    # without these tables must keep serving (it falls back to the single vector).
+
+    def _ensure_chunk_schema(self) -> None:
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS archive_chunks ("
+            " chunk_id INTEGER PRIMARY KEY AUTOINCREMENT, archive_id INTEGER NOT NULL, ord INTEGER NOT NULL,"
+            " text TEXT NOT NULL, UNIQUE(archive_id, ord))"
+        )
+        self.db.execute(
+            f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_archive_chunks USING vec0(embedding float[{self.embedding_dim}])"
+        )
+
+    def has_chunk_tables(self) -> bool:
+        names = {r[0] for r in self.db.execute(
+            "SELECT name FROM sqlite_master WHERE name IN ('archive_chunks', 'vec_archive_chunks')")}
+        return names == {"archive_chunks", "vec_archive_chunks"}
+
+    def chunked_archive_ids(self) -> set[int]:
+        if not self.has_chunk_tables():
+            return set()
+        return {r[0] for r in self.db.execute("SELECT DISTINCT archive_id FROM archive_chunks")}
+
+    def write_archive_chunks(self, txid: str, texts: list[str], blobs: list[bytes]) -> int:
+        """Replace an archive's chunks (text + vector each). Returns the number written."""
+        if len(texts) != len(blobs):
+            raise ValueError(f"write_archive_chunks: {len(texts)} texts vs {len(blobs)} vectors")
+        row = self.db.execute("SELECT archive_id FROM archives WHERE txid = ?", (txid,)).fetchone()
+        if not row:
+            return 0
+        aid = row[0]
+        self._ensure_chunk_schema()
+        old = [r[0] for r in self.db.execute("SELECT chunk_id FROM archive_chunks WHERE archive_id = ?", (aid,))]
+        for cid in old:
+            self.db.execute("DELETE FROM vec_archive_chunks WHERE rowid = ?", (cid,))
+        self.db.execute("DELETE FROM archive_chunks WHERE archive_id = ?", (aid,))
+        for i, (t, b) in enumerate(zip(texts, blobs)):
+            cur = self.db.execute("INSERT INTO archive_chunks (archive_id, ord, text) VALUES (?, ?, ?)", (aid, i, t))
+            self.db.execute("INSERT INTO vec_archive_chunks (rowid, embedding) VALUES (?, ?)", (cur.lastrowid, b))
+        self.db.commit()
+        return len(texts)
+
     def search_archives(self, q_vec: bytes, k: int = 5, namespace: str | None = None,
                         include_superseded: bool = False) -> list:
         """Semantic recall over archive snapshots (the read surface of Tier-2).
         Shredded archives are excluded — the snapshot survives but the record is gone. Superseded snapshots (an
         older, smaller capture of a session that has a newer one) are excluded unless ``include_superseded``, so a
-        session that was captured N times occupies one result, not N."""
+        session that was captured N times occupies one result, not N.
+        Each archive is scored by its BEST vector: the whole-snapshot vector, or any of its chunk vectors when it
+        has them; the preview (``snapshot`` in the result) is the best-matching chunk's text when a chunk won."""
         skip = set() if include_superseded else self.superseded_ids()
-        rows = self.db.execute(
-            "SELECT a.archive_id, a.txid, a.title, a.snapshot, a.namespace, a.created, "
-            "       a.n_bytes, a.shredded, a.transport, "
-            "       vec_distance_cosine(v.embedding, ?) AS dist "
-            "FROM vec_archives v JOIN archives a ON a.archive_id = v.rowid "
-            "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist",
-            (q_vec, q_vec, max(k * 3, 15) + len(skip)),
-        ).fetchall()
+        pool = max(k * 3, 15) + len(skip)
+        best: dict[int, tuple[float, str | None]] = {}
+        for r in self.db.execute(
+            "SELECT v.rowid AS aid, vec_distance_cosine(v.embedding, ?) AS dist FROM vec_archives v "
+            "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist", (q_vec, q_vec, pool)
+        ):
+            best[r[0]] = min(best.get(r[0], (r[1], None)), (r[1], None), key=lambda x: x[0])
+        if self.has_chunk_tables():
+            chunk_pool = pool * 8
+            for r in self.db.execute(
+                "SELECT c.archive_id, vec_distance_cosine(v.embedding, ?) AS dist, c.text "
+                "FROM vec_archive_chunks v JOIN archive_chunks c ON c.chunk_id = v.rowid "
+                "WHERE v.embedding MATCH ? AND k = ? ORDER BY dist", (q_vec, q_vec, chunk_pool)
+            ):
+                if r[0] not in best or r[1] < best[r[0]][0]:
+                    best[r[0]] = (r[1], r[2])
         out = []
-        for r in rows:
-            if r["shredded"] or r["archive_id"] in skip:
+        for aid, (dist, chunk_text) in sorted(best.items(), key=lambda kv: kv[1][0]):
+            if aid in skip:
                 continue
-            if namespace and r["namespace"] != namespace:
+            a = self.db.execute(
+                "SELECT archive_id, txid, title, snapshot, namespace, created, n_bytes, shredded, transport "
+                "FROM archives WHERE archive_id = ?", (aid,)
+            ).fetchone()
+            if a is None or a["shredded"]:
                 continue
-            out.append(r)
+            if namespace and a["namespace"] != namespace:
+                continue
+            row = dict(a)
+            row["dist"] = dist
+            if chunk_text is not None:
+                row["snapshot"] = chunk_text
+            out.append(row)
             if len(out) >= k:
                 break
         return out
@@ -196,3 +263,54 @@ class ArchiveStore:
         return self.db.execute(
             "SELECT COUNT(*) AS n FROM archives WHERE shredded = 0"
         ).fetchone()["n"]
+
+
+def chunk_snapshot(text: str, size: int = 1800, overlap: int = 200) -> list[str]:
+    """Deterministic overlapping windows over a snapshot, cut at the last newline inside a window when there is one
+    (so a chunk ends between turns, not mid-line). About 1,800 chars stays inside a 512-token embedder's reach."""
+    text = text or ""
+    if len(text) <= size:
+        return [text] if text.strip() else []
+    out, i = [], 0
+    while i < len(text):
+        end = min(i + size, len(text))
+        if end < len(text):
+            nl = text.rfind("\n", i + size // 2, end)
+            if nl != -1:
+                end = nl + 1  # keep the newline: a chunk ends between lines
+        piece = text[i:end]
+        if piece.strip():
+            out.append(piece)
+        if end >= len(text):
+            break
+        i = max(end - overlap, i + 1)
+    return out
+
+
+def reindex_chunks(astore: "ArchiveStore", embed) -> dict:
+    """Bring the chunk index to the minimal state: every SERVED archive (not shredded, not superseded) has chunk
+    vectors; no superseded or shredded archive keeps any (chunks are derived index data, never the record: the
+    snapshot and the ciphertext stay). ``embed`` is ``list[str] -> list[bytes]``. Returns counts."""
+    served = {r[0]: r[1] for r in astore.db.execute(
+        "SELECT archive_id, snapshot FROM archives WHERE shredded = 0")}
+    for aid in astore.superseded_ids():
+        served.pop(aid, None)
+    have = astore.chunked_archive_ids()
+    rep = {"served": len(served), "chunked": 0, "chunks": 0, "dropped_archives": 0, "dropped_chunks": 0}
+    for aid in sorted(have - set(served)):                        # superseded or shredded: drop derived chunks
+        ids = [r[0] for r in astore.db.execute("SELECT chunk_id FROM archive_chunks WHERE archive_id = ?", (aid,))]
+        for cid in ids:
+            astore.db.execute("DELETE FROM vec_archive_chunks WHERE rowid = ?", (cid,))
+        astore.db.execute("DELETE FROM archive_chunks WHERE archive_id = ?", (aid,))
+        rep["dropped_archives"] += 1; rep["dropped_chunks"] += len(ids)
+    astore.db.commit()
+    for aid, snap in sorted(served.items()):
+        if aid in have:
+            continue
+        chunks = chunk_snapshot(snap)
+        if not chunks:
+            continue
+        txid = astore.db.execute("SELECT txid FROM archives WHERE archive_id = ?", (aid,)).fetchone()[0]
+        rep["chunks"] += astore.write_archive_chunks(txid, chunks, embed(chunks))
+        rep["chunked"] += 1
+    return rep
