@@ -198,6 +198,69 @@ def test_r2_no_early_cut_leaves_a_key_prefix_below_its_pattern_length():
     assert "QWERT" not in out, out
 
 
+# ---------- CSO round 3 on #90 (2026-10-18T0119Z) ----------
+
+def test_r3_1_zero_width_chars_cannot_split_a_key():
+    """Unicode category Cf (format) characters are invisible and survive NFKC: each one inside
+    a key shape leaked the whole key. All of them are stripped before matching."""
+    aiza_tail = "d4E5f6G7h8I9j0K1l2"
+    sk_tail = "efghijklmnop"
+    ghp_tail = "KLMNOPQRSTUV"
+    cases = [
+        ("bad AI" + "zaSyA1b2C3‍" + aiza_tail, aiza_tail),        # ZWJ
+        ("x s" + "k-abcd​" + sk_tail, sk_tail),                      # ZWSP
+        ("gh" + "p_ABCDEFGHIJ⁠" + ghp_tail, ghp_tail),              # word joiner
+        ("s" + "k-abcd﻿" + sk_tail, sk_tail),                        # BOM
+    ]
+    for text, tail in cases:
+        out = scrub_reason(text)
+        assert tail not in out and "[REDACTED]" in out, (repr(text), out)
+
+
+def test_r3_1_no_format_char_survives_into_the_line():
+    out = scrub_reason("plain​ text­ here⁠")
+    assert out == "plain text here", repr(out)
+
+
+def test_r3_2_python_dict_repr_single_quotes():
+    out = scrub_reason("ValueError: {'api_key': 'pyrepr5secret'}")
+    assert "pyrepr5secret" not in out and "api_key" in out, out
+
+
+def test_r3_2_python_dict_repr_mixed_quotes_and_bare_value():
+    for text, secret in (("{\"api_key\": 'mix5secret'}", "mix5secret"),
+                         ("{'token': \"dq5secret\"}", "dq5secret"),
+                         ("{'password': 12345678}", "12345678")):
+        out = scrub_reason(text)
+        assert secret not in out, (text, out)
+
+
+def test_r3_3_url_userinfo_password_is_redacted_scheme_and_host_kept():
+    out = scrub_reason("connect https://admin:hunter2pass@db.example.com/x failed")
+    assert "hunter2pass" not in out, out
+    assert "https://" in out and "db.example.com/x failed" in out, out
+
+
+def test_r3_3_url_userinfo_with_a_secret_shaped_user_name_keeps_the_host():
+    out = scrub_reason("https://password:hunter3pw@host.example/")
+    assert "hunter3pw" not in out and "host.example" in out, out
+
+
+def test_r3_pwd_is_a_secret_name():
+    out = scrub_reason("pwd=hunter4pw rejected")
+    assert "hunter4pw" not in out and "rejected" in out, out
+
+
+def test_r3_the_cap_never_splits_the_placeholder():
+    texts = ["E: " + "p " * k + " token=abcdef " + "q " * 150 + " end" for k in range(10, 40)]   # head cut
+    texts += ["E: " + "p " * 150 + " token=abcdef " + "q " * m + " end" for m in range(45, 80)]  # tail cut
+    for pad, text in enumerate(texts):
+        out = scrub_reason(text)
+        assert len(out) <= 201
+        frag = out.replace("[REDACTED]", "")
+        assert "[RE" not in frag and "DACTED]" not in frag and "REDACT" not in frag, (pad, out)
+
+
 def test_r2_ordinary_reasons_read_cleanly():
     for t in ("database is locked", "no such file: /root/.lbrain-x/brain.db",
               "sqlite3.OperationalError: no such table: docs"):
