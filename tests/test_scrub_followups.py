@@ -113,9 +113,10 @@ def test_percent_encoded_query_name():
     assert "pct3ncval9" not in out, out
 
 
-def test_control_percent_text_without_secrets_is_left_encoded():
-    t = "no such file: /a%20b/brain.db"
-    assert scrub_reason(t) == t
+def test_percent_text_is_shown_decoded():
+    """Compose-never-choose (CSO review of #92) always shows the decoded line: the display is
+    the decoded text, redacted. Ordinary %-escapes therefore read decoded."""
+    assert scrub_reason("no such file: /a%20b/brain.db") == "no such file: /a b/brain.db"
 
 
 def test_yaml_quoted_password_with_spaces():
