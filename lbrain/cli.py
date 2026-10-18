@@ -1866,8 +1866,11 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
         root = Path(src)
         if not root.exists():
             continue
-        for f in sorted(root.rglob("*.md")):
-            rel = str(f.relative_to(root))
+        # A single-file source root is its own root (rglob on a file yields nothing).
+        file_root = root.is_file()
+        for f in ([root] if file_root and root.suffix == ".md" else
+                  [] if file_root else sorted(root.rglob("*.md"))):
+            rel = f.name if file_root else str(f.relative_to(root))
             if is_excluded(rel) or (path_prefix and not rel.startswith(path_prefix)):
                 excluded += 1
                 continue
@@ -1943,18 +1946,12 @@ def whoami(as_json: bool):
     """
     import json as _json
 
-    from .identity import describe
+    from .identity import describe, read_counts
 
     cfg = Config.load()
-    stats = {}
-    try:
-        store = open_store(cfg)
-        stats = store.stats()
-        store.close()
-    except Exception:
-        pass
+    stats, counts_error = read_counts(cfg)
 
-    info = describe(cfg, stats)
+    info = describe(cfg, stats, counts_error=counts_error)
     if as_json:
         click.echo(_json.dumps(info, indent=2, default=str))
         return
@@ -1983,7 +1980,10 @@ def whoami(as_json: bool):
     click.echo()
     click.secho("  brain", fg="cyan")
     click.echo(f"    db:       {b['db']}")
-    click.echo(f"    indexed:  {b['docs']} docs · {b['chunks']} chunks · {b['embedded']} embedded")
+    if b.get("counts_unknown"):
+        click.secho(f"    indexed:  unknown ({b['counts_unknown']})", fg="yellow")
+    else:
+        click.echo(f"    indexed:  {b['docs']} docs · {b['chunks']} chunks · {b['embedded']} embedded")
     click.echo(f"    sources:  {len(b['sources'])} configured")
     click.echo()
     click.secho("  serving contract", fg="cyan")

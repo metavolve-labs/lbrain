@@ -467,17 +467,12 @@ def lair_whoami() -> str:
     """
     import json as _json
 
-    from .identity import describe
+    from .identity import describe, read_counts
 
     cfg = Config.load()
-    stats = {}
-    try:
-        store = open_store(cfg)
-        stats = store.stats()
-        store.close()
-    except Exception:
-        pass
-    return _unbound_home_banner() + unprovisioned_banner() + _json.dumps(describe(cfg, stats), indent=2, default=str)
+    stats, counts_error = read_counts(cfg)
+    return _unbound_home_banner() + unprovisioned_banner() + _json.dumps(
+        describe(cfg, stats, counts_error=counts_error), indent=2, default=str)
 
 
 @mcp.tool()
