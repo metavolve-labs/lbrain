@@ -38,14 +38,17 @@ import struct
 import subprocess
 import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .epoch import (
     BuilderBusy,
     BuilderLock,
     EpochError,
+    LockLost,
     _boot_id,
     current_epoch_id,
+    debris_line,
     epoch_db,
     epoch_dir,
     epochs_root,
@@ -54,6 +57,7 @@ from .epoch import (
     publish,
     resolve_db_path,
     stamp_staging_owner,
+    unstamped_staging_count,
 )
 from .index import discover, is_excluded_path, source_root_present
 
@@ -63,6 +67,67 @@ SOURCE_COLLAPSE_FLOOR = 0.5
 
 
 # ---------- helpers ----------
+
+# Progress-driven lock heartbeats during the long in-process sqlite phases (CSO Q3 on #93).
+# sqlite calls the progress handler every PROGRESS_OPCODES virtual-machine instructions of a
+# statement that is actually executing, so a statement that hangs (a stalled write on 9p, a
+# deadlock) stops calling it and the heartbeat stops with it. A heartbeat THREAD was ruled
+# out: it keeps beating while the main thread hangs. The handler writes the lock meta at
+# most once per PROGRESS_BEAT_EVERY seconds.
+PROGRESS_BEAT_EVERY = 5.0
+PROGRESS_OPCODES = 10_000
+
+
+@contextmanager
+def _heartbeat_while(con: sqlite3.Connection, lock, phase: str, report: dict, *,
+                     every: float | None = None, opcodes: int | None = None,
+                     clock=time.monotonic):
+    """Keep `lock` alive while statements run on `con`, driven by sqlite progress.
+
+    The handler never raises into sqlite. Its only non-zero return (which makes sqlite
+    abort the statement with "interrupted") is on LockLost: a builder that lost its lock
+    stops its VACUUM or integrity check at once, and the LockLost is re-raised here in
+    place of sqlite's OperationalError. Any other failure to write the heartbeat is
+    counted in report["progress_heartbeats"][phase + "_errors"] and the statement goes on
+    (the pre-publish ownership check still stands behind it). Beats are counted in
+    report["progress_heartbeats"][phase]."""
+    every = PROGRESS_BEAT_EVERY if every is None else float(every)
+    beats = report.setdefault("progress_heartbeats", {})
+    beats.setdefault(phase, 0)
+    lost: list = []
+    last: list = [None]
+
+    def _beat() -> int:
+        try:
+            now = clock()
+            if last[0] is not None and now - last[0] < every:
+                return 0
+            last[0] = now
+            lock.heartbeat()
+            beats[phase] += 1
+            return 0
+        except LockLost as e:
+            lost.append(e)
+            return 1  # abort: the lock is not ours any more
+        except Exception:
+            beats[phase + "_errors"] = beats.get(phase + "_errors", 0) + 1
+            return 0
+
+    con.set_progress_handler(_beat, PROGRESS_OPCODES if opcodes is None else int(opcodes))
+    try:
+        yield
+    except sqlite3.OperationalError:
+        if lost:
+            raise lost[0]
+        raise
+    finally:
+        try:
+            con.set_progress_handler(None, 0)
+        except Exception:
+            pass
+    if lost:
+        raise lost[0]
+
 
 def _is_slow_home(home: Path) -> bool:
     """DrvFs heuristic: /mnt/* per-row SQLite writes hang (measured >10min vs 59s)."""
@@ -815,9 +880,17 @@ def build(
                 # publication: checkpointed SINGLE FILE on the destination fs (panel #1)
                 dest = epoch_db(home, eid)
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                con.execute("PRAGMA journal_mode=DELETE")
-                con.execute("VACUUM INTO ?", (str(dest),))
+                with _heartbeat_while(con, lock, "vacuum_into", report):
+                    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    con.execute("PRAGMA journal_mode=DELETE")
+                    con.execute("VACUUM INTO ?", (str(dest),))
+            except LockLost:
+                # Deposed mid-VACUUM: the partial file is this build's own, unpublished epoch
+                # dir (the epoch id is unique to this process), so remove it rather than leave
+                # a half-written epoch for list_epochs to count.
+                if current_epoch_id(home) != eid:
+                    shutil.rmtree(epoch_dir(home, eid), ignore_errors=True)
+                raise
             finally:
                 con.close()
 
@@ -833,12 +906,18 @@ def build(
                 scon.close()
             vcon = sqlite3.connect(str(dest))
             try:
-                if vcon.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise EpochError(f"published file failed integrity_check: {dest}")
-                published_docs = vcon.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+                with _heartbeat_while(vcon, lock, "integrity_check", report):
+                    if vcon.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                        raise EpochError(f"published file failed integrity_check: {dest}")
+                    published_docs = vcon.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
                 if published_docs != staging_docs:
                     raise EpochError(
                         f"published doc count {published_docs} != candidate {staging_docs}: {dest}")
+            except LockLost:
+                vcon.close()  # same cleanup as a LockLost during VACUUM INTO above
+                if current_epoch_id(home) != eid:
+                    shutil.rmtree(epoch_dir(home, eid), ignore_errors=True)
+                raise
             finally:
                 vcon.close()
 
@@ -868,9 +947,9 @@ def build(
                 "runtime_fingerprint": _fingerprint(runtime_inputs),
             }, indent=2) + "\n", encoding="utf-8")
 
-            # Ownership check before the swap: the gate and VACUUM INTO above run in-process
-            # with no heartbeat; a builder that lost the lock must abort here (LockLost),
-            # never publish and then prune under a lock it no longer holds (2026-10-18).
+            # Ownership check before the swap: the gate above runs in-process with no
+            # heartbeat (VACUUM INTO and integrity_check beat by sqlite progress); a builder
+            # that lost the lock must abort here (LockLost), never publish and then prune under a lock it no longer holds (2026-10-18).
             lock.heartbeat()
             caveat = publish(home, eid)
             if swept_plan:
@@ -1144,11 +1223,16 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
             if last_said is None or now - last_said >= say_every:
                 beat = "acquiring" if age is None else f"heartbeat {age:.0f}s ago"
                 if age is not None and age > BuilderLock(home).stale_after and h.get("stale") is False:
-                    # CSO Q2 on #93: alert only, never a ceiling (VACUUM INTO legitimately
+                    # CSO Q2 on #93: alert only, never a ceiling (the in-process gate legitimately
                     # runs minutes with no heartbeat); an operator decides on a kill.
                     beat = f"live, no heartbeat {age / 60:.0f} min"
                 echo(f"  waiting for builder pid {h.get('pid') or '?'} on {h.get('host') or '?'} "
                      f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
+                if last_said is None:
+                    # once per wait: leftover unstamped staging (a count; never swept here)
+                    n_debris = unstamped_staging_count(home)
+                    if n_debris:
+                        echo(f"  note: {debris_line(n_debris)}")
                 last_said = now
             time.sleep(min(poll, max(0.0, deadline - now)))
         sat = satisfying_epoch(home, invoked_ns, prior_eid, flags=my_flags, config_sha=my_sha,

@@ -2010,6 +2010,24 @@ def whoami(as_json: bool):
                f"  ({_q})")
     click.echo(f"    untrusted:  retrieved text is fenced as data, never instructions")
 
+    # CSO follow-ups on #93: the builder lock and leftover staging, on the surface a seat
+    # reads at wake. Legacy homes have no builder section.
+    bld = info.get("builder")
+    if isinstance(bld, dict):
+        click.echo()
+        click.secho("  builder", fg="cyan")
+        if bld.get("error"):
+            click.secho(f"    unknown ({bld['error']})", fg="yellow")
+        else:
+            lk = bld.get("lock")
+            if lk:
+                click.secho(f"    {lk['line']}",
+                            fg=("green" if lk.get("state") == "live" else "yellow"))
+            else:
+                click.echo("    no builder lock held")
+            if bld.get("debris_note"):
+                click.secho(f"    {bld['debris_note']}", fg="yellow")
+
     # A-585 part 2: the vintage belongs on the surface a receipt is actually read from.
     # The runtime block shipped in describe() and was rendered on no RECEIPT surface -- visible
     # only behind --json, which no receipt route uses, and absent from a pinned MCP server's
