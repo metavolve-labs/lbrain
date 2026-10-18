@@ -112,6 +112,98 @@ def test_an_ordinary_reason_passes_through_unchanged_in_substance(tmp_path, monk
     assert "does not exist" in out and "[REDACTED]" not in out, out
 
 
+# ---------- CSO round 2 on #90 (2026-10-18T0008Z) ----------
+# Synthetic key material is assembled from pieces so no literal key shape sits in the file.
+
+def _leaks(out: str, *pieces: str) -> list[str]:
+    return [p for p in pieces if p in out]
+
+
+def test_r2_d1_a_control_char_inside_sk_cannot_split_the_match():
+    body = "abcdefghijklmnop"
+    out = scrub_reason("key " + "sk" + "-\x01" + body)
+    assert not _leaks(out, body, "sk-" + body), out
+
+
+def test_r2_d1_a_bidi_char_inside_aiza_cannot_split_the_match():
+    body = "SyA1b2C3d4E5f6G7h8I9j0K1l2"
+    out = scrub_reason("AI" + "za‪" + body)
+    assert not _leaks(out, body), out
+
+
+def test_r2_d1_an_escape_inside_ghp_cannot_split_the_match():
+    out = scrub_reason("gh" + "p_ABCDEFGHIJ\x1bKLMNOPQRSTUV")
+    assert not _leaks(out, "ABCDEFGHIJ", "KLMNOPQRSTUV"), out
+
+
+def test_r2_d1_fullwidth_sk_is_folded_then_redacted():
+    body = "abcdefghijklmnop"
+    out = scrub_reason("ｓｋ-" + body)
+    assert not _leaks(out, body), out
+
+
+def test_r2_d2_json_api_key_value():
+    out = scrub_reason('{"api_key": "zx81spectrum4096secret"}')
+    assert not _leaks(out, "zx81spectrum4096secret") and "[REDACTED]" in out, out
+
+
+def test_r2_d2_toml_lowercase_name_quoted_value():
+    out = scrub_reason('openai_api_key = "proj9secretvalue77"')
+    assert not _leaks(out, "proj9secretvalue77") and "openai_api_key" in out, out
+
+
+def test_r2_d2_quoted_value_with_spaces_is_redacted_to_the_closing_quote():
+    out = scrub_reason('GEMINI_API_KEY = "abc def ghi jkl" then more')
+    assert not _leaks(out, "abc", "def", "ghi", "jkl"), out
+    assert "then more" in out, out
+
+
+def test_r2_d2_authorization_token_header():
+    out = scrub_reason("Authorization: token q9w8e7r6t5y4u3i2o1p0")
+    assert not _leaks(out, "q9w8e7r6t5y4u3i2o1p0"), out
+
+
+def test_r2_d2_query_key_parameter():
+    out = scrub_reason("GET https://x/v1?key=p0o9i8u7y6t5r4e3&alt=json")
+    assert not _leaks(out, "p0o9i8u7y6t5r4e3"), out
+
+
+def test_r2_d2_aws_secret_with_slashes():
+    out = scrub_reason("aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+    assert not _leaks(out, "wJalrXUtnFEMI", "K7MDENG", "bPxRfiCYEXAMPLEKEY"), out
+
+
+def test_r2_d2_names_match_case_insensitively():
+    for name in ("Password", "passwd", "client_secret", "X-Auth-Token", "credential"):
+        out = scrub_reason(f"{name}=hunter2value")
+        assert "hunter2value" not in out, (name, out)
+
+
+def test_r2_d3_lowercase_bearer():
+    out = scrub_reason("auth failed: bearer abcDEF123456ghiJKL")
+    assert not _leaks(out, "abcDEF123456ghiJKL"), out
+
+
+def test_r2_an_exception_type_name_is_not_mistaken_for_a_secret_name():
+    """Control: `KeyError: 'docs'` must stay readable (KeyError contains 'key')."""
+    out = scrub_reason("count query failed: KeyError: 'docs'")
+    assert out == "count query failed: KeyError: 'docs'", out
+
+
+def test_r2_no_early_cut_leaves_a_key_prefix_below_its_pattern_length():
+    """A pre-scrub length cap would cut a key mid-token (here at char 2000) and leave a prefix
+    too short to match; nothing may be capped before the scrub runs."""
+    filler = "ab " * 664                                   # 1992 chars
+    out = scrub_reason(filler + "sk" + "-" + "QWERTYUIOPASDF")
+    assert "QWERT" not in out, out
+
+
+def test_r2_ordinary_reasons_read_cleanly():
+    for t in ("database is locked", "no such file: /root/.lbrain-x/brain.db",
+              "sqlite3.OperationalError: no such table: docs"):
+        assert scrub_reason(t) == t
+
+
 def test_full_counts_still_have_no_reason(tmp_path, monkeypatch):
     monkeypatch.setenv("LBRAIN_HOME", str(tmp_path))
     b = describe(Config.load(), {"docs": 1, "chunks": 2, "embedded": 2})["brain"]

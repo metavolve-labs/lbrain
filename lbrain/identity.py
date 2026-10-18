@@ -120,32 +120,63 @@ import re as _re
 # Key-shaped tokens an exception message may carry (CSO review of PR #87, 2026-10-17: an
 # injected `sk-ant-...`, an env line and a newline came out verbatim in whoami). The engine
 # has no shared secret scrubber, so this set is deliberately conservative: it redacts more
-# than it needs to rather than less. Order matters: the env-assignment rule runs first so the
-# variable NAME survives (it says what kind of thing was there) while its value does not.
+# than it needs to rather than less.
+#
+# Name-based rules first (CSO round 2 on #90, 2026-10-18): any NAME containing key, token,
+# secret, password, passwd, authorization or credential (case-insensitive), in env
+# (`NAME=value`), toml (`name = "value"`), JSON (`"name": "value"`) and query (`?key=value`)
+# forms. The NAME survives (it says what kind of thing was there); the value goes, to the
+# closing quote when quoted. A name that is an exception TYPE (`KeyError: ...`) is not a
+# secret name and is left alone.
+_SECRET_NAME = r"[A-Za-z0-9_.\-]*(?:key|token|secret|password|passwd|authorization|credential)[A-Za-z0-9_.\-]*"
+
+
+def _keep_exception_names(repl):
+    def sub(m):
+        if _re.search(r"(?:error|exception|warning)$", m.group("name"), _re.I):
+            return m.group(0)
+        return repl(m)
+    return sub
+
+
 _SECRET_PATTERNS = (
-    (_re.compile(r"\b([A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTH)[A-Z0-9_]*)"
-                 r"(\s*[=:]\s*)(\S+)"), r"\1=[REDACTED]"),
-    (_re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), "[REDACTED]"),
-    (_re.compile(r"\bBearer\s+\S+", _re.I), "Bearer [REDACTED]"),
-    (_re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), "[REDACTED]"),
-    (_re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), "[REDACTED]"),
-    (_re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "[REDACTED]"),
-    (_re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), "[REDACTED]"),
-    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
-    (_re.compile(r"[A-Za-z0-9_\-+]{40,}={0,2}"), "[REDACTED]"),   # long opaque token
+    # HTTP Authorization header, any scheme word (Bearer, token, Basic): the credential goes.
+    (_re.compile(r"\b(authorization)\s*[:=]\s*(?:(?:bearer|token|basic)\s+)?[^\s\"',;]+", _re.I),
+     lambda m: f"{m.group(1)}: [REDACTED]"),
+    # JSON: "name": "value"
+    (_re.compile(r'"(?P<name>' + _SECRET_NAME + r')"\s*:\s*"(?:[^"\\]|\\.)*"', _re.I),
+     _keep_exception_names(lambda m: f'"{m.group("name")}": "[REDACTED]"')),
+    # env / toml with a quoted value: NAME = "value with spaces" (or single quotes)
+    (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*(?P<q>[\"'])(?:(?!(?P=q)).)*(?P=q)", _re.I),
+     _keep_exception_names(lambda m: f"{m.group('name')}=[REDACTED]")),
+    # env / query / header with a bare value: NAME=value, ?key=value, X-Auth-Token: value
+    (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*[^\s&\"',;]+", _re.I),
+     _keep_exception_names(lambda m: f"{m.group('name')}=[REDACTED]")),
+    (_re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bBearer\s+\S+", _re.I), lambda m: "Bearer [REDACTED]"),
+    (_re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), lambda m: "[REDACTED]"),
+    (_re.compile(r"[A-Za-z0-9_\-+]{40,}={0,2}"), lambda m: "[REDACTED]"),   # long opaque token
 )
 _REASON_CAP = 200
 
 
 def scrub_reason(text: str) -> str:
-    """One display line for an exception text: key-shaped tokens redacted, folded to a single
-    line with control and bidi characters stripped (serve.sanitize_field), capped at about
-    200 characters."""
+    """One display line for an exception text. Order matters (CSO round 2 on #90):
+    1. sanitize (serve.sanitize_field: NFKC, single line, control and bidi characters
+       stripped), UNCAPPED, so an inserted control, bidi, escape or fullwidth character can
+       no longer split a key shape that the strip then rejoins, and no pre-cap cuts a key
+       below its pattern length;
+    2. redact secret-named values and key-shaped tokens;
+    3. cap at about 200 characters, keeping both ends."""
     from .serve import sanitize_field
     s = str(text)
+    s = sanitize_field(s, len(s) + 1)
     for pat, repl in _SECRET_PATTERNS:
         s = pat.sub(repl, s)
-    s = sanitize_field(s, 10 * _REASON_CAP)
     if len(s) > _REASON_CAP:
         # Keep both ends: the head names the failure class, the tail usually names the cause
         # ("... does not exist"); a long path in the middle is what gets elided.
