@@ -657,13 +657,16 @@ def build(
     """Build → validate → swap. Returns a report dict; raises EpochError with the
     staging retained as .failed forensics on any gate refusal.
 
-    ``config_sha``: the sha256 of the config.toml bytes the caller loaded ``cfg`` from (the
-    CLI passes it; UNSTABLE_CONFIG when the file changed under the load). When None it is
-    taken here, at entry. Recorded in the manifest so a follower can tell whether this
-    build ran on ITS config (`--wait-for-builder`)."""
+    ``config_sha``: the sha256 of the config.toml bytes the caller loaded ``cfg`` from (every
+    CLI build path passes it, bracketed around Config.load(); UNSTABLE_CONFIG when the file
+    changed under the load). When None (an in-process caller), the file is read here at entry
+    and its sha is used only if the file still describes ``cfg``; otherwise UNSTABLE_CONFIG
+    (CSO r2 on #89: a sha taken at entry described a config the build never loaded).
+    Recorded in the manifest so a follower can tell whether this build ran on ITS config."""
     home = Path(home)
     if config_sha is None:
-        config_sha = _config_file_sha(home)
+        config_sha = _entry_config_sha(home, cfg)
+    runtime_inputs = _runtime_inputs(home)
     flags = build_flags(delta=delta, confirm_source_removed=confirm_source_removed,
                         prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
                         keep=keep, max_bytes=max_bytes, sweep=sweep)
@@ -858,6 +861,9 @@ def build(
                 "config_sha256_staged": staged_sha,
                 "builder_host": socket.gethostname(),
                 "builder_boot_id": _boot_id(),
+                # env-derived embedding inputs and the engine (names only for credentials)
+                "runtime_inputs": runtime_inputs,
+                "runtime_fingerprint": _fingerprint(runtime_inputs),
             }, indent=2) + "\n", encoding="utf-8")
 
             caveat = publish(home, eid)
@@ -916,6 +922,68 @@ def _config_file_sha(home: Path) -> str:
 config_sha = _config_file_sha   # public name; build() has a parameter of the same name
 
 
+def _norm_cfg_value(key: str, v):
+    if key == "sources":
+        return [str(Path(str(x)).expanduser()) for x in (v or [])]
+    if key == "db_path":
+        return str(Path(str(v)).expanduser())
+    if isinstance(v, (list, tuple)):
+        return [str(x) for x in v]
+    return v
+
+
+def _entry_config_sha(home: Path, cfg) -> str:
+    """sha256 of config.toml read now, IF the file still describes the loaded ``cfg`` (every
+    key the file sets that ``cfg`` also carries compares equal); otherwise UNSTABLE_CONFIG.
+    Used only when a caller did not pass the sha of the bytes it loaded."""
+    try:
+        from .config import tomllib
+        data = (Path(home) / "config.toml").read_bytes()
+        parsed = tomllib.loads(data.decode("utf-8"))
+    except Exception:
+        return UNSTABLE_CONFIG
+    for key, val in parsed.items():
+        if hasattr(cfg, key) and _norm_cfg_value(key, getattr(cfg, key)) != _norm_cfg_value(key, val):
+            return UNSTABLE_CONFIG
+    return hashlib.sha256(data).hexdigest()
+
+
+# Environment variables that change what an embed produces or which provider answers.
+# Credentials are recorded by NAME (present or not), never by value.
+_RUNTIME_VALUE_VARS = ("GEMINI_BASE_URL",)
+_RUNTIME_NAME_VARS = ("OPENAI_API_KEY", "GEMINI_API_KEY", "GEMINI_3_API_KEY", "LBRAIN_ARWEAVE_WALLET")
+
+
+def _runtime_inputs(home: Path) -> dict:
+    """The effective NON-SECRET inputs outside config.toml (CSO r2 on #89, D2): env-derived
+    embedding settings by value, provider credentials by name only, whether the home's env
+    file exists, and the engine that runs the build."""
+    try:
+        from . import __version__ as ver
+    except Exception:
+        ver = "unknown"
+    try:
+        from .amp import engine_stamp
+        stamp = engine_stamp()
+    except Exception:
+        stamp = "unknown"
+    return {
+        "env_values": {k: os.environ.get(k, "") for k in _RUNTIME_VALUE_VARS},
+        "credential_names": sorted(k for k in _RUNTIME_NAME_VARS if os.environ.get(k)),
+        "env_file_present": (Path(home) / "env").exists(),
+        "engine_version": str(ver),
+        "engine_stamp": str(stamp),
+    }
+
+
+def _fingerprint(inputs: dict) -> str:
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def runtime_fingerprint(home: Path) -> str:
+    return _fingerprint(_runtime_inputs(home))
+
+
 def build_flags(*, delta: bool = True, confirm_source_removed=(), prune_unreachable: bool = False,
                 confirm_delist: bool = False, keep: int = 3, max_bytes: int | None = None,
                 sweep: bool = True) -> dict:
@@ -929,7 +997,7 @@ def build_flags(*, delta: bool = True, confirm_source_removed=(), prune_unreacha
 
 
 def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None, *,
-                     flags: dict, config_sha: str) -> dict | None:
+                     flags: dict, config_sha: str, runtime: str) -> dict | None:
     """The CURRENT epoch, if it can stand in for a build this invocation would have run:
     it is NEW (not the epoch that was CURRENT when this invocation began), it is CURRENT
     (publication happens only after gate v2 passed), its db exists and names itself, and
@@ -959,6 +1027,8 @@ def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None, *,
         return None
     if (not config_sha or config_sha == UNSTABLE_CONFIG
             or man.get("config_sha256") != config_sha or man.get("config_sha256_staged") != config_sha):
+        return None
+    if not runtime or man.get("runtime_fingerprint") != runtime:
         return None
     boot = _boot_id()
     if man.get("builder_host") != socket.gethostname() or not boot or man.get("builder_boot_id") != boot:
@@ -1009,8 +1079,9 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
     home = Path(home)
     prior_eid = current_epoch_id(home)
     if build_kw.get("config_sha") is None:
-        build_kw["config_sha"] = config_sha(home)
+        build_kw["config_sha"] = _entry_config_sha(home, cfg)
     my_sha = build_kw["config_sha"]
+    my_runtime = runtime_fingerprint(home)
     my_flags = build_flags(**{k: v for k, v in build_kw.items()
                               if k in ("delta", "confirm_source_removed", "prune_unreachable",
                                        "confirm_delist", "keep", "max_bytes", "sweep")})
@@ -1041,7 +1112,8 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
                      f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
                 last_said = now
             time.sleep(min(poll, max(0.0, deadline - now)))
-        sat = satisfying_epoch(home, invoked_ns, prior_eid, flags=my_flags, config_sha=my_sha)
+        sat = satisfying_epoch(home, invoked_ns, prior_eid, flags=my_flags, config_sha=my_sha,
+                                runtime=my_runtime)
         if sat is not None:
             sat.update({"followed": True, "leader_pid": leader_pid})
             return sat

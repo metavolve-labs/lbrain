@@ -21,6 +21,7 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -34,6 +35,32 @@ from _coldembed import seed_brain
 
 DIM = 384
 MODEL = "BAAI/bge-small-en-v1.5"
+
+
+# The CLI under test, run in a subprocess exactly as a seat runs it, with ONE difference on
+# cold CI: no [local] embedding extra is installed, so the staging `embed` stage writes
+# deterministic vectors instead (tests/_coldembed.py, the same shim conftest applies to
+# in-process builds). Warm, the shim is a no-op and the real pipeline runs. Nothing about
+# locking, waiting, following or publishing is replaced.
+_BOOT = f"""
+import sys
+sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})
+from _coldembed import HAVE_LOCAL_EMBED, fill_vectors_cold
+if not HAVE_LOCAL_EMBED:
+    from pathlib import Path
+    from lbrain import epoch_build
+    _real = epoch_build._run_cli
+    def _run(args, staging_home, lbrain_bin, **kw):
+        if args and args[0] == "embed":
+            fill_vectors_cold(Path(staging_home) / "brain.db")
+            return ""
+        return _real(args, staging_home, lbrain_bin, **kw)
+    epoch_build._run_cli = _run
+from lbrain.cli import main
+sys.argv = ["lbrain"] + sys.argv[1:]
+main()
+"""
+_LBRAIN_CLI = [sys.executable, "-c", _BOOT]
 
 
 def _mk_home(tmp_path):
@@ -66,7 +93,7 @@ class _Follower:
 
     def __init__(self, home: Path, *args: str):
         env = dict(os.environ, LBRAIN_HOME=str(home), PYTHONUNBUFFERED="1")
-        self.p = subprocess.Popen(["lbrain", "epoch", "build", *args], env=env, text=True,
+        self.p = subprocess.Popen(_LBRAIN_CLI + ["epoch", "build", *args], env=env, text=True,
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.lines: list[str] = []
         self._t = threading.Thread(target=self._pump, daemon=True)
@@ -237,7 +264,7 @@ def test_no_flag_keeps_the_existing_fail_closed_behavior(tmp_path):
     _fake_lock(home, time.time())
     t0 = time.monotonic()
     env = dict(os.environ, LBRAIN_HOME=str(home))
-    p = subprocess.run(["lbrain", "epoch", "build"], env=env, capture_output=True, text=True)
+    p = subprocess.run(_LBRAIN_CLI + ["epoch", "build"], env=env, capture_output=True, text=True)
     assert time.monotonic() - t0 < 30
     assert p.returncode == 3
     assert re.fullmatch(r"✗ another builder holds the lock \(heartbeat \d+s ago\)\n", p.stdout), p.stdout
@@ -247,7 +274,7 @@ def test_no_flag_keeps_the_existing_fail_closed_behavior(tmp_path):
 def test_no_flag_with_a_free_lock_builds_as_before(tmp_path):
     home, _ = _mk_home(tmp_path)
     env = dict(os.environ, LBRAIN_HOME=str(home))
-    p = subprocess.run(["lbrain", "epoch", "build"], env=env, capture_output=True, text=True)
+    p = subprocess.run(_LBRAIN_CLI + ["epoch", "build"], env=env, capture_output=True, text=True)
     assert p.returncode == 0, p.stdout + p.stderr
     assert re.search(r"^✓ epoch \S+ PUBLISHED", p.stdout, re.M)
 
@@ -264,7 +291,8 @@ def test_manifest_records_a_subsecond_scan_start(tmp_path):
 
 def _sat(home, invoked, prior, **over):
     """satisfying_epoch as a follower with DEFAULT build flags and the home's current config."""
-    kw = dict(flags=epoch_build.build_flags(), config_sha=epoch_build.config_sha(home))
+    kw = dict(flags=epoch_build.build_flags(), config_sha=epoch_build.config_sha(home),
+              runtime=epoch_build.runtime_fingerprint(home))
     kw.update(over)
     return epoch_build.satisfying_epoch(home, invoked, prior, **kw)
 
@@ -509,3 +537,197 @@ def test_cli_a_stable_config_passes_its_sha(monkeypatch):
     res = CliRunner().invoke(cli.main, ["epoch", "build", "--wait-for-builder", "1"])
     assert res.exit_code == 0, res.output
     assert seen["config_sha"] == epoch_build.config_sha(cli.CONFIG_DIR)
+
+
+# ---------- CSO round 2 on #89 (2026-10-18T0008Z) ----------
+
+def _man(home):
+    return json.loads((epoch.epoch_dir(home, epoch.current_epoch_id(home)) / "build-manifest.json").read_text())
+
+
+def test_r2_explicit_defaults_follow_implicit_defaults(tmp_path, monkeypatch):
+    """CSO r2 (a), control: `--keep 3` spelled out still adopts a leader that passed nothing."""
+    home, cfg = _mk_home(tmp_path)
+    epoch_build.build(home, cfg)
+    go, t, out = _leader_held_at(monkeypatch, home, cfg, "new_epoch_id")
+    f = _Follower(home, "--wait-for-builder", "120", "--keep", "3")
+    f.wait_for("waiting for builder pid")
+    go.set()
+    rc, text = f.finish()
+    t.join(300)
+    assert rc == 0 and "SATISFIED" in text, text
+
+
+def test_r2_d1_a_leader_whose_config_changed_before_build_entry_is_not_adopted(tmp_path, monkeypatch):
+    """CSO r2 (c): the leader holds config X in memory; config.toml became Y before build()
+    entry. Stamping the sha AT ENTRY recorded sha(Y) twice and the follower adopted an epoch
+    whose manifest omits a source its config names."""
+    home, cfgX = _mk_home(tmp_path)
+    epoch_build.build(home, cfgX)
+    src2 = tmp_path / "src2"
+    src2.mkdir()
+    (src2 / "newsrc.md").write_text("# New\n\nA brand new source document, words.\n")
+    raw = (home / "config.toml").read_text()
+    (home / "config.toml").write_text(raw.replace(f'sources = ["{cfgX.sources[0]}"]',
+                                                  f'sources = ["{cfgX.sources[0]}", "{src2}"]'))
+    go, t, out = _leader_held_at(monkeypatch, home, cfgX, "new_epoch_id")
+    f = _Follower(home, "--wait-for-builder", "120")
+    f.wait_for("waiting for builder pid")
+    go.set()
+    rc, text = f.finish()
+    t.join(300)
+    assert rc == 0, text
+    assert "SATISFIED" not in text, text
+    assert str(src2) in _man(home)["source_digests"]
+
+
+def test_r2_d1_end_to_end_an_unstable_leader_is_not_adopted(tmp_path, monkeypatch):
+    """End to end for the UNSTABLE path: a leader whose config sha is unstable publishes, and a
+    waiting follower with the same flags and the same config builds instead of adopting it."""
+    home, cfg = _mk_home(tmp_path)
+    go = threading.Event()
+    held = threading.Event()
+    orig = epoch_build.new_epoch_id
+
+    def blocked(*a, **k):
+        held.set()
+        assert go.wait(120)
+        return orig(*a, **k)
+
+    monkeypatch.setattr(epoch_build, "new_epoch_id", blocked)
+    out = {}
+    t = threading.Thread(target=lambda: out.update(
+        report=epoch_build.build(home, cfg, config_sha=epoch_build.UNSTABLE_CONFIG)), daemon=True)
+    t.start()
+    assert held.wait(60)
+    f = _Follower(home, "--wait-for-builder", "120")
+    f.wait_for("waiting for builder pid")
+    go.set()
+    rc, text = f.finish()
+    t.join(300)
+    leader = out["report"]["epoch_id"]
+    assert json.loads((epoch.epoch_dir(home, leader) / "build-manifest.json").read_text())[
+        "config_sha256"] == epoch_build.UNSTABLE_CONFIG
+    assert rc == 0 and "SATISFIED" not in text and re.search(r"epoch (\S+) PUBLISHED", text), text
+
+
+def test_r2_d1_plain_cli_build_records_the_bracketed_load_sha(tmp_path):
+    """Every CLI build path brackets Config.load(): a plain `lbrain epoch build` records the
+    sha of the config it loaded (== the file, nothing changed), not a None-at-entry read."""
+    home, _ = _mk_home(tmp_path)
+    p = subprocess.run(_LBRAIN_CLI + ["epoch", "build"], env=dict(os.environ, LBRAIN_HOME=str(home)),
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stdout + p.stderr
+    man = _man(home)
+    assert man["config_sha256"] == epoch_build.config_sha(home) == man["config_sha256_staged"]
+
+
+def test_r2_d1_plain_cli_build_passes_the_bracket_into_build(monkeypatch):
+    """The plain path (no flag) must hand build() the bracketed sha, and an unstable load must
+    reach it as UNSTABLE (not None, which would be re-read at entry)."""
+    import lbrain.cli as cli
+    from click.testing import CliRunner
+    cfgp = cli.CONFIG_DIR / "config.toml"
+    cfgp.write_text('sources = []\n')
+    real_load = cli.Config.load
+
+    def load_and_change(*a, **k):
+        c = real_load(*a, **k)
+        cfgp.write_text('sources = []\n# changed during load\n')
+        return c
+
+    seen = {}
+
+    def fake_build(home, cfg, **kw):
+        seen.update(kw)
+        return {"epoch_id": "x", "docs": 0, "scan_start": "s", "scan_end": "e"}
+
+    monkeypatch.setattr(cli.Config, "load", staticmethod(load_and_change))
+    monkeypatch.setattr(epoch_build, "build", fake_build)
+    res = CliRunner().invoke(cli.main, ["epoch", "build"])
+    assert res.exit_code == 0, res.output
+    assert seen["config_sha"] == epoch_build.UNSTABLE_CONFIG, seen
+
+
+def test_r2_d2_a_different_embedding_base_url_in_env_is_not_adopted(tmp_path, monkeypatch):
+    """GEMINI_BASE_URL comes from the environment, outside config.toml: a leader that ran with a
+    different one may have produced different vectors."""
+    home, cfg = _mk_home(tmp_path)
+    monkeypatch.setenv("GEMINI_BASE_URL", "https://leader.example.invalid/v1")
+    go, t, out = _leader_held_at(monkeypatch, home, cfg, "new_epoch_id")   # fingerprint taken at entry
+    monkeypatch.delenv("GEMINI_BASE_URL")
+    f = _Follower(home, "--wait-for-builder", "120")
+    f.wait_for("waiting for builder pid")
+    go.set()
+    rc, text = f.finish()
+    t.join(300)
+    assert rc == 0 and "SATISFIED" not in text, text
+
+
+def test_r2_d2_a_different_credential_set_is_not_adopted(tmp_path, monkeypatch):
+    home, cfg = _mk_home(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "placeholder-not-a-key")
+    go, t, out = _leader_held_at(monkeypatch, home, cfg, "new_epoch_id")
+    monkeypatch.delenv("OPENAI_API_KEY")
+    f = _Follower(home, "--wait-for-builder", "120")
+    f.wait_for("waiting for builder pid")
+    go.set()
+    rc, text = f.finish()
+    t.join(300)
+    assert rc == 0 and "SATISFIED" not in text, text
+
+
+def test_r2_d2_runtime_inputs_carry_names_never_values(tmp_path, monkeypatch):
+    home, cfg = _mk_home(tmp_path)
+    marker = "do-not-record-" + "this-value-123"
+    monkeypatch.setenv("GEMINI_API_KEY", marker)
+    (home / "env").write_text(f"OPENAI_API_KEY={marker}\n")
+    eid = epoch_build.build(home, cfg)["epoch_id"]
+    text = (epoch.epoch_dir(home, eid) / "build-manifest.json").read_text()
+    assert marker not in text
+    rt = json.loads(text)["runtime_inputs"]
+    assert "GEMINI_API_KEY" in rt["credential_names"]
+    assert rt["env_file_present"] is True
+    assert rt["engine_version"] and rt["engine_stamp"]
+    assert json.loads(text)["runtime_fingerprint"] == epoch_build.runtime_fingerprint(home)
+
+
+def test_r2_d2_unit_runtime_fingerprint_must_match(tmp_path):
+    home, cfg = _mk_home(tmp_path)
+    invoked = time.time_ns()
+    eid = epoch_build.build(home, cfg)["epoch_id"]
+    assert _sat(home, invoked, None)["epoch_id"] == eid                      # control
+    mp = epoch.epoch_dir(home, eid) / "build-manifest.json"
+    base = json.loads(mp.read_text())
+    for bad in ("0" * 64, None):
+        man = dict(base)
+        if bad is None:
+            del man["runtime_fingerprint"]
+        else:
+            man["runtime_fingerprint"] = bad
+        mp.write_text(json.dumps(man))
+        assert _sat(home, invoked, None) is None, bad
+
+
+def test_r2_d1_an_in_process_follower_with_a_stale_cfg_is_unstable(tmp_path, monkeypatch):
+    """build_single_flight called in-process without a sha must use the same entry check as
+    build(): a cfg the file no longer describes yields UNSTABLE, never the file's sha."""
+    home, cfg = _mk_home(tmp_path)
+    raw = (home / "config.toml").read_text()
+    (home / "config.toml").write_text(raw.replace(f'sources = ["{cfg.sources[0]}"]',
+                                                  f'sources = ["{cfg.sources[0]}", "/elsewhere"]'))
+    seen = {}
+
+    def fake_build(home_, cfg_, **kw):
+        seen.update(kw)
+        return {"epoch_id": "x"}
+
+    monkeypatch.setattr(epoch_build, "build", fake_build)
+    epoch_build.build_single_flight(home, cfg, wait=0, invoked_ns=time.time_ns())
+    assert seen["config_sha"] == epoch_build.UNSTABLE_CONFIG, seen
+
+
+def test_r2_d1_entry_sha_is_the_file_sha_when_the_file_describes_cfg(tmp_path):
+    """Control for the entry check."""
+    home, cfg = _mk_home(tmp_path)
+    assert epoch_build._entry_config_sha(home, cfg) == epoch_build.config_sha(home)

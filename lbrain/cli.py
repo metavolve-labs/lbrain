@@ -2533,19 +2533,20 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
     from .epoch_build import UNSTABLE_CONFIG, build, build_single_flight, config_sha
 
     invoked_ns = _time.time_ns()
-    sha_before = config_sha(CONFIG_DIR) if wait_for_builder is not None else None
+    # The config this command LOADED, bracketed on EVERY build path (a plain build is the
+    # heartbeat's form and becomes some follower's leader): a write landing during
+    # Config.load() makes the sha UNSTABLE, which no follower can match (CSO #89 r1 D2, r2 D1).
+    sha_before = config_sha(CONFIG_DIR)
     cfg = Config.load()
+    sha_after = config_sha(CONFIG_DIR)
     kw = dict(delta=not full, confirm_source_removed=confirm_source_removed,
               prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
-              keep=keep, max_bytes=max_bytes, sweep=not no_sweep)
+              keep=keep, max_bytes=max_bytes, sweep=not no_sweep,
+              config_sha=sha_before if sha_before == sha_after else UNSTABLE_CONFIG)
     try:
         if wait_for_builder is None:
             report = build(CONFIG_DIR, cfg, **kw)
         else:
-            # The config this command LOADED, bracketed: a write landing during Config.load()
-            # makes the sha UNSTABLE, which no epoch can match (CSO #89 D2: the ms race).
-            sha_after = config_sha(CONFIG_DIR)
-            kw["config_sha"] = sha_before if sha_before == sha_after else UNSTABLE_CONFIG
             report = build_single_flight(CONFIG_DIR, cfg, wait=wait_for_builder, invoked_ns=invoked_ns,
                                          echo=click.echo, **kw)
     except BuilderBusy as e:
