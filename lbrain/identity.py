@@ -419,7 +419,27 @@ def describe(cfg, stats: dict | None = None, counts_error: str = "") -> dict:
                                    "root: served, never rescanned, staleness undetectable")}),
             "untrusted_data_fenced": True,
         },
+        "builder": _builder(cfg),
     }
+
+
+def _builder(cfg) -> dict | None:
+    """The epoch builder as this home's lock and staging tree show it, read-only (CSO
+    follow-ups on #93): who holds the lock and whether that holder is live, dead or
+    unknowable from here, plus a COUNT of unstamped `.building` dirs older than a day,
+    which the prune sweep keeps and an operator removes. None on a legacy home. A failure
+    to read is reported as text, never raised: this is a display."""
+    try:
+        from .epoch import (LEGACY, builder_status, debris_line, home_shape,
+                            unstamped_staging_count)
+        home = Path(getattr(cfg, "db_path", "")).parent
+        if home_shape(home) == LEGACY:
+            return None
+        n = unstamped_staging_count(home)
+        return {"lock": builder_status(home), "unstamped_staging_older_than_day": n,
+                "debris_note": debris_line(n) if n else ""}
+    except Exception as e:  # pragma: no cover - display path
+        return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
 def _proc_started() -> str:

@@ -349,17 +349,28 @@ def holder_provably_dead(meta: dict) -> bool | None:
     here (foreign host, no boot_id on either side, or a different PID namespace, e.g.
     another WSL distro on the same kernel). A record without `pidns` (written by an
     engine before this field) is probed as if in this namespace."""
+    return holder_liveness(meta)[0]
+
+
+def holder_liveness(meta: dict) -> tuple[bool | None, str]:
+    """holder_provably_dead's verdict together with the reason for it, so a display
+    (`lbrain whoami`) can say WHY a holder is unknowable without restating the rule.
+    The verdict is the one holder_provably_dead returns; the reason is one of:
+    "other host", "no boot_id", "previous boot", "other pid namespace",
+    "process gone", "process alive"."""
     if meta.get("host") != socket.gethostname():
-        return None
+        return None, "other host"
     theirs, ours = str(meta.get("boot_id") or ""), _boot_id()
     if not theirs or not ours:
-        return None
+        return None, "no boot_id"
     if theirs != ours:
-        return True
+        return True, "previous boot"
     their_ns, our_ns = str(meta.get("pidns") or ""), _pid_ns()
     if their_ns and our_ns and their_ns != our_ns:
-        return None
-    return not pid_alive_here(meta.get("pid"), str(meta.get("starttime") or ""))
+        return None, "other pid namespace"
+    if pid_alive_here(meta.get("pid"), str(meta.get("starttime") or "")):
+        return False, "process alive"
+    return True, "process gone"
 
 
 # ---------- the builder lock ----------
@@ -492,6 +503,90 @@ class BuilderLock:
 
     def __exit__(self, *exc) -> None:
         self.release()
+
+
+# ---------- read-only builder visibility (whoami, the wait line) ----------
+
+def _fmt_age(age: float | None) -> str:
+    if age is None:
+        return "no heartbeat yet (acquiring)"
+    if age == float("inf"):
+        return "heartbeat unreadable"
+    if age < 120:
+        return f"last heartbeat {max(age, 0):.0f}s ago"
+    return f"last heartbeat {age / 60:.0f} min ago"
+
+
+def builder_status(home: Path) -> dict | None:
+    """What the builder lock says right now, read without acquiring or touching it.
+    None when no lock is held. The staleness verdict is BuilderLock.holder_is_stale (the
+    rule acquire() and the follower use); the liveness verdict and its reason come from
+    holder_liveness (the rule behind holder_provably_dead). Nothing is restated here."""
+    lock = BuilderLock(home)
+    if not lock.dir.exists():
+        return None
+    age = lock._meta_age()
+    stale = lock.holder_is_stale()
+    try:
+        meta = json.loads(lock.meta.read_text(encoding="utf-8"))
+    except Exception:
+        meta = None
+    if not isinstance(meta, dict):
+        meta = {}
+    if age is None:
+        state = "acquiring"
+    elif not meta:
+        state = "unknowable: lock meta unreadable"
+    else:
+        verdict, why = holder_liveness(meta)
+        if verdict is True:
+            state = "stale: holder dead"
+        elif verdict is False:
+            state = "live"
+        else:
+            state = f"unknowable: {why}"
+    pid, host = meta.get("pid"), meta.get("host")
+    line = f"builder pid {pid if pid is not None else '?'} on {host or '?'}: {state}, {_fmt_age(age)}"
+    if stale is True and state.startswith("unknowable"):
+        line += (f" (older than {lock.stale_after:.0f}s, so the next builder may take "
+                 "the lock over)")
+    return {"pid": pid, "host": host, "heartbeat_age_s": age, "state": state,
+            "stale": stale, "line": line}
+
+
+DEBRIS_AGE = 86400.0
+
+
+def unstamped_staging_count(home: Path, *, older_than: float = DEBRIS_AGE) -> int:
+    """How many `.building` staging dirs carry no owner stamp (OWNER_STAMP) and were last
+    written more than `older_than` seconds ago. The prune sweep keeps these (unsure means
+    keep; most are debris from engines before the stamp), so they are surfaced as a count
+    for an operator to remove. Read-only: this never deletes anything."""
+    root = epochs_root(home)
+    if not root.is_dir():
+        return 0
+    n, now = 0, time.time()
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return 0
+    for d in entries:
+        try:
+            if not (d.name.endswith(BUILDING_SUFFIX) and d.is_dir()):
+                continue
+            if (d / OWNER_STAMP).exists():
+                continue
+            newest = max([d.stat().st_mtime] + [c.stat().st_mtime for c in d.iterdir()])
+        except OSError:
+            continue  # vanished or unreadable mid-count: not counted, never guessed
+        if now - newest > older_than:
+            n += 1
+    return n
+
+
+def debris_line(n: int) -> str:
+    return (f"{n} unstamped staging dir{'s' if n != 1 else ''} older than a day "
+            "(not swept; operator removes)")
 
 
 # ---------- reader leases + prune ----------
