@@ -2520,23 +2520,47 @@ def prune_unreachable_cmd(yes, force):
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 @click.option("--no-sweep", "no_sweep", is_flag=True,
               help="Leave capture-staging/ untouched (default: staged captures are archived into the new epoch; increment 2).")
-def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_delist, keep, max_bytes, no_sweep):
+@click.option("--wait-for-builder", "wait_for_builder", type=float, default=None, metavar="SECONDS",
+              help="If a LIVE builder holds the lock, wait up to SECONDS for it instead of failing. When it "
+                   "publishes an epoch whose scan began after this command started, exit 0 on that epoch "
+                   "without a second build; otherwise build. A stale lock is taken over as without the flag.")
+def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_delist, keep, max_bytes, no_sweep,
+                    wait_for_builder):
     """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
-    from .epoch import BuilderBusy, EpochError
-    from .epoch_build import build
+    import time as _time
 
+    from .epoch import BuilderBusy, EpochError
+    from .epoch_build import UNSTABLE_CONFIG, build, build_single_flight, config_sha
+
+    invoked_ns = _time.time_ns()
+    # The config this command LOADED, bracketed on EVERY build path (a plain build is the
+    # heartbeat's form and becomes some follower's leader): a write landing during
+    # Config.load() makes the sha UNSTABLE, which no follower can match (CSO #89 r1 D2, r2 D1).
+    sha_before = config_sha(CONFIG_DIR)
     cfg = Config.load()
+    sha_after = config_sha(CONFIG_DIR)
+    kw = dict(delta=not full, confirm_source_removed=confirm_source_removed,
+              prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
+              keep=keep, max_bytes=max_bytes, sweep=not no_sweep,
+              config_sha=sha_before if sha_before == sha_after else UNSTABLE_CONFIG)
     try:
-        report = build(CONFIG_DIR, cfg, delta=not full,
-                       confirm_source_removed=confirm_source_removed,
-                       prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
-                       keep=keep, max_bytes=max_bytes, sweep=not no_sweep)
+        if wait_for_builder is None:
+            report = build(CONFIG_DIR, cfg, **kw)
+        else:
+            report = build_single_flight(CONFIG_DIR, cfg, wait=wait_for_builder, invoked_ns=invoked_ns,
+                                         echo=click.echo, **kw)
     except BuilderBusy as e:
         click.secho(f"✗ {e}", fg="yellow")
         sys.exit(3)
     except EpochError as e:
         click.secho(f"✗ {e}", fg="red")
         sys.exit(1)
+    if report.get("followed"):
+        click.secho(
+            f"✓ epoch {report['epoch_id']} SATISFIED this build: published by builder pid "
+            f"{report.get('leader_pid') or '?'}, scan {report['scan_start']} to {report['scan_end']} "
+            f"began after this command started; no second build", fg="green")
+        return
     click.secho(
         f"✓ epoch {report['epoch_id']} PUBLISHED — docs: {report['docs']}, "
         f"scan {report['scan_start']} → {report['scan_end']}"

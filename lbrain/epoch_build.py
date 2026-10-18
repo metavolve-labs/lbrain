@@ -32,6 +32,7 @@ import math
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import struct
 import subprocess
@@ -40,8 +41,11 @@ import time
 from pathlib import Path
 
 from .epoch import (
+    BuilderBusy,
     BuilderLock,
     EpochError,
+    _boot_id,
+    current_epoch_id,
     epoch_db,
     epoch_dir,
     epochs_root,
@@ -648,10 +652,24 @@ def build(
     lbrain_bin: str = "lbrain",
     scratch: Path | None = None,
     sweep: bool = True,
+    config_sha: str | None = None,
 ) -> dict:
     """Build → validate → swap. Returns a report dict; raises EpochError with the
-    staging retained as .failed forensics on any gate refusal."""
+    staging retained as .failed forensics on any gate refusal.
+
+    ``config_sha``: the sha256 of the config.toml bytes the caller loaded ``cfg`` from (every
+    CLI build path passes it, bracketed around Config.load(); UNSTABLE_CONFIG when the file
+    changed under the load). When None (an in-process caller), the file is read here at entry
+    and its sha is used only if the file still describes ``cfg``; otherwise UNSTABLE_CONFIG
+    (CSO r2 on #89: a sha taken at entry described a config the build never loaded).
+    Recorded in the manifest so a follower can tell whether this build ran on ITS config."""
     home = Path(home)
+    if config_sha is None:
+        config_sha = _entry_config_sha(home, cfg)
+    runtime_inputs = _runtime_inputs(home)
+    flags = build_flags(delta=delta, confirm_source_removed=confirm_source_removed,
+                        prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
+                        keep=keep, max_bytes=max_bytes, sweep=sweep)
     sources = [str(Path(s)) for s in cfg.sources]
     confirmed = {str(Path(s)) for s in confirm_source_removed}
     report: dict = {"home": str(home)}
@@ -659,6 +677,10 @@ def build(
     with BuilderLock(home) as lock:
         eid = new_epoch_id()
         report["epoch_id"] = eid
+        # Sub-second scan start, recorded in the build manifest so a follower waiting on this build
+        # (`--wait-for-builder`) can prove the scan began AFTER it was invoked; the second-resolution
+        # watermark below cannot order two events inside one second.
+        scan_start_ns = time.time_ns()
         scan_start = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
         # staging locality (v1.1 #3 / lesson: stage local when the home is DrvFs)
@@ -686,7 +708,9 @@ def build(
                 _sqlite_snapshot(prior_db, staging_db)  # byte-copy, never hardlink (D1)
 
             # staging home config = the home's, with db_path repointed
-            raw = (home / "config.toml").read_text(encoding="utf-8")
+            raw_bytes = (home / "config.toml").read_bytes()
+            staged_sha = hashlib.sha256(raw_bytes).hexdigest()
+            raw = raw_bytes.decode("utf-8")
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
             (staging / "config.toml").write_text(raw, encoding="utf-8")
 
@@ -822,12 +846,24 @@ def build(
                 shutil.copy2(ident, epoch_dir(home, eid) / "identity.json")
 
             (epoch_dir(home, eid) / "build-manifest.json").write_text(json.dumps({
-                "epoch_id": eid, "scan_start": scan_start, "scan_end": scan_end,
+                "epoch_id": eid, "scan_start": scan_start, "scan_start_ns": scan_start_ns,
+                "scan_end": scan_end,
                 "delta": bool(delta and prior_db is not None),
                 "prior_db": str(prior_db) if prior_db else None,
                 "docs": sum(len(d) for d in new_inv.values()),
                 "source_digests": {s: _source_digest(d) for s, d in new_inv.items()},
                 "confirmed_removed": sorted(confirmed),
+                # what a `--wait-for-builder` follower must match before adopting this epoch
+                # (CSO review of #89, D1-D3): the requested flags, the config it was loaded
+                # from AND the config its import child actually read, and where it ran.
+                "build_flags": flags,
+                "config_sha256": config_sha,
+                "config_sha256_staged": staged_sha,
+                "builder_host": socket.gethostname(),
+                "builder_boot_id": _boot_id(),
+                # env-derived embedding inputs and the engine (names only for credentials)
+                "runtime_inputs": runtime_inputs,
+                "runtime_fingerprint": _fingerprint(runtime_inputs),
             }, indent=2) + "\n", encoding="utf-8")
 
             caveat = publish(home, eid)
@@ -852,3 +888,233 @@ def build(
             shutil.rmtree(staging, ignore_errors=True)
 
     return report
+
+
+# ---------- single-flight wake refresh (`epoch build --wait-for-builder`) ----------
+
+def _lock_holder(home: Path) -> dict:
+    """What the builder lock says right now, read without acquiring it.
+    {"held": False} when no lock directory exists; otherwise pid/host and heartbeat age
+    (age None = the holder is mid-acquire, which BuilderLock treats as LIVE)."""
+    lock = BuilderLock(home)
+    if not lock.dir.exists():
+        return {"held": False}
+    out: dict = {"held": True, "pid": None, "host": None, "age": lock._meta_age()}
+    try:
+        m = json.loads(lock.meta.read_text(encoding="utf-8"))
+        out["pid"], out["host"] = m.get("pid"), m.get("host")
+    except Exception:
+        pass
+    return out
+
+
+UNSTABLE_CONFIG = "unstable"
+
+
+def _config_file_sha(home: Path) -> str:
+    """sha256 of the home's config.toml bytes ("" when unreadable)."""
+    try:
+        return hashlib.sha256((Path(home) / "config.toml").read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+config_sha = _config_file_sha   # public name; build() has a parameter of the same name
+
+
+def _norm_cfg_value(key: str, v):
+    if key == "sources":
+        return [str(Path(str(x)).expanduser()) for x in (v or [])]
+    if key == "db_path":
+        return str(Path(str(v)).expanduser())
+    if isinstance(v, (list, tuple)):
+        return [str(x) for x in v]
+    return v
+
+
+def _entry_config_sha(home: Path, cfg) -> str:
+    """sha256 of config.toml read now, IF the file still describes the loaded ``cfg`` (every
+    key the file sets that ``cfg`` also carries compares equal); otherwise UNSTABLE_CONFIG.
+    Used only when a caller did not pass the sha of the bytes it loaded."""
+    try:
+        from .config import tomllib
+        data = (Path(home) / "config.toml").read_bytes()
+        parsed = tomllib.loads(data.decode("utf-8"))
+    except Exception:
+        return UNSTABLE_CONFIG
+    for key, val in parsed.items():
+        if hasattr(cfg, key) and _norm_cfg_value(key, getattr(cfg, key)) != _norm_cfg_value(key, val):
+            return UNSTABLE_CONFIG
+    return hashlib.sha256(data).hexdigest()
+
+
+# Environment variables that change what an embed produces or which provider answers.
+# Credentials are recorded by NAME (present or not), never by value.
+_RUNTIME_VALUE_VARS = ("GEMINI_BASE_URL",)
+_RUNTIME_NAME_VARS = ("OPENAI_API_KEY", "GEMINI_API_KEY", "GEMINI_3_API_KEY", "LBRAIN_ARWEAVE_WALLET")
+
+
+def _runtime_inputs(home: Path) -> dict:
+    """The effective NON-SECRET inputs outside config.toml (CSO r2 on #89, D2): env-derived
+    embedding settings by value, provider credentials by name only, whether the home's env
+    file exists, and the engine that runs the build."""
+    try:
+        from . import __version__ as ver
+    except Exception:
+        ver = "unknown"
+    try:
+        from .amp import engine_stamp
+        stamp = engine_stamp()
+    except Exception:
+        stamp = "unknown"
+    return {
+        "env_values": {k: os.environ.get(k, "") for k in _RUNTIME_VALUE_VARS},
+        "credential_names": sorted(k for k in _RUNTIME_NAME_VARS if os.environ.get(k)),
+        "env_file_present": (Path(home) / "env").exists(),
+        "engine_version": str(ver),
+        "engine_stamp": str(stamp),
+    }
+
+
+def _fingerprint(inputs: dict) -> str:
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def runtime_fingerprint(home: Path) -> str:
+    return _fingerprint(_runtime_inputs(home))
+
+
+def build_flags(*, delta: bool = True, confirm_source_removed=(), prune_unreachable: bool = False,
+                confirm_delist: bool = False, keep: int = 3, max_bytes: int | None = None,
+                sweep: bool = True) -> dict:
+    """The requested build flags, canonical and JSON-stable (defaults = build()'s defaults).
+    `delta` is what was ASKED (not --full), not whether a prior epoch existed."""
+    return {"delta": bool(delta),
+            "confirm_source_removed": sorted(str(Path(s)) for s in (confirm_source_removed or ())),
+            "prune_unreachable": bool(prune_unreachable), "confirm_delist": bool(confirm_delist),
+            "keep": int(keep), "max_bytes": None if max_bytes is None else int(max_bytes),
+            "sweep": bool(sweep)}
+
+
+def satisfying_epoch(home: Path, invoked_ns: int, prior_eid: str | None, *,
+                     flags: dict, config_sha: str, runtime: str) -> dict | None:
+    """The CURRENT epoch, if it can stand in for a build this invocation would have run:
+    it is NEW (not the epoch that was CURRENT when this invocation began), it is CURRENT
+    (publication happens only after gate v2 passed), its db exists and names itself, and
+    its scan provably STARTED AFTER this invocation began. Returns None otherwise.
+
+    Scan order uses the manifest's `scan_start_ns`; an epoch built before that field
+    existed falls back to the second-resolution `scan_start`, accepted only when its
+    second is strictly later than the invocation (a same-second scan cannot be ordered,
+    so it does not count).
+
+    And it must be the build this invocation would have run (CSO review of #89): the same
+    requested `flags`, built from the same config (`config_sha` equals both the config the
+    leader loaded and the config its import read; an UNSTABLE or unreadable config never
+    matches), on this host in this boot (scan order is a wall-clock comparison, meaningful
+    only on one clock). A manifest that predates any of these fields never counts."""
+    import calendar
+    eid = current_epoch_id(home)
+    if eid is None or eid == prior_eid:
+        return None
+    try:
+        man = json.loads((epoch_dir(home, eid) / "build-manifest.json").read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if man.get("epoch_id") != eid:
+        return None
+    if man.get("build_flags") != json.loads(json.dumps(flags)):
+        return None
+    if (not config_sha or config_sha == UNSTABLE_CONFIG
+            or man.get("config_sha256") != config_sha or man.get("config_sha256_staged") != config_sha):
+        return None
+    if not runtime or man.get("runtime_fingerprint") != runtime:
+        return None
+    boot = _boot_id()
+    if man.get("builder_host") != socket.gethostname() or not boot or man.get("builder_boot_id") != boot:
+        return None
+    ns = man.get("scan_start_ns")
+    if isinstance(ns, int):
+        after = ns > invoked_ns
+    else:
+        try:
+            sec = calendar.timegm(time.strptime(str(man.get("scan_start")), "%Y-%m-%dT%H:%M:%SZ"))
+        except (TypeError, ValueError):
+            return None
+        after = sec * 1_000_000_000 > invoked_ns  # integers: a float divide loses the nanoseconds
+    if not after:
+        return None
+    db = epoch_db(home, eid)
+    if not db.is_file():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{db}?immutable=1", uri=True)
+        try:
+            meta = dict(con.execute(
+                "SELECT key, value FROM meta WHERE key IN ('epoch_id','watermark_scan_end')"))
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None
+    if meta.get("epoch_id") != eid or not meta.get("watermark_scan_end"):
+        return None
+    return {"epoch_id": eid, "scan_start": man.get("scan_start"), "scan_end": man.get("scan_end"),
+            "docs": man.get("docs")}
+
+
+def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
+                        poll: float = 1.0, say_every: float = 10.0, echo=print, **build_kw) -> dict:
+    """`epoch build --wait-for-builder WAIT`: when a LIVE builder holds the lock, wait for it
+    (bounded) instead of failing closed, and do not build twice for one wake.
+
+    - The lock is free, or stale: `build()` runs exactly as without the flag (stale takeover
+      is BuilderLock's existing handling, untouched).
+    - A live builder holds it: wait, saying who holds it, until the lock is released, its
+      heartbeat goes stale, or WAIT seconds pass.
+    - After a release: if the epoch now CURRENT satisfies this invocation
+      (`satisfying_epoch`), return it WITHOUT building ({"followed": True, ...}); otherwise
+      (the builder failed, or its scan began before this invocation) build.
+    - Timeout: one last acquire attempt; a still-live holder raises the existing BuilderBusy.
+    """
+    home = Path(home)
+    prior_eid = current_epoch_id(home)
+    if build_kw.get("config_sha") is None:
+        build_kw["config_sha"] = _entry_config_sha(home, cfg)
+    my_sha = build_kw["config_sha"]
+    my_runtime = runtime_fingerprint(home)
+    my_flags = build_flags(**{k: v for k, v in build_kw.items()
+                              if k in ("delta", "confirm_source_removed", "prune_unreachable",
+                                       "confirm_delist", "keep", "max_bytes", "sweep")})
+    deadline = time.monotonic() + max(0.0, float(wait))
+    last_said = None
+    leader_pid = None
+    while True:
+        try:
+            return build(home, cfg, **build_kw)
+        except BuilderBusy:
+            pass
+        # A live builder holds the lock: wait for it to finish, die, or the deadline.
+        while True:
+            h = _lock_holder(home)
+            if not h["held"]:
+                break
+            if h.get("pid") is not None:
+                leader_pid = h["pid"]
+            age = h["age"]
+            if age is not None and age > BuilderLock(home).stale_after:
+                break  # gone stale while we waited: build() takes it over, as it always has
+            now = time.monotonic()
+            if now >= deadline:
+                return build(home, cfg, **build_kw)  # one last attempt; busy => existing error
+            if last_said is None or now - last_said >= say_every:
+                beat = "acquiring" if age is None else f"heartbeat {age:.0f}s ago"
+                echo(f"  waiting for builder pid {h.get('pid') or '?'} on {h.get('host') or '?'} "
+                     f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
+                last_said = now
+            time.sleep(min(poll, max(0.0, deadline - now)))
+        sat = satisfying_epoch(home, invoked_ns, prior_eid, flags=my_flags, config_sha=my_sha,
+                                runtime=my_runtime)
+        if sat is not None:
+            sat.update({"followed": True, "leader_pid": leader_pid})
+            return sat
+        # The builder failed, or published a scan that began before this invocation: build.
