@@ -50,7 +50,7 @@ from .epoch import (
     publish,
     resolve_db_path,
 )
-from .index import discover, is_excluded_path
+from .index import discover, is_excluded_path, source_root_present
 
 # gate v2 source-collapse floor: a candidate keeping fewer than this fraction of a root's expected docs
 # (prior epoch minus intended exclusions) is refused. Same 50% line as the prune guards.
@@ -267,7 +267,7 @@ def validate_candidate(
                 failures.append(
                     f"deletion-manifest: source {src} sits on a mount ABSENT from "
                     "/proc/mounts — an unmounted bridge is not a deletion")
-            elif not os.path.isdir(src):
+            elif not source_root_present(src):
                 failures.append(
                     f"deletion-manifest: source root {src} VANISHED while the prior epoch "
                     f"held {len(prior_docs)} docs — refuse; pass --confirm-source-removed "

@@ -1866,8 +1866,11 @@ def stale(since: int, show_all: bool, path_prefix: str, as_json: bool):
         root = Path(src)
         if not root.exists():
             continue
-        for f in sorted(root.rglob("*.md")):
-            rel = str(f.relative_to(root))
+        # A single-file source root is its own root (rglob on a file yields nothing).
+        file_root = root.is_file()
+        for f in ([root] if file_root and root.suffix == ".md" else
+                  [] if file_root else sorted(root.rglob("*.md"))):
+            rel = f.name if file_root else str(f.relative_to(root))
             if is_excluded(rel) or (path_prefix and not rel.startswith(path_prefix)):
                 excluded += 1
                 continue

@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .index import discover, is_excluded_path, parse
+from .index import discover, is_excluded_path, parse, source_root_present
 
 # What an import would do to each divergent record. Named for the user's mental
 # model ("what happened to my file?"), not the importer's branch names.
@@ -142,7 +142,7 @@ def survey(store, sources) -> Survey:
         s.elapsed = time.monotonic() - t0
         return s
 
-    missing = [r for r in roots if not r.is_dir()]
+    missing = [r for r in roots if not source_root_present(r)]
     s.roots_missing = [str(r) for r in missing]
 
     rows = store.doc_paths()
