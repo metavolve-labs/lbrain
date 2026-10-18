@@ -146,31 +146,52 @@ def _keep_exception_names(repl):
     return sub
 
 
+# A one-level object or list as a value (CSO r4 on #90): under a secret name the WHOLE
+# container goes, whatever its inner names; and a bare value never starts with `{` or `[`,
+# so an outer match can no longer swallow an inner `"api_key":` and leave its value behind.
+_NESTED = r"\{[^{}]*\}|\[[^\[\]]*\]"
+_BARE = r"(?![{\[])"
+
+def _tok(chars: str) -> str:
+    """One token character from `chars`, or one %XX escape."""
+    return r"(?:[" + chars + r"]|%[0-9A-Fa-f]{2})"
+
+
 _SECRET_PATTERNS = (
     # URL userinfo: scheme://user:<password>@host -> the password goes, everything else stays.
-    (_re.compile(r"\b([A-Za-z][A-Za-z0-9+.\-]*://)([^\s/:@]+):([^\s/@]+)@"),
+    # The password may contain '/' (not RFC-legal unencoded, but seen in the wild).
+    (_re.compile(r"\b([A-Za-z][A-Za-z0-9+.\-]*://)([^\s/:@]+):([^\s@]+)@"),
      lambda m: f"{m.group(1)}{m.group(2)}:[REDACTED]@"),
     # HTTP Authorization header, any scheme word (Bearer, token, Basic): the credential goes.
-    (_re.compile(r"\b(authorization)\s*[:=]\s*(?:(?:bearer|token|basic)\s+)?[^\s\"',;]+", _re.I),
+    (_re.compile(r"(authorization)\s*[:=]\s*(?:(?:bearer|token|basic)\s+)?[^\s\"',;]+", _re.I),
      lambda m: f"{m.group(1)}: [REDACTED]"),
     # JSON and Python repr: "name": "value", 'name': 'value', mixed quotes, or a bare value
     (_re.compile(r"(?P<nq>[\"'])(?P<name>" + _SECRET_NAME + r")(?P=nq)\s*:\s*"
-                 r"(?:(?P<q>[\"'])(?:\\.|(?!(?P=q)).)*(?P=q)|[^\s,}\]]+)", _re.I),
+                 r"(?:(?P<q>[\"'])(?:\\.|(?!(?P=q)).)*(?P=q)|" + _NESTED + "|" + _BARE + r"[^\s,}\]]+)", _re.I),
      _keep_exception_names(lambda m: f"{m.group('nq')}{m.group('name')}{m.group('nq')}: [REDACTED]")),
     # env / toml with a quoted value: NAME = "value with spaces" (or single quotes)
     (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*(?P<q>[\"'])(?:(?!(?P=q)).)*(?P=q)", _re.I),
      _keep_exception_names(lambda m: f"{m.group('name')}=[REDACTED]")),
     # env / query / header with a bare value: NAME=value, ?key=value, X-Auth-Token: value
-    (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*[^\s&\"',;]+", _re.I),
+    (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*(?:" + _NESTED + "|" + _BARE
+                 + r"[^\s&\"',;]+)", _re.I),
      _keep_exception_names(lambda m: f"{m.group('name')}=[REDACTED]")),
+    # Fallback, AFTER the inner names had their pass: a value that starts with `{` or `[` but
+    # is not a closed one-level container (unclosed, or deeper) still goes up to the next
+    # space. Main redacted these as bare values; the `_BARE` guard alone would have regressed.
+    (_re.compile(r"(?P<nq>[\"']?)(?P<name>" + _SECRET_NAME + r")(?P=nq)\s*[=:]\s*[{\[][^\s,;]*", _re.I),
+     _keep_exception_names(lambda m: f"{m.group('nq')}{m.group('name')}{m.group('nq')}=[REDACTED]")),
     (_re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), lambda m: "[REDACTED]"),
     (_re.compile(r"\bBearer\s+\S+", _re.I), lambda m: "Bearer [REDACTED]"),
-    (_re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}"), lambda m: "[REDACTED]"),
-    (_re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"), lambda m: "[REDACTED]"),
-    (_re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), lambda m: "[REDACTED]"),
-    (_re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}"), lambda m: "[REDACTED]"),
-    (_re.compile(r"\bAKIA[0-9A-Z]{16}\b"), lambda m: "[REDACTED]"),
-    (_re.compile(r"[A-Za-z0-9_\-+]{40,}={0,2}"), lambda m: "[REDACTED]"),   # long opaque token
+    # Key shapes. A %XX escape counts as a token character, so the RAW pass takes a key whole
+    # even when an encoded byte sits inside it (`xoxb-1234%E2%80%8B5678...`): otherwise the raw
+    # pass stops at the escape, and the tail it leaves is no longer key-shaped after decoding.
+    (_re.compile(r"\bsk-" + _tok(r"A-Za-z0-9_\-") + "{8,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bAIza" + _tok(r"0-9A-Za-z_\-") + "{20,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bgh[pousr]_" + _tok(r"A-Za-z0-9") + "{20,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bxox[abprs]-" + _tok(r"A-Za-z0-9\-") + "{10,}"), lambda m: "[REDACTED]"),
+    (_re.compile(r"\bAKIA" + _tok(r"0-9A-Z") + "{16,}"), lambda m: "[REDACTED]"),
+    (_re.compile(_tok(r"A-Za-z0-9_\-+") + "{40,}={0,2}"), lambda m: "[REDACTED]"),   # long opaque token
 )
 _REASON_CAP = 200
 
@@ -186,13 +207,19 @@ def scrub_reason(text: str) -> str:
     Round 3: every Unicode format character (category Cf: zero-width space and joiners, word
     joiner, BOM, soft hyphen, bidi marks) is stripped first; each is invisible, survives NFKC,
     and one inside a key shape leaked the whole key."""
-    import unicodedata
+    from urllib.parse import unquote
 
-    from .serve import sanitize_field
-    s = "".join(ch for ch in str(text) if unicodedata.category(ch) != "Cf")
-    s = sanitize_field(s, len(s) + 1)
-    for pat, repl in _SECRET_PATTERNS:
-        s = pat.sub(repl, s)
+    # Percent-encoded forms (`%41Iza...`, `key%3D...`, double `%2541`): COMPOSE, never choose
+    # (CSO review of #92). Redact the raw text first, then decode THAT result and redact again,
+    # up to _DECODE_LEVELS times or until decoding changes nothing. Each step only removes or
+    # replaces text, and a decode cannot bring back what an earlier pass already replaced, so
+    # anything the raw pass hides stays hidden: the property choosing by count broke.
+    s = _redact(str(text))
+    for _ in range(_DECODE_LEVELS):
+        d = unquote(s)
+        if d == s:
+            break
+        s = _redact(d)
     if len(s) > _REASON_CAP:
         # Keep both ends: the head names the failure class, the tail usually names the cause
         # ("... does not exist"); a long path in the middle is what gets elided.
@@ -208,6 +235,42 @@ def scrub_reason(text: str) -> str:
 
 
 _PLACEHOLDER = _re.compile(r"\[REDACTED\]")
+
+# Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt). unicodedata does not
+# expose the property, so the ranges are listed. Many are category Cf; the rest (U+034F
+# combining grapheme joiner, variation selectors, Hangul fillers, ...) are invisible too and
+# split a key shape just as well (CSO r4 on #90).
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+
+
+_DECODE_LEVELS = 3
+
+
+def _invisible(ch: str) -> bool:
+    """Format characters, default-ignorables, and C1 controls (U+0080..U+009F, which
+    sanitize_field does not strip: a decoded %C2%9B is a CSI introducer)."""
+    import unicodedata
+    o = ord(ch)
+    if 0x80 <= o <= 0x9F:
+        return True
+    if unicodedata.category(ch) == "Cf":
+        return True
+    return any(lo <= o <= hi for lo, hi in _DEFAULT_IGNORABLE)
+
+
+def _redact(text: str) -> str:
+    """Strip invisible characters, sanitize to one line (uncapped), redact."""
+    from .serve import sanitize_field
+    s = "".join(ch for ch in text if not _invisible(ch))
+    s = sanitize_field(s, len(s) + 1)
+    for pat, repl in _SECRET_PATTERNS:
+        s = pat.sub(repl, s)
+    return s
 
 
 def _counts_unknown(stats: dict | None, counts_error: str) -> str:
