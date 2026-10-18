@@ -954,10 +954,38 @@ _RUNTIME_VALUE_VARS = ("GEMINI_BASE_URL",)
 _RUNTIME_NAME_VARS = ("OPENAI_API_KEY", "GEMINI_API_KEY", "GEMINI_3_API_KEY", "LBRAIN_ARWEAVE_WALLET")
 
 
+def _url_display(value: str) -> str:
+    """A URL with its userinfo, query and fragment removed (scheme, host, port, path kept);
+    "" for anything that does not parse as scheme://host. Nothing that can carry a
+    credential (`?key=...`, `user:<pass>@`) survives."""
+    from urllib.parse import urlsplit
+    try:
+        u = urlsplit(value)
+        host = u.hostname or ""
+        port = u.port
+    except ValueError:
+        return ""
+    if not u.scheme or not host:
+        return ""
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{u.scheme}://{host}{f':{port}' if port else ''}{u.path}"
+
+
+def _env_value_record(value: str) -> dict:
+    """What the manifest stores for an env-derived setting: a scrubbed display form and the
+    sha256 of the FULL value. Equality is judged on the sha, so a change hidden from the
+    display (another ?key=) still fails a follow; the raw value is never written (CSO round 3
+    on #89: a base URL can carry a credential)."""
+    if not value:
+        return {"display": "", "sha256": ""}
+    return {"display": _url_display(value), "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest()}
+
+
 def _runtime_inputs(home: Path) -> dict:
     """The effective NON-SECRET inputs outside config.toml (CSO r2 on #89, D2): env-derived
-    embedding settings by value, provider credentials by name only, whether the home's env
-    file exists, and the engine that runs the build."""
+    embedding settings as a scrubbed display plus a sha256 (never the raw value), provider
+    credentials by name only, whether the home's env file exists, and the engine."""
     try:
         from . import __version__ as ver
     except Exception:
@@ -968,7 +996,7 @@ def _runtime_inputs(home: Path) -> dict:
     except Exception:
         stamp = "unknown"
     return {
-        "env_values": {k: os.environ.get(k, "") for k in _RUNTIME_VALUE_VARS},
+        "env_values": {k: _env_value_record(os.environ.get(k, "")) for k in _RUNTIME_VALUE_VARS},
         "credential_names": sorted(k for k in _RUNTIME_NAME_VARS if os.environ.get(k)),
         "env_file_present": (Path(home) / "env").exists(),
         "engine_version": str(ver),
