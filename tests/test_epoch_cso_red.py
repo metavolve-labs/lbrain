@@ -92,6 +92,10 @@ def test_r1_heartbeating_builder_cannot_be_seized(tmp_path):
 # lease (round 1: its heartbeat silently recreated meta in the new holder's dir).
 def test_r1b_deposed_builder_raises_locklost_and_never_stomps(tmp_path):
     a = epoch.BuilderLock(tmp_path, stale_after=0.2).acquire()
+    import json as _json
+    m = _json.loads(a.meta.read_text(encoding="utf-8"))
+    m["boot_id"] = "a-previous-boot"  # holder provably dead (2026-10-18 rule): takeover is legit
+    a.meta.write_text(_json.dumps(m), encoding="utf-8")
     time.sleep(0.4)
     b = epoch.BuilderLock(tmp_path, stale_after=0.2).acquire()  # legit stale takeover
     try:

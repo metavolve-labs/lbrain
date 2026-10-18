@@ -6,12 +6,27 @@ the build/validate orchestration has its own suite.
 from __future__ import annotations
 
 import errno
+import json
 import os
+import subprocess
+import sys
 import time
 
 import pytest
 
 from lbrain import epoch
+
+
+def _dead_pid() -> int:
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _rewrite_meta(lock, **fields):
+    m = json.loads(lock.meta.read_text(encoding="utf-8"))
+    m.update(fields)
+    lock.meta.write_text(json.dumps(m), encoding="utf-8")
 
 
 def _mk_epoch(home, eid, size=0, vetted=True):
@@ -104,9 +119,12 @@ def test_two_builders_exactly_one_wins(tmp_path):
     b.release()
 
 
-def test_stale_lock_is_taken_over_by_heartbeat_age_not_pid(tmp_path):
+def test_stale_lock_of_a_dead_holder_is_taken_over(tmp_path):
+    # 2026-10-18 amendment: an old heartbeat alone no longer suffices on this boot;
+    # the holder must also be provably dead (here: its PID has exited).
     a = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()
-    time.sleep(0.1)  # heartbeat goes stale; the holding PID is alive — irrelevant
+    _rewrite_meta(a, pid=_dead_pid(), starttime="")
+    time.sleep(0.1)
     b = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()
     assert b.held
     b.release()
@@ -181,6 +199,7 @@ def test_r2_publish_refuses_an_unvetted_epoch(tmp_path):
 
 def test_r1b_deposed_builder_aborts_and_never_stomps_the_usurper(tmp_path):
     a = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()
+    _rewrite_meta(a, boot_id="a-previous-boot")  # holder provably dead: takeover is legitimate
     time.sleep(0.1)
     b = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()  # seizes stale lock
     with pytest.raises(epoch.LockLost):
@@ -203,11 +222,14 @@ def test_r8_building_dirs_are_not_epochs(tmp_path):
 def test_r8_prune_sweeps_orphaned_building_debris(tmp_path):
     _mk_epoch(tmp_path, "E1", size=1)
     epoch.publish(tmp_path, "E1")
-    d = epoch.epochs_root(tmp_path) / ("E0" + epoch.BUILDING_SUFFIX)
+    d = epoch.epochs_root(tmp_path) / (f"20261018T115926Z-{_dead_pid()}-0001" + epoch.BUILDING_SUFFIX)
     d.mkdir(parents=True)
     (d / "brain.db").write_bytes(b"kill -9 debris")
+    old = time.time() - 600
+    os.utime(d / "brain.db", (old, old))
+    os.utime(d, (old, old))
     epoch.prune(tmp_path, keep=3)
-    assert not d.exists()  # lock-held sweep: provably no live builder owns it
+    assert not d.exists()  # its own builder is provably dead: swept
 
 
 def test_r8_prune_refuses_while_a_builder_is_live(tmp_path):

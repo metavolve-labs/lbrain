@@ -866,6 +866,10 @@ def build(
                 "runtime_fingerprint": _fingerprint(runtime_inputs),
             }, indent=2) + "\n", encoding="utf-8")
 
+            # Ownership check before the swap: the gate and VACUUM INTO above run in-process
+            # with no heartbeat; a builder that lost the lock must abort here (LockLost),
+            # never publish and then prune under a lock it no longer holds (2026-10-18).
+            lock.heartbeat()
             caveat = publish(home, eid)
             if swept_plan:
                 _finish_sweep(home, staging, eid, swept_plan, report)
@@ -899,7 +903,8 @@ def _lock_holder(home: Path) -> dict:
     lock = BuilderLock(home)
     if not lock.dir.exists():
         return {"held": False}
-    out: dict = {"held": True, "pid": None, "host": None, "age": lock._meta_age()}
+    out: dict = {"held": True, "pid": None, "host": None, "age": lock._meta_age(),
+                 "stale": lock.holder_is_stale()}
     try:
         m = json.loads(lock.meta.read_text(encoding="utf-8"))
         out["pid"], out["host"] = m.get("pid"), m.get("host")
@@ -1129,8 +1134,8 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
             if h.get("pid") is not None:
                 leader_pid = h["pid"]
             age = h["age"]
-            if age is not None and age > BuilderLock(home).stale_after:
-                break  # gone stale while we waited: build() takes it over, as it always has
+            if h.get("stale"):
+                break  # stale (old heartbeat, holder not provably alive): build() takes it over
             now = time.monotonic()
             if now >= deadline:
                 return build(home, cfg, **build_kw)  # one last attempt; busy => existing error
