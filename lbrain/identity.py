@@ -146,22 +146,30 @@ def _keep_exception_names(repl):
     return sub
 
 
+# A one-level object or list as a value (CSO r4 on #90): under a secret name the WHOLE
+# container goes, whatever its inner names; and a bare value never starts with `{` or `[`,
+# so an outer match can no longer swallow an inner `"api_key":` and leave its value behind.
+_NESTED = r"\{[^{}]*\}|\[[^\[\]]*\]"
+_BARE = r"(?![{\[])"
+
 _SECRET_PATTERNS = (
     # URL userinfo: scheme://user:<password>@host -> the password goes, everything else stays.
-    (_re.compile(r"\b([A-Za-z][A-Za-z0-9+.\-]*://)([^\s/:@]+):([^\s/@]+)@"),
+    # The password may contain '/' (not RFC-legal unencoded, but seen in the wild).
+    (_re.compile(r"\b([A-Za-z][A-Za-z0-9+.\-]*://)([^\s/:@]+):([^\s@]+)@"),
      lambda m: f"{m.group(1)}{m.group(2)}:[REDACTED]@"),
     # HTTP Authorization header, any scheme word (Bearer, token, Basic): the credential goes.
     (_re.compile(r"\b(authorization)\s*[:=]\s*(?:(?:bearer|token|basic)\s+)?[^\s\"',;]+", _re.I),
      lambda m: f"{m.group(1)}: [REDACTED]"),
     # JSON and Python repr: "name": "value", 'name': 'value', mixed quotes, or a bare value
     (_re.compile(r"(?P<nq>[\"'])(?P<name>" + _SECRET_NAME + r")(?P=nq)\s*:\s*"
-                 r"(?:(?P<q>[\"'])(?:\\.|(?!(?P=q)).)*(?P=q)|[^\s,}\]]+)", _re.I),
+                 r"(?:(?P<q>[\"'])(?:\\.|(?!(?P=q)).)*(?P=q)|" + _NESTED + "|" + _BARE + r"[^\s,}\]]+)", _re.I),
      _keep_exception_names(lambda m: f"{m.group('nq')}{m.group('name')}{m.group('nq')}: [REDACTED]")),
     # env / toml with a quoted value: NAME = "value with spaces" (or single quotes)
     (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*(?P<q>[\"'])(?:(?!(?P=q)).)*(?P=q)", _re.I),
      _keep_exception_names(lambda m: f"{m.group('name')}=[REDACTED]")),
     # env / query / header with a bare value: NAME=value, ?key=value, X-Auth-Token: value
-    (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*[^\s&\"',;]+", _re.I),
+    (_re.compile(r"(?P<name>" + _SECRET_NAME + r")\s*[=:]\s*(?:" + _NESTED + "|" + _BARE
+                 + r"[^\s&\"',;]+)", _re.I),
      _keep_exception_names(lambda m: f"{m.group('name')}=[REDACTED]")),
     (_re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"), lambda m: "[REDACTED]"),
     (_re.compile(r"\bBearer\s+\S+", _re.I), lambda m: "Bearer [REDACTED]"),
@@ -186,13 +194,16 @@ def scrub_reason(text: str) -> str:
     Round 3: every Unicode format character (category Cf: zero-width space and joiners, word
     joiner, BOM, soft hyphen, bidi marks) is stripped first; each is invisible, survives NFKC,
     and one inside a key shape leaked the whole key."""
-    import unicodedata
+    from urllib.parse import unquote
 
-    from .serve import sanitize_field
-    s = "".join(ch for ch in str(text) if unicodedata.category(ch) != "Cf")
-    s = sanitize_field(s, len(s) + 1)
-    for pat, repl in _SECRET_PATTERNS:
-        s = pat.sub(repl, s)
+    s = _redact(str(text))
+    # Percent-encoded forms (`%41Iza...`, `key%3D...`): match on a DECODED copy too, and use it
+    # only when it redacts more than the raw text did, so ordinary %-text stays as written.
+    dec = unquote(str(text))
+    if dec != str(text):
+        d = _redact(dec)
+        if d.count("[REDACTED]") > s.count("[REDACTED]"):
+            s = d
     if len(s) > _REASON_CAP:
         # Keep both ends: the head names the failure class, the tail usually names the cause
         # ("... does not exist"); a long path in the middle is what gets elided.
@@ -208,6 +219,35 @@ def scrub_reason(text: str) -> str:
 
 
 _PLACEHOLDER = _re.compile(r"\[REDACTED\]")
+
+# Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt). unicodedata does not
+# expose the property, so the ranges are listed. Many are category Cf; the rest (U+034F
+# combining grapheme joiner, variation selectors, Hangul fillers, ...) are invisible too and
+# split a key shape just as well (CSO r4 on #90).
+_DEFAULT_IGNORABLE = (
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x115F, 0x1160), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0x3164, 0x3164),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFA0, 0xFFA0), (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+)
+
+
+def _invisible(ch: str) -> bool:
+    import unicodedata
+    if unicodedata.category(ch) == "Cf":
+        return True
+    o = ord(ch)
+    return any(lo <= o <= hi for lo, hi in _DEFAULT_IGNORABLE)
+
+
+def _redact(text: str) -> str:
+    """Strip invisible characters, sanitize to one line (uncapped), redact."""
+    from .serve import sanitize_field
+    s = "".join(ch for ch in text if not _invisible(ch))
+    s = sanitize_field(s, len(s) + 1)
+    for pat, repl in _SECRET_PATTERNS:
+        s = pat.sub(repl, s)
+    return s
 
 
 def _counts_unknown(stats: dict | None, counts_error: str) -> str:
