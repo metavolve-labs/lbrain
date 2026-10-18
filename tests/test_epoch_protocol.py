@@ -222,12 +222,15 @@ def test_r8_building_dirs_are_not_epochs(tmp_path):
 def test_r8_prune_sweeps_orphaned_building_debris(tmp_path):
     _mk_epoch(tmp_path, "E1", size=1)
     epoch.publish(tmp_path, "E1")
-    d = epoch.epochs_root(tmp_path) / (f"20261018T115926Z-{_dead_pid()}-0001" + epoch.BUILDING_SUFFIX)
+    pid = _dead_pid()
+    d = epoch.epochs_root(tmp_path) / (f"20261018T115926Z-{pid}-0001" + epoch.BUILDING_SUFFIX)
     d.mkdir(parents=True)
     (d / "brain.db").write_bytes(b"kill -9 debris")
+    (d / epoch.OWNER_STAMP).write_text(json.dumps({**epoch.owner_record(), "pid": pid,
+                                                   "starttime": ""}), encoding="utf-8")
     old = time.time() - 600
-    os.utime(d / "brain.db", (old, old))
-    os.utime(d, (old, old))
+    for f in list(d.iterdir()) + [d]:
+        os.utime(f, (old, old))
     epoch.prune(tmp_path, keep=3)
     assert not d.exists()  # its own builder is provably dead: swept
 

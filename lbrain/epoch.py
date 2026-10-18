@@ -291,15 +291,31 @@ def _proc_starttime(pid: int) -> str:
         return ""
 
 
-def _boot_time() -> float | None:
-    """Wall-clock boot time (btime in /proc/stat), or None when unreadable."""
+def _pid_ns() -> str:
+    """Inode of this process's PID namespace (/proc/self/ns/pid), or "" when unreadable.
+    Two WSL distros share one kernel, so they share boot_id and (by default) hostname,
+    but not a PID namespace: a PID recorded in another namespace cannot be probed here."""
     try:
-        for line in Path("/proc/stat").read_text(encoding="ascii").splitlines():
-            if line.startswith("btime "):
-                return float(line.split()[1])
-    except (OSError, ValueError):
-        pass
-    return None
+        return str(os.stat("/proc/self/ns/pid").st_ino)
+    except OSError:
+        return ""
+
+
+def owner_record() -> dict:
+    """Who this process is, for liveness checks by other processes: host, boot, PID
+    namespace, PID and process start time. Written into the lock meta and stamped into
+    a build's staging dir."""
+    return {"host": socket.gethostname(), "boot_id": _boot_id(), "pidns": _pid_ns(),
+            "pid": os.getpid(), "starttime": _proc_starttime(os.getpid())}
+
+
+OWNER_STAMP = ".builder-owner.json"
+
+
+def stamp_staging_owner(staging: Path) -> None:
+    """Record the owning builder inside its staging dir at creation, so the prune sweep
+    can judge the owner by boot_id and PID namespace rather than by clock readings."""
+    (Path(staging) / OWNER_STAMP).write_text(json.dumps(owner_record()), encoding="utf-8")
 
 
 def pid_alive_here(pid: int, starttime: str = "") -> bool:
@@ -327,9 +343,12 @@ def pid_alive_here(pid: int, starttime: str = "") -> bool:
 
 
 def holder_provably_dead(meta: dict) -> bool | None:
-    """Liveness of a builder recorded in lock meta. True = provably dead (same host and
-    a different boot, or same host and boot with no such live process); False =
-    provably alive; None = unknowable here (foreign host, or no boot_id on either side)."""
+    """Liveness of a builder from its owner record (lock meta or staging stamp).
+    True = provably dead (same host and a different boot, or same host, boot and PID
+    namespace with no such live process); False = provably alive; None = unknowable
+    here (foreign host, no boot_id on either side, or a different PID namespace, e.g.
+    another WSL distro on the same kernel). A record without `pidns` (written by an
+    engine before this field) is probed as if in this namespace."""
     if meta.get("host") != socket.gethostname():
         return None
     theirs, ours = str(meta.get("boot_id") or ""), _boot_id()
@@ -337,6 +356,9 @@ def holder_provably_dead(meta: dict) -> bool | None:
         return None
     if theirs != ours:
         return True
+    their_ns, our_ns = str(meta.get("pidns") or ""), _pid_ns()
+    if their_ns and our_ns and their_ns != our_ns:
+        return None
     return not pid_alive_here(meta.get("pid"), str(meta.get("starttime") or ""))
 
 
@@ -367,14 +389,9 @@ class BuilderLock:
         self.nonce = os.urandom(16).hex()
 
     def _write_meta(self) -> None:
-        body = json.dumps({
-            "host": socket.gethostname(),
-            "pid": os.getpid(),
-            "boot_id": _boot_id(),  # CSO round-3 rider: pid+boot disambiguates reboots
-            "starttime": _proc_starttime(os.getpid()),  # pid+starttime disambiguates PID reuse
-            "nonce": self.nonce,
-            "heartbeat": time.time(),
-        })
+        # host/pid/boot_id (CSO round-3 rider: pid+boot disambiguates reboots), plus
+        # starttime (PID reuse) and pidns (another PID namespace = unknowable).
+        body = json.dumps({**owner_record(), "nonce": self.nonce, "heartbeat": time.time()})
         tmp = self.dir / "builder.json.tmp"
         tmp.write_text(body, encoding="utf-8")
         os.replace(str(tmp), str(self.meta))
@@ -679,25 +696,33 @@ _BUILDING_RE = re.compile(r"^\d{8}T\d{6}Z-(\d+)-\d+" + re.escape(BUILDING_SUFFIX
 
 
 def _building_owner_dead(d: Path, *, fresh_within: float = STALE_AFTER) -> bool:
-    """True only when the builder that owns staging dir `d` is provably dead. The
-    owner's PID is in the dir name (new_epoch_id). Dead = the dir predates this boot,
-    or the PID is not alive on this kernel. Kept (False) when the name does not parse,
-    the PID is alive (including a reused PID: over-retention is the safe direction),
-    or anything in it was written within `fresh_within` seconds."""
+    """True only when the builder that owns staging dir `d` is provably dead, judged
+    from the owner stamp build() writes at creation (OWNER_STAMP: boot_id, PID
+    namespace, PID, start time). Dead = a different boot, or the same boot and PID
+    namespace with the PID gone (or reused). Kept (False) when the name does not parse,
+    the stamp is missing or unreadable, the stamp's PID disagrees with the name, the
+    owner is in another PID namespace, the PID is alive, or anything in the dir was
+    written within `fresh_within` seconds. Clock readings such as /proc/stat btime are
+    not used: btime drifts forward on WSL2 (CSO, PR #93 review)."""
     m = _BUILDING_RE.match(d.name)
     if not m:
         return False
     try:
+        owner = json.loads((d / OWNER_STAMP).read_text(encoding="utf-8"))
+    except Exception:
+        return False  # no stamp (or a pre-stamp engine's dir): unsure means keep
+    if not isinstance(owner, dict) or str(owner.get("pid")) != m.group(1):
+        return False
+    if owner.get("host") == socket.gethostname() and owner.get("boot_id") \
+            and _boot_id() and owner.get("boot_id") != _boot_id():
+        return True  # stamped on a previous boot: its builder cannot be running
+    try:
         mtimes = [d.stat().st_mtime] + [c.stat().st_mtime for c in d.iterdir()]
     except OSError:
         return False
-    newest = max(mtimes)
-    btime = _boot_time()
-    if btime is not None and newest < btime:
-        return True  # last written before this boot: its builder cannot be running
-    if time.time() - newest <= fresh_within:
+    if time.time() - max(mtimes) <= fresh_within:
         return False
-    return not pid_alive_here(int(m.group(1)))
+    return holder_provably_dead(owner) is True
 
 
 def _prune_locked(home: Path, *, keep: int, max_bytes: int | None) -> list[str]:

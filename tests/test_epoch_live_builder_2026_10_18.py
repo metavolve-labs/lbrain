@@ -7,21 +7,49 @@ the lock stale by heartbeat AGE alone and took it over while 3359336 was alive.
 prune swept 3373886's LIVE `.building` staging as "orphaned". The second build reached
 the gate with zero chunks and was refused.
 
-Two invariants, regression tests for each:
+Invariants, regression tests for each:
   (a) a lock whose holder is alive on this boot is not stale, however old its heartbeat;
-  (b) prune never sweeps a `.building` dir whose own builder is alive.
+  (b) prune never sweeps a `.building` dir whose own builder is alive;
+  (c) a builder that lost its lock aborts before publish() and prune() (CSO B1 on #93);
+  (d) a holder in another PID namespace (another WSL distro, same kernel) is unknowable,
+      not "provably dead" (CSO N1);
+  (e) the sweep judges a staging dir by the boot_id stamped into it, never by the
+      drifting /proc/stat btime, and keeps a dir with no stamp (CSO N2).
+
+The owner records below are built from /proc directly, not from engine helpers, so a
+negative control against an engine without the fix fails on behaviour, not on a
+missing attribute.
 """
 from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from lbrain import epoch, epoch_build
+from test_epoch_build import _cfg, _mk_home, _seed_legacy
+
+STAMP = ".builder-owner.json"
+
+
+def _starttime(pid: int) -> str:
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii", errors="replace")
+    return stat.rpartition(")")[2].split()[19]
+
+
+def _owner(pid: int, **over) -> dict:
+    rec = {"host": socket.gethostname(),
+           "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+           "pidns": str(os.stat("/proc/self/ns/pid").st_ino),
+           "pid": pid, "starttime": ""}
+    rec.update(over)
+    return rec
 
 
 @pytest.fixture
@@ -40,13 +68,15 @@ def _dead_pid() -> int:
     return p.pid
 
 
-def _staging(home, pid: int, *, age: float):
-    d = epoch.epochs_root(home) / (f"20261018T115926Z-{pid}-0001" + epoch.BUILDING_SUFFIX)
+def _staging(home, pid: int, *, age: float, stamp: dict | None = None, name_ts="20261018T115926Z"):
+    d = epoch.epochs_root(home) / (f"{name_ts}-{pid}-0001" + epoch.BUILDING_SUFFIX)
     d.mkdir(parents=True)
     (d / "brain.db").write_bytes(b"a builder is writing this")
+    if stamp is not None:
+        (d / STAMP).write_text(json.dumps(stamp), encoding="utf-8")
     t = time.time() - age
-    os.utime(d / "brain.db", (t, t))
-    os.utime(d, (t, t))
+    for f in list(d.iterdir()) + [d]:
+        os.utime(f, (t, t))
     return d
 
 
@@ -90,8 +120,7 @@ def test_the_wait_for_builder_follower_uses_the_same_rule(tmp_path):
 
 def test_a_live_holder_in_another_process_is_not_seized(tmp_path, live_child):
     a = epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()
-    _set_meta(a, pid=live_child, starttime=epoch._proc_starttime(live_child),
-              heartbeat=time.time() - 3600)
+    _set_meta(a, pid=live_child, starttime=_starttime(live_child), heartbeat=time.time() - 3600)
     with pytest.raises(epoch.BuilderBusy, match="alive on this boot"):
         epoch.BuilderLock(tmp_path, stale_after=0.05).acquire()
 
@@ -118,7 +147,8 @@ def test_a_reused_pid_is_not_mistaken_for_the_holder(tmp_path, live_child):
 
 def test_a_live_second_builders_staging_survives_the_first_builders_publish_prune(tmp_path, live_child):
     _published(tmp_path)
-    theirs = _staging(tmp_path, live_child, age=600)  # quiet for 10 min, its builder alive
+    theirs = _staging(tmp_path, live_child, age=600,  # quiet for 10 min, its builder alive
+                      stamp=_owner(live_child, starttime=_starttime(live_child)))
     lock = epoch.BuilderLock(tmp_path).acquire()      # the first builder, holding the lock
     try:
         epoch.prune(tmp_path, keep=3, lock=lock)
@@ -129,12 +159,89 @@ def test_a_live_second_builders_staging_survives_the_first_builders_publish_prun
 
 def test_sweep_keeps_when_unsure_and_removes_only_the_provably_dead(tmp_path):
     _published(tmp_path)
-    dead_old = _staging(tmp_path, _dead_pid(), age=600)
-    dead_fresh = epoch.epochs_root(tmp_path) / (f"20261018T120000Z-{_dead_pid()}-0001" + epoch.BUILDING_SUFFIX)
-    dead_fresh.mkdir()
-    (dead_fresh / "brain.db").write_bytes(b"written seconds ago")
+    p = _dead_pid()
+    dead_old = _staging(tmp_path, p, age=600, stamp=_owner(p))
+    p = _dead_pid()
+    dead_fresh = _staging(tmp_path, p, age=0, stamp=_owner(p), name_ts="20261018T120000Z")
+    p = _dead_pid()
+    dead_unstamped = _staging(tmp_path, p, age=600, name_ts="20261018T120100Z")
     unparseable = epoch.epochs_root(tmp_path) / ("E0" + epoch.BUILDING_SUFFIX)
     unparseable.mkdir()
     epoch.prune(tmp_path, keep=3)
     assert not dead_old.exists()
-    assert dead_fresh.exists() and unparseable.exists()
+    assert dead_fresh.exists(), "swept a dir written seconds ago"
+    assert dead_unstamped.exists(), "swept a dir with no owner stamp (unsure means keep)"
+    assert unparseable.exists(), "swept a dir whose name does not parse"
+
+
+# ---------- (c) the pre-publish ownership check (CSO B1) ----------
+
+def test_a_deposed_builder_aborts_before_publish_and_prune(tmp_path, monkeypatch):
+    home, srcs = _mk_home(tmp_path)
+    _seed_legacy(home)
+    assert epoch_build.build(home, _cfg(home, srcs))["published"]
+    before = epoch.current_epoch_id(home)
+    calls = {"publish": 0, "prune": 0, "stamped": 0}
+    real_validate, real_publish, real_prune = epoch_build.validate_candidate, epoch_build.publish, epoch.prune
+
+    def usurp_after_gate(db_path, *a, **k):
+        out = real_validate(db_path, *a, **k)
+        calls["stamped"] += (Path(db_path).parent / STAMP).exists()
+        meta = epoch.epochs_root(home) / epoch.LOCK_DIRNAME / "builder.json"
+        m = json.loads(meta.read_text(encoding="utf-8"))
+        m["nonce"] = "builder-B"  # another builder now owns the lock
+        meta.write_text(json.dumps(m), encoding="utf-8")
+        return out
+
+    def counted(name, fn):
+        def wrapper(*a, **k):
+            calls[name] += 1
+            return fn(*a, **k)
+        return wrapper
+
+    monkeypatch.setattr(epoch_build, "validate_candidate", usurp_after_gate)
+    monkeypatch.setattr(epoch_build, "publish", counted("publish", real_publish))
+    monkeypatch.setattr(epoch, "prune", counted("prune", real_prune))
+    with pytest.raises(epoch.LockLost):
+        epoch_build.build(home, _cfg(home, srcs))
+    assert calls["publish"] == 0 and calls["prune"] == 0, calls
+    assert epoch.current_epoch_id(home) == before
+    assert calls["stamped"] == 1, "build() did not stamp its staging dir with its owner"
+
+
+# ---------- (d) another PID namespace is unknowable (CSO N1) ----------
+
+def test_a_holder_in_another_pid_namespace_is_unknowable_not_dead(tmp_path):
+    other_ns = _owner(_dead_pid(), pidns="4026531836-other-distro")
+    assert epoch.holder_provably_dead(other_ns) is None
+    assert epoch.holder_provably_dead(_owner(_dead_pid())) is True  # same namespace: provable
+    # the lock falls back to the age rule: fresh heartbeat blocks, old heartbeat is taken over
+    a = epoch.BuilderLock(tmp_path, stale_after=5.0).acquire()
+    _set_meta(a, **other_ns, heartbeat=time.time())
+    with pytest.raises(epoch.BuilderBusy, match=r"heartbeat \d+s ago\)$"):
+        epoch.BuilderLock(tmp_path, stale_after=5.0).acquire()
+    a.held = False
+
+
+def test_the_sweep_keeps_a_staging_dir_owned_from_another_pid_namespace(tmp_path):
+    _published(tmp_path)
+    p = _dead_pid()  # gone HERE, but it was another distro's PID: we cannot tell
+    theirs = _staging(tmp_path, p, age=600, stamp=_owner(p, pidns="4026531836-other-distro"))
+    epoch.prune(tmp_path, keep=3)
+    assert theirs.exists(), "swept a staging dir whose builder lives in another PID namespace"
+
+
+# ---------- (e) boot stamp, not btime (CSO N2) ----------
+
+def test_the_sweep_ignores_btime_and_trusts_the_boot_stamp(tmp_path, live_child):
+    _published(tmp_path)
+    # A live builder's staging last written long ago, before any plausible (or drifted)
+    # btime: still this boot by its stamp, so it must survive.
+    theirs = _staging(tmp_path, live_child, age=30 * 86400,
+                      stamp=_owner(live_child, starttime=_starttime(live_child)))
+    p = _dead_pid()
+    prior_boot = _staging(tmp_path, p, age=0, stamp=_owner(p, boot_id="a-previous-boot"),
+                          name_ts="20261018T120200Z")
+    epoch.prune(tmp_path, keep=3)
+    assert theirs.exists(), "swept a live builder's staging on a clock reading"
+    assert not prior_boot.exists(), "kept a dir stamped on a previous boot"

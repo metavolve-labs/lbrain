@@ -53,6 +53,7 @@ from .epoch import (
     new_epoch_id,
     publish,
     resolve_db_path,
+    stamp_staging_owner,
 )
 from .index import discover, is_excluded_path, source_root_present
 
@@ -691,6 +692,7 @@ def build(
         else:
             staging = epochs_root(home) / (eid + ".building")
         staging.mkdir(parents=True, exist_ok=True)
+        stamp_staging_owner(staging)  # the prune sweep judges this dir's owner by it
         staging_db = staging / "brain.db"
 
         try:
@@ -1141,6 +1143,10 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
                 return build(home, cfg, **build_kw)  # one last attempt; busy => existing error
             if last_said is None or now - last_said >= say_every:
                 beat = "acquiring" if age is None else f"heartbeat {age:.0f}s ago"
+                if age is not None and age > BuilderLock(home).stale_after and h.get("stale") is False:
+                    # CSO Q2 on #93: alert only, never a ceiling (VACUUM INTO legitimately
+                    # runs minutes with no heartbeat); an operator decides on a kill.
+                    beat = f"live, no heartbeat {age / 60:.0f} min"
                 echo(f"  waiting for builder pid {h.get('pid') or '?'} on {h.get('host') or '?'} "
                      f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
                 last_said = now
