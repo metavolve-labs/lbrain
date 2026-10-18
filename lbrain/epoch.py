@@ -19,6 +19,7 @@ import errno
 import itertools
 import json
 import os
+import re
 import shutil
 import socket
 import time
@@ -32,9 +33,14 @@ LEASES_DIRNAME = ".leases"
 FAILED_SUFFIX = ".failed"
 BUILDING_SUFFIX = ".building"
 
-# Heartbeat lease (design v1.2 #6 + vendor3): staleness is decided by heartbeat AGE,
-# never by PID liveness — PID polling deadlocks after a reboot hands the saved PID to
-# an unrelated process. pid/host/starttime are recorded for DIAGNOSTICS only.
+# Heartbeat lease (design v1.2 #6 + vendor3), amended 2026-10-18: a stale heartbeat
+# is necessary but NOT sufficient. When the holder is on THIS host and THIS boot (the
+# recorded boot_id matches), its PID is probed: a live PID (same process start time)
+# keeps the lock however old the heartbeat. Age alone decides only when liveness is
+# unknowable (foreign host, no boot_id). The reboot hazard the original rule guarded
+# against is closed by the boot_id comparison: a different boot = provably dead.
+# Incident: CCO seat 2026-10-18, a live builder in a 7-minute in-process phase (gate +
+# VACUUM INTO, no heartbeat) was seized at 61 s by a second builder.
 HEARTBEAT_INTERVAL = 15.0
 STALE_AFTER = 60.0
 
@@ -274,15 +280,98 @@ def _boot_id() -> str:
         return ""
 
 
+def _proc_starttime(pid: int) -> str:
+    """Process start time in clock ticks since boot (/proc/<pid>/stat field 22), or ""
+    when unreadable. Distinguishes a live holder from an unrelated process that was
+    handed the same PID later in the same boot."""
+    try:
+        stat = Path(f"/proc/{int(pid)}/stat").read_text(encoding="ascii", errors="replace")
+        return stat.rpartition(")")[2].split()[19]
+    except (OSError, IndexError, ValueError):
+        return ""
+
+
+def _pid_ns() -> str:
+    """Inode of this process's PID namespace (/proc/self/ns/pid), or "" when unreadable.
+    Two WSL distros share one kernel, so they share boot_id and (by default) hostname,
+    but not a PID namespace: a PID recorded in another namespace cannot be probed here."""
+    try:
+        return str(os.stat("/proc/self/ns/pid").st_ino)
+    except OSError:
+        return ""
+
+
+def owner_record() -> dict:
+    """Who this process is, for liveness checks by other processes: host, boot, PID
+    namespace, PID and process start time. Written into the lock meta and stamped into
+    a build's staging dir."""
+    return {"host": socket.gethostname(), "boot_id": _boot_id(), "pidns": _pid_ns(),
+            "pid": os.getpid(), "starttime": _proc_starttime(os.getpid())}
+
+
+OWNER_STAMP = ".builder-owner.json"
+
+
+def stamp_staging_owner(staging: Path) -> None:
+    """Record the owning builder inside its staging dir at creation, so the prune sweep
+    can judge the owner by boot_id and PID namespace rather than by clock readings."""
+    (Path(staging) / OWNER_STAMP).write_text(json.dumps(owner_record()), encoding="utf-8")
+
+
+def pid_alive_here(pid: int, starttime: str = "") -> bool:
+    """True when `pid` names a live process on this kernel (and, when a start time was
+    recorded and is readable now, the SAME process). PermissionError = exists = alive."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    except OSError:
+        return True  # cannot tell: the safe answer is "alive"
+    if starttime:
+        now = _proc_starttime(pid)
+        if now and now != starttime:
+            return False  # the PID was reused by a different process
+    return True
+
+
+def holder_provably_dead(meta: dict) -> bool | None:
+    """Liveness of a builder from its owner record (lock meta or staging stamp).
+    True = provably dead (same host and a different boot, or same host, boot and PID
+    namespace with no such live process); False = provably alive; None = unknowable
+    here (foreign host, no boot_id on either side, or a different PID namespace, e.g.
+    another WSL distro on the same kernel). A record without `pidns` (written by an
+    engine before this field) is probed as if in this namespace."""
+    if meta.get("host") != socket.gethostname():
+        return None
+    theirs, ours = str(meta.get("boot_id") or ""), _boot_id()
+    if not theirs or not ours:
+        return None
+    if theirs != ours:
+        return True
+    their_ns, our_ns = str(meta.get("pidns") or ""), _pid_ns()
+    if their_ns and our_ns and their_ns != our_ns:
+        return None
+    return not pid_alive_here(meta.get("pid"), str(meta.get("starttime") or ""))
+
+
 # ---------- the builder lock ----------
 
 class BuilderLock:
     """mkdir spin-lock + heartbeat lease. One builder per brain home.
 
     mkdir/rmdir is the classic network-fs-safe mutual exclusion (v1.3 #2) — O_EXCL
-    is NFS-class unreliable on 9p and stays banned here. Staleness = heartbeat age
-    only (reboot-safe, PID-reuse-safe). Takeover renames the stale lock aside
-    rather than deleting into a race.
+    is NFS-class unreliable on 9p and stays banned here. Staleness = an old heartbeat
+    AND a holder that is not provably alive (holder_provably_dead: boot_id makes it
+    reboot-safe, the recorded process start time makes it PID-reuse-safe). Takeover
+    renames the stale lock aside rather than deleting into a race.
 
     Stated assumption, unchanged from the design: one kernel per brain home. This
     lock arbitrates processes on one kernel; hazard #11 says nothing can arbitrate
@@ -300,13 +389,9 @@ class BuilderLock:
         self.nonce = os.urandom(16).hex()
 
     def _write_meta(self) -> None:
-        body = json.dumps({
-            "host": socket.gethostname(),
-            "pid": os.getpid(),
-            "boot_id": _boot_id(),  # CSO round-3 rider: pid+boot disambiguates reboots
-            "nonce": self.nonce,
-            "heartbeat": time.time(),
-        })
+        # host/pid/boot_id (CSO round-3 rider: pid+boot disambiguates reboots), plus
+        # starttime (PID reuse) and pidns (another PID namespace = unknowable).
+        body = json.dumps({**owner_record(), "nonce": self.nonce, "heartbeat": time.time()})
         tmp = self.dir / "builder.json.tmp"
         tmp.write_text(body, encoding="utf-8")
         os.replace(str(tmp), str(self.meta))
@@ -329,6 +414,25 @@ class BuilderLock:
         except Exception:
             return float("inf")  # unreadable meta = treat as stale, not as live
 
+    def _holder_dead(self) -> bool | None:
+        try:
+            m = json.loads(self.meta.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        return holder_provably_dead(m) if isinstance(m, dict) else None
+
+    def holder_is_stale(self) -> bool | None:
+        """The ONE staleness rule, shared by acquire() and the `--wait-for-builder`
+        follower. None = no meta yet (mid-acquire, LIVE). False = live: a fresh
+        heartbeat, or an old heartbeat whose holder is provably alive on this boot.
+        True = old heartbeat and the holder is dead or its liveness is unknowable."""
+        age = self._meta_age()
+        if age is None:
+            return None
+        if age <= self.stale_after:
+            return False
+        return self._holder_dead() is not False
+
     def acquire(self) -> "BuilderLock":
         self.dir.parent.mkdir(parents=True, exist_ok=True)
         for _ in range(2):  # second pass only after a stale takeover
@@ -346,6 +450,11 @@ class BuilderLock:
                 if age <= self.stale_after:
                     raise BuilderBusy(
                         f"another builder holds the lock (heartbeat {age:.0f}s ago)")
+                if self._holder_dead() is False:
+                    # Old heartbeat, LIVE holder (a long in-process phase): never seize it.
+                    raise BuilderBusy(
+                        f"another builder holds the lock (heartbeat {age:.0f}s ago; "
+                        "its process is alive on this boot)")
                 # Stale: rename aside (atomic claim of the takeover — two takeover
                 # racers cannot both succeed at renaming the same directory).
                 aside = self.dir.with_name(
@@ -568,9 +677,10 @@ def prune(home: Path, *, keep: int = 3, max_bytes: int | None = None,
 
     CSO R8: prune runs UNDER the builder lock — pass a held lock, or one is
     acquired (and BuilderBusy refuses the prune while a build is live, instead of
-    racing rmtree against a live build's staging). Holding the lock also makes
-    orphaned `.building` dirs provably dead, so they are swept here — the one
-    place their removal is safe by construction.
+    racing rmtree against a live build's staging). Holding the lock is NOT proof
+    that no other builder is live (2026-10-18: a builder seized while alive kept
+    building in its own staging), so each `.building` dir is swept only when its
+    own builder is provably dead (`_building_owner_dead`); when unsure it is kept.
     """
     own_lock = None
     if lock is None:
@@ -582,12 +692,53 @@ def prune(home: Path, *, keep: int = 3, max_bytes: int | None = None,
             own_lock.release()
 
 
+_BUILDING_RE = re.compile(r"^\d{8}T\d{6}Z-(\d+)-\d+" + re.escape(BUILDING_SUFFIX) + r"$")
+
+
+def _building_owner_dead(d: Path, *, fresh_within: float = STALE_AFTER) -> bool:
+    """True only when the builder that owns staging dir `d` is provably dead, judged
+    from the owner stamp build() writes at creation (OWNER_STAMP: boot_id, PID
+    namespace, PID, start time). Dead = a different boot, or the same boot and PID
+    namespace with the PID gone (or reused). Kept (False) when the name does not parse,
+    the stamp is missing or unreadable, the stamp's PID disagrees with the name, the
+    owner is in another PID namespace, the PID is alive, or anything in the dir was
+    written within `fresh_within` seconds. Clock readings such as /proc/stat btime are
+    not used: btime drifts forward on WSL2 (CSO, PR #93 review)."""
+    m = _BUILDING_RE.match(d.name)
+    if not m:
+        return False
+    try:
+        owner = json.loads((d / OWNER_STAMP).read_text(encoding="utf-8"))
+    except Exception:
+        return False  # no stamp (or a pre-stamp engine's dir): unsure means keep
+    if not isinstance(owner, dict) or str(owner.get("pid")) != m.group(1):
+        return False
+    if owner.get("host") == socket.gethostname() and owner.get("boot_id") \
+            and _boot_id() and owner.get("boot_id") != _boot_id():
+        return True  # stamped on a previous boot: its builder cannot be running
+    try:
+        mtimes = [d.stat().st_mtime] + [c.stat().st_mtime for c in d.iterdir()]
+    except OSError:
+        return False
+    if time.time() - max(mtimes) <= fresh_within:
+        return False
+    return holder_provably_dead(owner) is True
+
+
 def _prune_locked(home: Path, *, keep: int, max_bytes: int | None) -> list[str]:
-    # lock held ⇒ no live builder ⇒ every .building dir is an orphan (kill -9 debris)
+    # Sweep .building dirs whose OWN builder is provably dead (kill -9 debris). The lock
+    # does not prove that: never sweep a live builder's staging.
     root = epochs_root(home)
     if root.is_dir():
         for d in root.iterdir():
             if d.is_dir() and d.name.endswith(BUILDING_SUFFIX):
+                own = _BUILDING_RE.match(d.name)
+                if own and int(own.group(1)) == os.getpid():
+                    continue  # this builder's own staging: build() removes it in its finally
+                if not _building_owner_dead(d):
+                    print(f"[lbrain] kept build staging {d.name}: its builder is alive "
+                          "or not provably dead")
+                    continue
                 try:
                     shutil.rmtree(d)
                     print(f"[lbrain] swept orphaned build staging: {d.name}")

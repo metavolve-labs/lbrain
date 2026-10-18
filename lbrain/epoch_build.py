@@ -53,6 +53,7 @@ from .epoch import (
     new_epoch_id,
     publish,
     resolve_db_path,
+    stamp_staging_owner,
 )
 from .index import discover, is_excluded_path, source_root_present
 
@@ -691,6 +692,7 @@ def build(
         else:
             staging = epochs_root(home) / (eid + ".building")
         staging.mkdir(parents=True, exist_ok=True)
+        stamp_staging_owner(staging)  # the prune sweep judges this dir's owner by it
         staging_db = staging / "brain.db"
 
         try:
@@ -866,6 +868,10 @@ def build(
                 "runtime_fingerprint": _fingerprint(runtime_inputs),
             }, indent=2) + "\n", encoding="utf-8")
 
+            # Ownership check before the swap: the gate and VACUUM INTO above run in-process
+            # with no heartbeat; a builder that lost the lock must abort here (LockLost),
+            # never publish and then prune under a lock it no longer holds (2026-10-18).
+            lock.heartbeat()
             caveat = publish(home, eid)
             if swept_plan:
                 _finish_sweep(home, staging, eid, swept_plan, report)
@@ -899,7 +905,8 @@ def _lock_holder(home: Path) -> dict:
     lock = BuilderLock(home)
     if not lock.dir.exists():
         return {"held": False}
-    out: dict = {"held": True, "pid": None, "host": None, "age": lock._meta_age()}
+    out: dict = {"held": True, "pid": None, "host": None, "age": lock._meta_age(),
+                 "stale": lock.holder_is_stale()}
     try:
         m = json.loads(lock.meta.read_text(encoding="utf-8"))
         out["pid"], out["host"] = m.get("pid"), m.get("host")
@@ -1129,13 +1136,17 @@ def build_single_flight(home: Path, cfg, *, wait: float, invoked_ns: int,
             if h.get("pid") is not None:
                 leader_pid = h["pid"]
             age = h["age"]
-            if age is not None and age > BuilderLock(home).stale_after:
-                break  # gone stale while we waited: build() takes it over, as it always has
+            if h.get("stale"):
+                break  # stale (old heartbeat, holder not provably alive): build() takes it over
             now = time.monotonic()
             if now >= deadline:
                 return build(home, cfg, **build_kw)  # one last attempt; busy => existing error
             if last_said is None or now - last_said >= say_every:
                 beat = "acquiring" if age is None else f"heartbeat {age:.0f}s ago"
+                if age is not None and age > BuilderLock(home).stale_after and h.get("stale") is False:
+                    # CSO Q2 on #93: alert only, never a ceiling (VACUUM INTO legitimately
+                    # runs minutes with no heartbeat); an operator decides on a kill.
+                    beat = f"live, no heartbeat {age / 60:.0f} min"
                 echo(f"  waiting for builder pid {h.get('pid') or '?'} on {h.get('host') or '?'} "
                      f"({beat}); up to {max(0.0, deadline - now):.0f}s more")
                 last_said = now
