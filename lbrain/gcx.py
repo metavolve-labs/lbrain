@@ -195,7 +195,7 @@ def _authority_target(name: str, *, graphql: str, timeout: float) -> tuple[str, 
     wrong answer).
     """
     query = (
-        "query($n:[String!],$o:[String!]){transactions(tags:[{name:\"GCX-Authority\","
+        "query($n:[String!]!,$o:[String!]){transactions(tags:[{name:\"GCX-Authority\","
         "values:$n}],owners:$o,first:10){edges{node{id tags{name value} "
         "owner{address key} block{height}}}}}"
     )
@@ -261,7 +261,7 @@ def _lookup_full(
     """(txid, tags, authority_txid_or_None) — see lookup() for the contract."""
     parse(name)  # validate before spending a round trip
     query = (
-        "query($n:[String!]){transactions(tags:[{name:\"GCX-Name\",values:$n}],"
+        "query($n:[String!]!){transactions(tags:[{name:\"GCX-Name\",values:$n}],"
         "first:10){edges{node{id tags{name value}}}}}"
     )
     try:
