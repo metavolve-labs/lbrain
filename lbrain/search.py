@@ -68,6 +68,10 @@ WIKILINK_MIN_POPULATION = 8     # below this many linked docs, a percentile is n
 WIKILINK_RULE = "pctl-linked-v1"  # ranker epoch marker; brains built before this carry no such key
 
 
+
+# sqlite-vec vec0 KNN queries accept at most this many neighbours (SQLITE_VEC_VEC0_K_MAX default).
+VEC_KNN_MAX = 4096
+
 def _basename_slug(rel_path: str) -> str:
     """Filename stem from a corpus-relative path, on EITHER separator.
 
@@ -708,6 +712,11 @@ def search(
         over_k *= 2
 
     # 1. Vector retrieval
+    # sqlite-vec refuses a KNN `k` above 4096 (vec0 k limit). over_k is k*8 here, so any k above 512
+    # raised "k value in knn query too large" and the whole query failed (LME-1 stage 1 M arm,
+    # 2026-10-25: the A3 harness asked for k=640, over_k=5120). Clamp the VECTOR candidate pool only;
+    # the keyword pool below keeps over_k. For every over_k <= 4096 this is a no-op.
+    vec_k = min(over_k, VEC_KNN_MAX)
     q_vec = embedder.embed_one(query)
     vec_rows = store.db.execute(
         "SELECT v.rowid AS chunk_id, vec_distance_cosine(v.embedding, ?) AS dist, "
@@ -718,7 +727,7 @@ def search(
         "JOIN docs d ON d.rel_path = c.rel_path "
         "WHERE v.embedding MATCH ? AND k = ? "
         "ORDER BY dist",
-        (q_vec, q_vec, over_k),
+        (q_vec, q_vec, vec_k),
     ).fetchall()
 
     # 2. Keyword retrieval (BM25 via FTS5)
