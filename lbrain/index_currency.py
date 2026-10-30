@@ -153,8 +153,16 @@ def survey(store, sources) -> Survey:
     # would write. Iterating per-root rather than passing every root to
     # discover() at once is what preserves that.
     seen: set[str] = set()
+    surveyed_real: set[str] = set()
     for src in roots:
         for path in discover([src]):
+            # One file is one doc however many roots reach it (a symlinked spelling of a root,
+            # a root that contains another): the importer skips the later offers as aliases,
+            # and the survey must count what the importer counts (2026-10-30).
+            rp = os.path.realpath(str(path))
+            if rp in surveyed_real:
+                continue
+            surveyed_real.add(rp)
             try:
                 doc = parse(path, repo_root=src)
             except Exception as e:  # unreadable is a finding, not a crash

@@ -886,12 +886,22 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, confirm_d
     unchanged_docs = 0
     meta_refreshed = 0   # frontmatter changed, body did not (A-401)
     seen_rels: set[str] = set()   # keys this scan computed — feeds DD-01 dedupe
+    # Identity by realpath (2026-10-30, Prism/workhorse: `golden_codex_pipeline -> golden` listed under both
+    # spellings indexed 121 docs twice). The FIRST configured root that reaches a file owns its row and its
+    # rel_path; every later offer of the same real file (a symlinked spelling, a root that contains another)
+    # is an ALIAS: not parsed, not counted, recorded in the row's metadata so the config's claim is kept.
+    real_seen: dict[str, str] = {}        # realpath -> rel_path of the row that owns it, this scan
+    aliases: dict[str, list[str]] = {}    # rel_path -> other spellings offered this scan
+    aliased = 0
     beliefs_seen = 0
     total_chunks = 0
 
     # Y2 (CSO 2026-09-16): ONE transaction across every root. An abort on a later root rolls back the earlier ones;
     # a non-epoch home never keeps a partial scan, and an epoch candidate never carries one.
     with store.transaction():
+        # Rows written before paths were canonical (or through a symlink introduced since) are rewritten to
+        # their realpath first, so the scan below finds them and DD-01 can collapse spelling twins.
+        canonicalised = store.canonicalise_abs_paths()
         for src in sources:
             files = discover([src])
             click.echo(f"  scanning {src} → {len(files)} markdown files")
@@ -905,6 +915,12 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, confirm_d
             while queue:
                 path = queue.pop(0)
                 if path in done:
+                    continue
+                real = os.path.realpath(str(path))
+                if real in real_seen:
+                    aliases.setdefault(real_seen[real], []).append(str(path))
+                    aliased += 1
+                    done.add(path)
                     continue
                 try:
                     doc = parse(path, repo_root=src)
@@ -937,6 +953,7 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, confirm_d
                 doc.rel_path, existing_hash = store.resolve_rel_path(
                     doc.rel_path, str(doc.path), Path(src).name)
                 seen_rels.add(doc.rel_path)
+                real_seen[real] = doc.rel_path
                 # Supersession edges are resolved at search time, so keep them current
                 # for every doc — even ones whose chunks are unchanged (a Supersedes
                 # marker can be added/removed without re-chunking). With foreign_keys=ON
@@ -980,6 +997,9 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, confirm_d
                 )
                 store.insert_chunks(chunks)
                 total_chunks += len(chunks)
+        # Alias spellings go into the owning row's metadata (and a stale record is dropped from a
+        # doc that no longer has any) inside the same transaction as the scan that observed them.
+        store.record_path_aliases(aliases, seen_rels)
 
     # DD-01: collapse historical duplicate-abs_path twins onto the keys this
     # scan computed. Runs on every import (not only --prune): the twins serve
@@ -1036,6 +1056,8 @@ def import_cmd(paths: tuple[str, ...], prune: bool, force_prune: bool, confirm_d
         f"unchanged: {unchanged_docs}, chunks: {total_chunks}, pruned: {len(pruned)}"
         + (f", meta-refreshed: {meta_refreshed}" if meta_refreshed else "")
         + (f", beliefs: {beliefs_seen}" if beliefs_seen else "")
+        + (f", aliases: {aliased}" if aliased else "")
+        + (f", paths canonicalised: {canonicalised}" if canonicalised else "")
         + (f", identity-dupes collapsed: {len(deduped)}" if deduped else ""),
         fg="green",
     )
