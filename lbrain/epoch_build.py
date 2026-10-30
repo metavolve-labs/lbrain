@@ -171,20 +171,37 @@ def _connect_vec(db_path: Path) -> sqlite3.Connection:
     return con
 
 
+def _root_matcher(sources: list[str]):
+    """Longest-prefix mapping from a doc's abs_path to the CONFIGURED spelling of the source that
+    holds it, judged on REAL paths both sides (2026-10-30). Compared as bytes, a row stored through a
+    symlinked spelling fell outside every configured prefix: the publish line summed these per-root
+    inventories and said `docs: 871` while the table held 992. Keys stay the configured spelling
+    (the watermark digests and the deletion manifest are keyed by what config.toml says); matching
+    uses store._norm_path, the same rule the reachability guard applies."""
+    from .store import _norm_path
+    roots = sorted(((str(Path(s)), _norm_path(s)) for s in sources), key=lambda t: len(t[1]), reverse=True)
+
+    def match(ap: str) -> str | None:
+        apn = _norm_path(ap)
+        for key, rn in roots:
+            if apn == rn or apn.startswith(rn.rstrip("/") + "/"):
+                return key
+        return None
+    return match
+
+
 def _inventory(db_path: Path, sources: list[str]) -> dict[str, dict[str, str]]:
     """{source_root: {rel_path: doc_hash}} — docs mapped to their configured source
-    by longest-prefix match on abs_path."""
-    roots = sorted((str(Path(s)) for s in sources), key=len, reverse=True)
+    by longest-prefix match on the REAL abs_path (see _root_matcher)."""
+    match = _root_matcher(sources)
     inv: dict[str, dict[str, str]] = {str(Path(s)): {} for s in sources}
     con = sqlite3.connect(str(db_path))
     con.row_factory = sqlite3.Row
     try:
         for r in con.execute("SELECT rel_path, abs_path, doc_hash FROM docs"):
-            ap = r["abs_path"]
-            for root in roots:
-                if ap == root or ap.startswith(root.rstrip("/") + "/"):
-                    inv[root][r["rel_path"]] = r["doc_hash"]
-                    break
+            root = match(r["abs_path"])
+            if root is not None:
+                inv[root][r["rel_path"]] = r["doc_hash"]
     finally:
         con.close()
     return inv
@@ -195,15 +212,14 @@ def _inventory_abs(db_path: Path, sources: list[str]) -> dict[str, list[str]]:
     abs_path. A path is never rebuilt from root + rel_path (CSO PR #80 D1, 2026-10-16: in live epochs rel_path
     sometimes already carries the root's basename, 452 docs across five homes, so `root / rel` names a file
     that is not the doc and a marker anchored across the root boundary misses)."""
-    roots = sorted((str(Path(s)) for s in sources), key=len, reverse=True)
+    match = _root_matcher(sources)
     inv: dict[str, list[str]] = {str(Path(s)): [] for s in sources}
     con = sqlite3.connect(str(db_path))
     try:
         for (ap,) in con.execute("SELECT abs_path FROM docs"):
-            for root in roots:
-                if ap == root or ap.startswith(root.rstrip("/") + "/"):
-                    inv[root].append(ap)
-                    break
+            root = match(ap)
+            if root is not None:
+                inv[root].append(ap)
     finally:
         con.close()
     return inv
@@ -277,13 +293,14 @@ def _run_cli(args: list[str], staging_home: Path, lbrain_bin: str,
 
 def _purge_source(db_path: Path, src_root: str, embedding_dim: int) -> int:
     """Remove every doc under a CONFIRMED-removed source root, full cascade."""
-    from .store import Store
+    from .store import Store, _norm_path, _under_roots
 
     store = Store(Path(db_path), embedding_dim=embedding_dim)
     try:
+        roots = [_norm_path(src_root)]   # judged on real paths, like every other root test (2026-10-30)
         rels = [r["rel_path"] for r in store.db.execute(
             "SELECT rel_path, abs_path FROM docs")
-            if r["abs_path"] == src_root or r["abs_path"].startswith(src_root.rstrip("/") + "/")]
+            if _under_roots(r["abs_path"], roots)]
         with store.transaction():
             for rel in rels:
                 store.delete_doc_chunks(rel)
@@ -361,18 +378,22 @@ def validate_candidate(
         # pass (CSO probe P3 on the first fix, 2026-10-16). `build()` always supplies it.
         # Known limit (CSO P2): a root RENAMED in config maps its prior docs to no current root, so neither this
         # check nor the deletion manifest sees them go; the renamed-to root is judged as a first build.
+        # Counted as DISTINCT REAL PATHS, not rows (2026-10-30): a prior epoch that carried spelling twins
+        # (one row per symlinked spelling of the same file) would otherwise expect twice the files the root
+        # holds, and the very build that collapses the twins would read as a collapse of the root.
+        from .store import _norm_path as _real
         cand_inv = _inventory_abs(db_path, sources)
         for src in (str(Path(s)) for s in sources):
             if src in confirmed_removed:
                 continue  # removal asserted
             if prior_abs is not None:
-                prior_n = len(prior_abs.get(src, []))
-                expected_n = sum(1 for ap in prior_abs.get(src, []) if not is_excluded_path(Path(ap)))
+                prior_n = len({_real(ap) for ap in prior_abs.get(src, [])})
+                expected_n = len({_real(ap) for ap in prior_abs.get(src, []) if not is_excluded_path(Path(ap))})
             else:
                 prior_n = expected_n = len(prior_inv.get(src, {}))
             if not prior_n or not expected_n:
                 continue  # first build of this root, or every prior doc now excluded (an intended delist)
-            kept = len(cand_inv.get(src, []))
+            kept = len({_real(ap) for ap in cand_inv.get(src, [])})
             if kept < SOURCE_COLLAPSE_FLOOR * expected_n:
                 failures.append(
                     f"source-collapse: {src}: candidate holds {kept} docs vs {expected_n} expected from the "
@@ -931,7 +952,12 @@ def build(
                 "scan_end": scan_end,
                 "delta": bool(delta and prior_db is not None),
                 "prior_db": str(prior_db) if prior_db else None,
-                "docs": sum(len(d) for d in new_inv.values()),
+                # `docs` is the candidate's own `SELECT COUNT(*) FROM docs`: the number the published file was
+                # just verified against, and what `lbrain stats` will answer. The per-source sum is kept beside
+                # it; the two differ only when rows lie under no configured root (coverage_unscanned), never
+                # because of how a root was spelled (2026-10-30: `docs: 871` printed against a 992-row table).
+                "docs": staging_docs,
+                "docs_in_sources": sum(len(d) for d in new_inv.values()),
                 "source_digests": {s: _source_digest(d) for s, d in new_inv.items()},
                 "confirmed_removed": sorted(confirmed),
                 # what a `--wait-for-builder` follower must match before adopting this epoch
@@ -962,7 +988,8 @@ def build(
                 _v = "unknown"
             from .epoch import write_marker
             write_marker(home, eid, str(_v))
-            report.update({"published": True, "docs": sum(len(d) for d in new_inv.values()),
+            report.update({"published": True, "docs": staging_docs,
+                           "docs_in_sources": sum(len(d) for d in new_inv.values()),
                            "durability_caveat": caveat, "scan_start": scan_start,
                            "scan_end": scan_end})
             # prune runs INSIDE the lock (CSO R8): rmtree must never race a live

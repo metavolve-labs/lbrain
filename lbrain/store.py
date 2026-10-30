@@ -133,6 +133,14 @@ CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
 
 
 
+# Metadata key under which a doc records the OTHER spellings it was offered by (a symlinked
+# source root, a second root that contains the first). Identity is the realpath; the aliases
+# are provenance, kept so nothing a config said is lost (2026-10-30, Prism/workhorse report:
+# 121 docs indexed twice through `golden_codex_pipeline -> golden`). Not frontmatter: the
+# importer writes it, and doc_metadata_differs ignores it.
+PATH_ALIASES_KEY = "lbrain_path_aliases"
+
+
 def _norm_path(p) -> str:
     """realpath + normcase: on case-insensitive filesystems (DrvFs, APFS default) a root
     spelled in different case opens the same directory, and a byte comparison would call a
@@ -407,6 +415,12 @@ class Store:
 
         Returns (effective_rel_path, existing_doc_hash_or_None).
         """
+        # Identity is the REAL path (2026-10-30). A file offered through a symlinked root, or by
+        # two roots that overlap, must resolve to the one row that holds it; compared as the
+        # spelling the scan used, the second spelling read as a DIFFERENT live file and took a
+        # disambiguated key of its own (the twin rows Prism measured: 116-120 duplicate hashes).
+        # upsert_doc stores the same realpath, so the lookups below match what is stored.
+        abs_path = os.path.realpath(abs_path)
         # DD-01: prefer the row whose key MATCHES the freshly-computed rel_path,
         # and order the fallback — on a brain with historical duplicate-abs_path
         # twins, a bare fetchone() picks a row nondeterministically, which could
@@ -470,6 +484,10 @@ class Store:
             stored_meta = json.loads(row["metadata"] or "{}")
         except (ValueError, TypeError):
             stored_meta = {}
+        # The alias record is written by the importer, not parsed from the file, so a fresh
+        # parse never carries it; comparing it would read every aliased doc as META-changed
+        # on every import, forever (the A-401 counter would expose it, as it did the date case).
+        stored_meta.pop(PATH_ALIASES_KEY, None)
         # Compare against the SAME transform upsert_doc stores through. YAML
         # parses an unquoted `created: 2026-05-03` into a datetime.date, which is
         # stored as the string "2026-05-03" — so comparing a fresh parse to the
@@ -508,7 +526,10 @@ class Store:
             "evidence=excluded.evidence, claim_date=excluded.claim_date",
             (
                 doc.rel_path,
-                str(doc.path),
+                # abs_path is the REAL path, never the spelling the scan happened to use: one file,
+                # one row, however many roots or symlinks reach it (2026-10-30). The spelling is
+                # kept as an alias in metadata by record_path_aliases when it differs.
+                os.path.realpath(str(doc.path)),
                 doc.title,
                 doc.doc_hash,
                 doc.mtime,
@@ -531,6 +552,54 @@ class Store:
             self.db.execute("DELETE FROM vec_chunks WHERE rowid = ?", (cid,))
         self.db.execute("DELETE FROM fts_chunks WHERE rel_path = ?", (rel_path,))
         self.db.execute("DELETE FROM chunks WHERE rel_path = ?", (rel_path,))
+
+    def canonicalise_abs_paths(self) -> int:
+        """Rewrite every stored abs_path to its realpath (2026-10-30). Runs at the start of every
+        import, so a brain built before paths were canonical, or a symlink introduced after a
+        row was written, converges on the first scan: twin rows that differed only in spelling
+        become equal-abs_path twins, which is exactly the shape DD-01 (dedupe_identity) was
+        written to collapse. Nothing is deleted here. Returns the number of rows rewritten.
+
+        Every import pays one realpath per row; discover() already pays one resolve per file,
+        so this at most doubles a cost the scan already carries."""
+        n = 0
+        for r in self.db.execute("SELECT rel_path, abs_path FROM docs").fetchall():
+            rp = os.path.realpath(r["abs_path"])
+            if rp != r["abs_path"]:
+                self.db.execute("UPDATE docs SET abs_path = ? WHERE rel_path = ?", (rp, r["rel_path"]))
+                n += 1
+        return n
+
+    def record_path_aliases(self, aliases: dict, seen_rel_paths) -> int:
+        """Store, per doc the scan just saw, the OTHER spellings it was offered by (metadata key
+        PATH_ALIASES_KEY); drop the key from a seen doc that no longer has any. Only rows in
+        ``seen_rel_paths`` are touched, and a row is rewritten only when its alias set changed, so
+        a stable configuration costs one SELECT. Returns the number of rows rewritten."""
+        import json
+
+        seen = set(seen_rel_paths or ())
+        if not seen:
+            return 0
+        changed = 0
+        for r in self.db.execute("SELECT rel_path, metadata FROM docs").fetchall():
+            rel = r["rel_path"]
+            if rel not in seen:
+                continue
+            try:
+                meta = json.loads(r["metadata"] or "{}")
+            except (ValueError, TypeError):
+                meta = {}
+            want = sorted(set(aliases.get(rel, ())))
+            have = meta.get(PATH_ALIASES_KEY)
+            if (have or None) == (want or None):
+                continue
+            if want:
+                meta[PATH_ALIASES_KEY] = want
+            else:
+                meta.pop(PATH_ALIASES_KEY, None)
+            self.db.execute("UPDATE docs SET metadata = ? WHERE rel_path = ?", (json.dumps(meta), rel))
+            changed += 1
+        return changed
 
     def dedupe_identity(self, seen_rel_paths) -> list[tuple[str, str]]:
         """DD-01 (2026-08-31): collapse duplicate-abs_path doc rows onto the key
