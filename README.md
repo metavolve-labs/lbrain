@@ -276,7 +276,7 @@ surrounding records make it easy to use the wrong one?
 We profiled eight model architectures from seven organizations on the same near-domain retrieval
 task. Failure rates swung 1.3% / 35.7% / 16.7% depending only on how the records were structured —
 a 34.4-point absolute difference — while architecture explained roughly none of the variance, with
-identical failure ordering in 8 of 8 models. Changing models didn't remove the effect. Telling the
+identical failure ordering in 8 of 8 models. That pooled contrast rests on an effective n of about 14 trials per model (design effect about 10); the record-structure units are the three triads, so read the magnitude with that denominator; the full matrix is the preprint [10.5281/zenodo.22079083](https://doi.org/10.5281/zenodo.22079083). Changing models didn't remove the effect. Telling the
 model not to guess didn't either. So the fix belongs before generation, on the input side, and it
 has to be deterministic.
 
