@@ -148,3 +148,11 @@ which the previous code reads correctly (its reachability guard already resolved
 paths); it would simply start re-minting twins on the next import under an overlapping
 config. The previous epoch stays on disk as the rollback target under the usual
 `epoch prune` keep policy.
+
+## Known limit (CSO review 2026-10-30)
+
+Identity is the realpath STRING. On a case-insensitive mount (/mnt/c) the same directory offered as Golden/lairs and golden/lairs still yields two rows per file; prune leaves both because _under_roots is inode-aware. Not a regression. Next PR keys identity on (st_dev, st_ino).
+
+## Rollback note
+
+Reverting leaves the lbrain_path_aliases metadata key in place; origin/main's doc_metadata_differs reads it as META-changed on every import until one rebuild under the reverted code. Harmless, noisy; stated here so it is not read as corruption.
