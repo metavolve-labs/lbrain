@@ -111,9 +111,31 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       if [ -f "${m%.meta.json}.swept.json" ]; then swept=$((swept+1)); else staged=$((staged+1)); fi
     done
     if [ -n "$drift" ] || [ "$staged" -gt 0 ]; then
-      printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool)\n' \
+      # 2026-11-03 (CTO, measured on katana): with seven seats writing lairs all day every home is "drifted"
+      # almost always, so every seat rebuilt its brain on every beat it was due (19 full-corpus builds across
+      # five homes in one day, 18k files over the 9p mount each, three running at once at 21:17Z, load 17,
+      # Chamber panes dropping). Two brakes, both logged, both overridable by env:
+      #   1. a per-home floor between builds (LBRAIN_BUILD_MIN_SEC, default 3600) unless captures are staged;
+      #   2. one build at a time per box (flock on LBRAIN_BUILD_LOCK), the others defer to their next beat;
+      # and the build itself runs at the lowest CPU/IO priority so the desk and the seats keep their turn.
+      local floor="${LBRAIN_BUILD_MIN_SEC:-3600}" age
+      age=$(( $(date +%s) - $(stat -c %Y "$epoch_db" 2>/dev/null || echo 0) ))
+      if [ "$staged" -eq 0 ] && [ "$age" -lt "$floor" ]; then
+        printf '[%s] epoch home: drift seen but the current epoch is %ss old (floor %ss) — build deferred to a later beat\n' \
+          "$(date -Is)" "$age" "$floor" >>"$LOG" 2>&1
+        return 0
+      fi
+      local lockf="${LBRAIN_BUILD_LOCK:-/run/lock/lbrain-epoch-build.lock}"
+      exec 9>"$lockf" 2>/dev/null || exec 9>/tmp/lbrain-epoch-build.lock
+      if ! flock -n 9; then
+        printf '[%s] epoch home: %s; staged_captures=%s — another home is building on this box; deferred to a later beat\n' \
+          "$(date -Is)" "${drift:-no source drift}" "$staged" >>"$LOG" 2>&1
+        return 0
+      fi
+      printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool; box lock held, nice 19, idle io)\n' \
         "$(date -Is)" "${drift:-no source drift}" "$staged" "$swept" >>"$LOG" 2>&1
-      timeout 900 "$LB" epoch build >>"$LOG" 2>&1
+      nice -n 19 ionice -c 3 timeout 900 "$LB" epoch build >>"$LOG" 2>&1
+      flock -u 9
     else
       printf '[%s] epoch home: no source drift; staged_captures=0 swept=%s — no build\n' \
         "$(date -Is)" "$swept" >>"$LOG" 2>&1
