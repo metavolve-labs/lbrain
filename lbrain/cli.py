@@ -310,6 +310,47 @@ def doctor(as_json: bool):
 
     provenance = _build_provenance()
 
+    # --- MEASURED serving health (field findings 2026-10-12, docs/FIELD-FINDINGS-2026-10-12.md) ---
+    # Every row above says what is CONFIGURED. These three say what is MEASURED, because a gate
+    # that compared two numbers from the wrong file raised a false truncation alarm on every seat,
+    # a brain.db on a 9p mount served 6 to 10x slower, and mail outside the index read as "lost".
+    measured = []
+    try:
+        import os as _os
+        from .amp import core_block as _core_block
+        from .epoch import serving_db_path as _serving_db_path
+        _cm = str(getattr(cfg, "core_memory_path", "") or "")
+        _bud = int(getattr(cfg, "core_memory_chars", 0) or 0)
+        if _cm and _os.path.exists(_cm) and _bud:
+            _text = open(_cm, encoding="utf-8").read()
+            _lines = [ln for ln in _text.strip().splitlines() if ln.strip()]
+            _tail = _lines[-1].strip() if _lines else ""
+            _served = _core_block(_cm, _bud)
+            _ok = bool(_tail) and (_tail[:60] in _served)
+            measured.append({"check": "core_memory_tail_served", "ok": _ok, "chars": len(_text), "budget": _bud,
+                             "detail": "the last line of the core memory file is served" if _ok else
+                             "the last line of the core memory file is NOT served within core_memory_chars: raise it or trim the file"})
+        else:
+            measured.append({"check": "core_memory_tail_served", "ok": None, "detail": "no core memory file or budget configured"})
+        _db = _serving_db_path(cfg); _fs = "?"; _best = ""
+        try:
+            for _line in open("/proc/mounts", encoding="utf-8"):
+                _p = _line.split()
+                if len(_p) >= 3 and _db.startswith(_p[1]) and len(_p[1]) > len(_best):
+                    _best, _fs = _p[1], _p[2]
+        except OSError:
+            pass
+        _slow = _fs in ("9p", "drvfs", "cifs", "nfs", "fuse.sshfs")
+        measured.append({"check": "db_on_native_filesystem", "ok": (not _slow) if _fs != "?" else None, "fstype": _fs, "db": _db,
+                         "detail": (f"the database sits on a {_fs} mount; semantic retrieval measured 6 to 10x slower there than on ext4; "
+                                    "set db_path to a native filesystem (sources may stay where they are)") if _slow
+                                   else ("native filesystem" if _fs != "?" else "filesystem unknown")})
+        _markers = list(getattr(cfg, "exclude_path_markers", []) or [])
+        measured.append({"check": "exclusions_stated", "ok": True, "markers": _markers,
+                         "detail": "paths with these markers are not in the index by design; nothing found there is not a loss, find them by path or git log"})
+    except Exception as _e:  # the doctor never crashes on its own extra checks
+        measured.append({"check": "measured", "ok": None, "detail": f"unreadable: {_e}"})
+
     if as_json:
         click.echo(_json.dumps({
             "build": provenance,
@@ -322,6 +363,7 @@ def doctor(as_json: bool):
             "setup_drift": setup_drift,
             "captures_staged": captures_staged,
             "index_currency": currency.as_dict() if currency else None,
+            "measured": measured,
         }, indent=2, default=str))
     else:
         _b = provenance
@@ -474,6 +516,22 @@ def doctor(as_json: bool):
     # fault. Turning routine work into a red build is how a gate gets disabled.
     # A script that genuinely needs to gate on currency reads `is_current` from
     # `doctor --json`, which is exact and does not overload an existing contract.
+    if not as_json:
+        click.echo()
+        click.secho("measured (what the brain DOES, not what it is set to):", bold=True)
+        for _c in measured:
+            _mark = "OK " if _c.get("ok") else ("?? " if _c.get("ok") is None else "RED")
+            _extra = ""
+            if _c["check"] == "core_memory_tail_served" and _c.get("chars") is not None:
+                _extra = f" ({_c['chars']} chars, budget {_c.get('budget')})"
+            elif _c["check"] == "db_on_native_filesystem":
+                _extra = f" ({_c.get('fstype')}: {_c.get('db')})"
+            elif _c["check"] == "exclusions_stated":
+                _extra = " " + (", ".join(_c.get("markers") or []) or "(none)")
+            click.secho(f"  {_mark} {_c['check']}{_extra}: {_c['detail']}", fg=("red" if _mark == "RED" else None))
+    # A measured core-memory truncation IS a serving fault today (the tail of doctrine is what gets cut), so it fails the gate.
+    if any(_c.get("check") == "core_memory_tail_served" and _c.get("ok") is False for _c in measured):
+        raise SystemExit(1)
     if isinstance(drift, str) and drift not in ("match", "unset"):
         raise SystemExit(1)
 
