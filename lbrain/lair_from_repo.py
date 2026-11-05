@@ -273,6 +273,17 @@ def build_prompt(facts: dict, fixed: dict, template: str) -> tuple[str, str]:
     return system, user
 
 
+def _gemini_generation_config(model: str, **params) -> dict:
+    """Sampling parameters only for Gemini 2.x. Google's 2026-10 deprecation notice:
+    upcoming models refuse ``temperature`` / ``top_p`` / ``top_k`` / ``thinking_budget``
+    (a 400, not a warning). Return ``{}`` for gemini-3 and later so a model bump
+    cannot break the call; keep the knobs on 2.x where they still apply."""
+    m = re.search(r"gemini-(\d+)", model or "")
+    if m and int(m.group(1)) >= 3:
+        return {}
+    return dict(params)
+
+
 def generate_lair(cfg: Config, system: str, user: str, model: str) -> str:
     """Stage 3 — Gemini fill (LBrain is Gemini-native)."""
     key = cfg.gemini_api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GEMINI_3_API_KEY", "")
@@ -285,7 +296,7 @@ def generate_lair(cfg: Config, system: str, user: str, model: str) -> str:
             json={
                 "systemInstruction": {"parts": [{"text": system}]},
                 "contents": [{"role": "user", "parts": [{"text": user}]}],
-                "generationConfig": {"temperature": 0.3},
+                "generationConfig": _gemini_generation_config(model, temperature=0.3),
             },
         )
         r.raise_for_status()
