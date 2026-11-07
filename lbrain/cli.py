@@ -2560,12 +2560,15 @@ def prune_unreachable_cmd(yes, force):
 @click.option("--max-bytes", default=None, type=int, help="Byte cap across retained epochs.")
 @click.option("--no-sweep", "no_sweep", is_flag=True,
               help="Leave capture-staging/ untouched (default: staged captures are archived into the new epoch; increment 2).")
+@click.option("--rebase-source", "rebase_source", multiple=True, metavar="OLD=NEW",
+              help="Repeatable. A source root MOVED: rewrite stored abs paths OLD->NEW in the staging snapshot "
+                   "before import, so no doc is re-keyed; gated (no row left under OLD, none re-keyed, 0 unscanned).")
 @click.option("--wait-for-builder", "wait_for_builder", type=float, default=None, metavar="SECONDS",
               help="If a LIVE builder holds the lock, wait up to SECONDS for it instead of failing. When it "
                    "publishes an epoch whose scan began after this command started, exit 0 on that epoch "
                    "without a second build; otherwise build. A stale lock is taken over as without the flag.")
 def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_delist, keep, max_bytes, no_sweep,
-                    wait_for_builder):
+                    wait_for_builder, rebase_source):
     """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
     import time as _time
 
@@ -2583,6 +2586,12 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
               prune_unreachable=prune_unreachable, confirm_delist=confirm_delist,
               keep=keep, max_bytes=max_bytes, sweep=not no_sweep,
               config_sha=sha_before if sha_before == sha_after else UNSTABLE_CONFIG)
+    if rebase_source:
+        pairs = [tuple(str(Path(x).expanduser()) for x in r.split("=", 1)) for r in rebase_source if "=" in r]
+        if len(pairs) != len(rebase_source) or wait_for_builder is not None:
+            click.secho("✗ --rebase-source takes OLD=NEW and cannot be combined with --wait-for-builder", fg="red")
+            sys.exit(2)
+        kw["rebase_source"] = tuple(pairs)
     try:
         if wait_for_builder is None:
             report = build(CONFIG_DIR, cfg, **kw)
