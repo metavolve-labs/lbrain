@@ -87,6 +87,18 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
     # Drift check against the brain's OWN configured sources (WATCH_DIRS is the
     # read-delta list and may not match); mtime-only heuristic — the epoch gate
     # stays the authority on what actually lands.
+    # Home-scoped source mirror (2026-11-07): a home that scans 9p sources from a Linux-native copy lists
+    # `<src>  <dst>` pairs in $LBHOME/source-mirror.conf; synced here, before the drift check, only when the build floor allows a build (a deferred beat walks no 9p). No file, no-op.
+    if [ -f "$LBHOME/source-mirror.conf" ] && [ $(( $(date +%s) - $(stat -c %Y "$epoch_db" 2>/dev/null || echo 0) )) -ge "${LBRAIN_BUILD_MIN_SEC:-3600}" ]; then
+      local msrc mdst mt0 mrc
+      while read -r msrc mdst; do
+        case "$msrc" in ''|'#'*) continue ;; esac
+        mt0=$(date +%s%N)
+        timeout 600 rsync -a --delete --exclude='.git' "$msrc/" "$mdst/" >>"$LOG" 2>&1; mrc=$?
+        printf '[%s] source-mirror: %s -> %s rc=%s %sms\n' "$(date -Is)" "$msrc" "$mdst" "$mrc" \
+          "$(( ($(date +%s%N) - mt0) / 1000000 ))" >>"$LOG" 2>&1
+      done <"$LBHOME/source-mirror.conf"
+    fi
     local -a src_dirs=()
     mapfile -t src_dirs < <(sed -n '/^sources = \[/,/^\]/p' "$LBHOME/config.toml" 2>/dev/null | grep -o '"[^"]*"' | tr -d '"')
     [ "${#src_dirs[@]}" -eq 0 ] && src_dirs=("${WATCH_DIRS[@]}")
@@ -134,7 +146,7 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       fi
       printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool; box lock held, nice 19, idle io)\n' \
         "$(date -Is)" "${drift:-no source drift}" "$staged" "$swept" >>"$LOG" 2>&1
-      nice -n 19 ionice -c 3 timeout 900 "$LB" epoch build >>"$LOG" 2>&1
+      nice -n 19 ionice -c 3 timeout 1800 "$LB" epoch build >>"$LOG" 2>&1
       flock -u 9
     else
       printf '[%s] epoch home: no source drift; staged_captures=0 swept=%s — no build\n' \

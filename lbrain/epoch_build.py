@@ -315,6 +315,39 @@ def _purge_source(db_path: Path, src_root: str, embedding_dim: int) -> int:
 
 # ---------- gate v2 ----------
 
+def _rebase_sources(db_path: Path, pairs: list[tuple[str, str]]) -> dict[str, list[int]]:
+    """`--rebase-source OLD=NEW`: rewrite stored absolute paths by exact prefix in the STAGING snapshot, one
+    transaction, before the import. Identity (rel_path) never changes, so the import finds every row by its
+    new abs_path and nothing is re-keyed or re-imported (a renamed root otherwise collides: the old file still
+    exists, so resolve_rel_path disambiguates every doc as `<src_name>/<rel_path>`). Path fields only:
+    docs.abs_path and the metadata path-alias list; document text that quotes a path is content, untouched."""
+    from .store import PATH_ALIASES_KEY
+    counts: dict[str, list[int]] = {}
+    con = sqlite3.connect(str(db_path))
+    try:
+        with con:
+            for old, new in pairs:
+                n = con.execute("UPDATE docs SET abs_path = ? || substr(abs_path, ?) WHERE abs_path = ? OR "
+                                "substr(abs_path, 1, ?) = ?", (new, len(old) + 1, old, len(old) + 1, old + "/")).rowcount
+                m = 0
+                for rel, meta in con.execute("SELECT rel_path, metadata FROM docs WHERE instr(metadata, ?) > 0",
+                                             (old,)).fetchall():
+                    d = json.loads(meta or "{}")
+                    al = d.get(PATH_ALIASES_KEY)
+                    if not isinstance(al, list):
+                        continue
+                    na = [new + a[len(old):] if isinstance(a, str) and (a == old or a.startswith(old + "/")) else a
+                          for a in al]
+                    if na != al:
+                        d[PATH_ALIASES_KEY] = na
+                        con.execute("UPDATE docs SET metadata = ? WHERE rel_path = ?", (json.dumps(d), rel))
+                        m += 1
+                counts[old] = [n, m]
+    finally:
+        con.close()
+    return counts
+
+
 def validate_candidate(
     db_path: Path,
     *,
@@ -740,6 +773,7 @@ def build(
     scratch: Path | None = None,
     sweep: bool = True,
     config_sha: str | None = None,
+    rebase_source: tuple[tuple[str, str], ...] = (),
 ) -> dict:
     """Build → validate → swap. Returns a report dict; raises EpochError with the
     staging retained as .failed forensics on any gate refusal.
@@ -794,6 +828,21 @@ def build(
 
             if delta and prior_db is not None:
                 _sqlite_snapshot(prior_db, staging_db)  # byte-copy, never hardlink (D1)
+            rebase_map: dict[str, str] = {}
+            if rebase_source:
+                if not (delta and prior_db is not None):
+                    raise EpochError("--rebase-source needs a delta build on a prior epoch (not --full)")
+                report["rebased"] = _rebase_sources(staging_db, list(rebase_source))
+                print(f"[lbrain] epoch build: rebase-source rows rewritten (abs_path, aliases): {report['rebased']}")
+                # the gates judge the candidate against the REBASED prior: the renamed-to root is not a first build
+                prior_inv = _inventory(staging_db, sources)
+                prior_abs = _inventory_abs(staging_db, sources)
+                rcon = sqlite3.connect(str(staging_db))
+                try:
+                    rebase_map = dict(rcon.execute("SELECT abs_path, rel_path FROM docs").fetchall())
+                    rebase_prior_docs = rcon.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+                finally:
+                    rcon.close()
 
             # staging home config = the home's, with db_path repointed
             raw_bytes = (home / "config.toml").read_bytes()
@@ -869,6 +918,26 @@ def build(
             failures = validate_candidate(
                 staging_db, embedding_dim=cfg.embedding_dim, sources=sources,
                 prior_inv=prior_inv, confirmed_removed=confirmed, prior_abs=prior_abs)
+            if rebase_source:
+                gcon = sqlite3.connect(str(staging_db))
+                try:
+                    cand = gcon.execute("SELECT abs_path, rel_path FROM docs").fetchall()
+                finally:
+                    gcon.close()
+                left = sum(1 for ap, _ in cand for old, _n in rebase_source if ap == old or ap.startswith(old + "/"))
+                rekeyed = sum(1 for ap, rel in cand if ap in rebase_map and rebase_map[ap] != rel)
+                unscanned = _unscanned_count(staging_db, sources)
+                print(f"[lbrain] epoch build: rebase gate: docs {rebase_prior_docs} -> {len(cand)}, "
+                      f"left under OLD {left}, re-keyed {rekeyed}, unscanned {unscanned}")
+                if left:
+                    failures.append(f"rebase: {left} doc(s) still stored under an OLD prefix")
+                if rekeyed:
+                    failures.append(f"rebase: {rekeyed} doc(s) re-keyed (identity changed)")
+                if unscanned:
+                    failures.append(f"rebase: coverage_unscanned {unscanned} != 0")
+                if len(cand) != rebase_prior_docs and os.environ.get("LBRAIN_REBASE_ALLOW_DOC_DELTA") != "1":
+                    failures.append(f"rebase: doc count {len(cand)} != prior {rebase_prior_docs} "
+                                    "(set LBRAIN_REBASE_ALLOW_DOC_DELTA=1 only for genuine source edits)")
             if failures:
                 fdir = failed_dir(home, eid)
                 fdir.parent.mkdir(parents=True, exist_ok=True)
