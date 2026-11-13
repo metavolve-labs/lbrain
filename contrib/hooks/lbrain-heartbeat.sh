@@ -137,11 +137,28 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
           "$(date -Is)" "$age" "$floor" >>"$LOG" 2>&1
         return 0
       fi
-      local lockf="${LBRAIN_BUILD_LOCK:-/run/lock/lbrain-epoch-build.lock}"
-      exec 9>"$lockf" 2>/dev/null || exec 9>/tmp/lbrain-epoch-build.lock
+      # 2026-11-13 (workhorse hand, measured): the box lock lived in a sticky world-writable directory (/run/lock, /tmp), so
+      # under fs.protected_regular=2 only the user who first created it could open it. The second `exec` also failed
+      # silently, flock got a closed fd, and the beat logged "another home is building" every hour: two brains sat
+      # frozen for nine days behind a message that named the wrong cause. Now: the lock lives by preference in a
+      # non-sticky shared directory (/run/lbrain, tmpfiles.d `d /run/lbrain 2770 root cell -`); the old paths stay as
+      # fallbacks; "cannot open" is told apart from "held"; and a home that can open no shared lock builds under a
+      # per-user lock and says so loudly on every beat, so the misconfiguration is visible instead of a frozen brain.
+      local lockf="" cand lock_open=0
+      for cand in "${LBRAIN_BUILD_LOCK:-}" /run/lbrain/epoch-build.lock /run/lock/lbrain-epoch-build.lock /tmp/lbrain-epoch-build.lock; do
+        [ -n "$cand" ] || continue
+        if exec 9>"$cand" 2>/dev/null; then lockf="$cand"; lock_open=1; break; fi
+      done
+      if [ "$lock_open" -eq 0 ]; then
+        lockf="/tmp/lbrain-epoch-build.$(id -u).lock"
+        exec 9>"$lockf" 2>/dev/null || { printf '[%s] epoch home: LOCK-UNOPENABLE and no per-user fallback either (%s) — no build this beat\n' \
+          "$(date -Is)" "$lockf" >>"$LOG" 2>&1; return 0; }
+        printf '[%s] epoch home: LOCK-UNOPENABLE: no shared box lock can be opened by uid %s (tried %s /run/lbrain /run/lock /tmp; fs.protected_regular?) — building under the PER-USER lock %s; install the shared directory: tmpfiles.d "d /run/lbrain 2770 root cell -"\n' \
+          "$(date -Is)" "$(id -u)" "${LBRAIN_BUILD_LOCK:-<unset>}" "$lockf" >>"$LOG" 2>&1
+      fi
       if ! flock -n 9; then
-        printf '[%s] epoch home: %s; staged_captures=%s — another home is building on this box; deferred to a later beat\n' \
-          "$(date -Is)" "${drift:-no source drift}" "$staged" >>"$LOG" 2>&1
+        printf '[%s] epoch home: %s; staged_captures=%s — another home is building on this box (lock %s held); deferred to a later beat\n' \
+          "$(date -Is)" "${drift:-no source drift}" "$staged" "$lockf" >>"$LOG" 2>&1
         return 0
       fi
       printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool; box lock held, nice 19, idle io)\n' \
