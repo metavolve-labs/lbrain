@@ -207,8 +207,8 @@ silently opens the default `~/.lbrain` and answers from the wrong memory. Measur
 agent's server reported the first agent's identity. Check with the `lair_whoami` tool after connecting;
 for Codex, give the `[mcp_servers.lbrain]` table an `env = { LBRAIN_HOME = "/path/to/that/brain" }` line.
 
-Five tools over MCP: semantic recall, exact-phrase search, a save-worthiness check, an action check
-against your recorded corrections, and corpus statistics. Everything also works from the shell —
+Six tools over MCP (seven with `lbrain[archive]`, which adds `lair_deep_recall`): semantic recall, exact-phrase search, a save-worthiness check, an action check
+against your recorded corrections, corpus statistics, and the seat identity (`lair_whoami`). Everything also works from the shell —
 `lbrain query`, `search`, `import`, `doctor`.
 
 ### Terminal presentation

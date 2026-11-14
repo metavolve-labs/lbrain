@@ -171,7 +171,13 @@ class LocalEmbedClient:
             model = self.DEFAULT_MODEL
         self.model = model
         self.dim = dim
-        self._enc = TextEmbedding(model_name=model)
+        # 2026-11-14 (outsider path, Sostra item 3): fastembed's default cache is /tmp/fastembed_cache, which a reboot
+        # empties, so the "fetched once, never again" promise broke. The model lives under the brain home.
+        home = os.environ.get("LBRAIN_HOME") or os.path.join(os.path.expanduser("~"), ".lbrain")
+        cache_dir = os.environ.get("LBRAIN_MODEL_CACHE") or os.path.join(home, "models")
+        os.makedirs(cache_dir, exist_ok=True)
+        self.cache_dir = cache_dir
+        self._enc = TextEmbedding(model_name=model, cache_dir=cache_dir)
 
     def embed(self, texts: list[str], batch_size: int = 64) -> list[bytes]:
         out: list[bytes] = []

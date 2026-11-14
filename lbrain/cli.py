@@ -53,8 +53,14 @@ class _LBrainGroup(click.Group):
 
 @click.group(cls=_LBrainGroup)
 @click.version_option(__version__, prog_name="lbrain")
-def main():
+@click.pass_context
+def main(ctx):
     """LBrain by Metavolve Labs — AI-native engineering memory with the Lair Protocol."""
+    # 2026-11-14 (outsider path, Sostra item 4): an ambient LBRAIN_HOME silently answered from another brain. Every
+    # command names the home it resolved to, on stderr, except the stdio MCP server (its stdout/stderr are the protocol).
+    if ctx.invoked_subcommand not in ("mcp", None) and not os.environ.get("LBRAIN_QUIET_HOME"):
+        src = "from LBRAIN_HOME" if os.environ.get("LBRAIN_HOME") else "default"
+        click.echo(f"home: {os.environ.get('LBRAIN_HOME') or os.path.join(os.path.expanduser('~'), '.lbrain')} ({src})", err=True)
 
 
 # Settings whose value silently changes system behavior and which are therefore
@@ -498,7 +504,7 @@ def _confirm_local_model(assume_yes: bool) -> bool:
     click.echo(
         "    It is the only network call this path makes. After it, embedding is\n"
         "    fully offline and your documents never leave this machine.\n"
-        "    Cached at ~/.cache/huggingface — fetched once, never again.\n"
+        "    Cached under <LBRAIN_HOME>/models (default ~/.lbrain/models) — fetched once, never again.\n"
     )
     click.echo("    Prefer not to? Use a hosted provider instead (your key, your billing):")
     click.echo("      lbrain init --gemini-key <KEY> --source ./docs\n")

@@ -21,6 +21,9 @@ dependencies = [
     "click>=8.1,<9",
     "tiktoken>=0.7,<1",
     "mcp>=1.0,<2",
+    # 2026-11-14 (outsider path, Sostra item 1): the obvious `pip install lbrain` must answer its first query.
+    # On-device embeddings (ONNX, 65 MB model, no key) are part of the default install; `[local]` stays as a name.
+    "fastembed>=0.3,<1",
     "tomli>=2.0,<3; python_version < '3.11'",
 ]
 

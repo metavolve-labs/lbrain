@@ -87,6 +87,13 @@ if "$LBRAIN_BIN" capture --help >/dev/null 2>&1; then
       --from-file "$TRANSCRIPT" \
       --session-id "$SESSION" \
       --quiet >>"$LOG" 2>&1
+  crc=$?
+  if [ "$crc" -ne 0 ]; then
+    # 2026-11-14 (M-260, Sostra item 5): the hook stays fail-safe (exit 0) but never silent: a capture that did not land
+    # (no archive passphrase = exit 3, a refused write, a timeout = 124) is written to the refusals log outside the home.
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) NOT CAPTURED rc=$crc home=${LBRAIN_HOME:-$HOME/.lbrain} session=${SESSION:-unknown} (rc 3 = no LBRAIN_ARCHIVE_PASSPHRASE in <home>/env; see capture.log)" \
+      >>"$HOME/.lbrain-capture-refusals.log" 2>/dev/null
+  fi
 else
   # Public CLI has no `capture`. Bounded excerpt + import so the successor can search.
   DUMP="${LBRAIN_HOME:-$HOME/.lbrain}/compaction-watcher/${SESSION:-unknown}.precompact-chat.md"
