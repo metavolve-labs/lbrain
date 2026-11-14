@@ -1209,6 +1209,9 @@ def embed(stale: bool, batch: int, reuse_from):
     # embed is the last step init's epilogue names — the exact moment a
     # setup-driving agent decides it is finished. Catch it here too.
     _onboarding_nudge()
+    # 2026-11-14 (outsider path, Sostra's re-run): the nudge pushed the result out of the tail, so a stranger reading the
+    # last lines could not tell it had worked. The result is the LAST line.
+    click.secho(f"✓ embed done: {len(pending)} chunks embedded (model {cfg.embedding_model}); try: lbrain query \"<question>\"", fg="green")
 
 
 @main.command()
