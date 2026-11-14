@@ -404,11 +404,20 @@ def render_transcript_jsonl(text: str, *, cap: int = 1_000_000) -> str | None:
     session renders to ~390 KB of turns and snapshots to ~100 KB) and says so.
     Why: after increment 2 the swept sessions answered `lbrain recall` with their first JSON line, because the extractive
     snapshot's "headings and lead lines" were braces."""
+    # Renderer chain (2026-11-13/14, Sostra's integration packages): each harness-specific renderer requires that
+    # harness's own session header on row 0 and returns None otherwise, so the order is a fall-through, not a priority.
     try:
         from .gemini_transcript import render_gemini_transcript_jsonl
         gemini = render_gemini_transcript_jsonl(text, cap=cap)
         if gemini is not None:
             return gemini
+    except ImportError:
+        pass
+    try:
+        from .codex_transcript import render_codex_transcript_jsonl
+        codex = render_codex_transcript_jsonl(text, cap=cap)
+        if codex is not None:
+            return codex
     except ImportError:
         pass
     lines = [ln for ln in text.splitlines() if ln.strip()]
