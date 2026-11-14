@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,8 +76,10 @@ class SpoolResult:
 
 def _write_then_rename(target: Path, data: bytes) -> None:
     """tmp + fsync + rename: a crash strands a ``.tmp``, never a partial file."""
-    tmp = target.with_name(target.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # Per-process temp name (2026-11-14): two concurrent captures of the same payload (a hook wired twice, Prism's seat on
+    # the workhorse) raced on one fixed `<target>.tmp`; the second rename found it gone (FileNotFoundError, five times).
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -88,7 +91,14 @@ def _write_then_rename(target: Path, data: bytes) -> None:
         except OSError:
             pass
         raise
-    os.replace(tmp, target)
+    try:
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink()      # a failed rename leaves no debris under the unique name (the retry writes its own)
+        except OSError:
+            pass
+        raise
 
 
 def spool_capture(cfg, home: Path, payload: bytes, *, session_id: str | None,
