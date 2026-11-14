@@ -147,6 +147,7 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       local lockf="" cand lock_open=0
       for cand in "${LBRAIN_BUILD_LOCK:-}" /run/lbrain/epoch-build.lock /run/lock/lbrain-epoch-build.lock /tmp/lbrain-epoch-build.lock; do
         [ -n "$cand" ] || continue
+        { [ -w "$cand" ] || { [ ! -e "$cand" ] && [ -w "$(dirname "$cand")" ]; }; } || continue   # a failed exec redirect still prints; test first
         if exec 9>"$cand" 2>/dev/null; then lockf="$cand"; lock_open=1; break; fi
       done
       if [ "$lock_open" -eq 0 ]; then
