@@ -175,6 +175,15 @@ class LocalEmbedClient:
         # empties, so the "fetched once, never again" promise broke. The model lives under the brain home.
         home = os.environ.get("LBRAIN_HOME") or os.path.join(os.path.expanduser("~"), ".lbrain")
         cache_dir = os.environ.get("LBRAIN_MODEL_CACHE") or os.path.join(home, "models")
+        # 2026-11-15 (M: the LCB Claude smoke died at `lbrain embed` in a FRESH home with no network fetch): a home whose
+        # models/ holds nothing falls back to a cache that already has the model (fastembed's legacy /tmp/fastembed_cache,
+        # or the default home's models/) instead of failing. An explicit LBRAIN_MODEL_CACHE is never overridden.
+        home_cache_empty = not (os.path.isdir(cache_dir) and os.listdir(cache_dir))
+        if not os.environ.get("LBRAIN_MODEL_CACHE") and home_cache_empty:
+            for legacy in (os.path.join(os.path.expanduser("~"), ".lbrain", "models"), "/tmp/fastembed_cache"):
+                if os.path.isdir(legacy) and os.listdir(legacy):
+                    cache_dir = legacy
+                    break
         os.makedirs(cache_dir, exist_ok=True)
         self.cache_dir = cache_dir
         self._enc = TextEmbedding(model_name=model, cache_dir=cache_dir)
