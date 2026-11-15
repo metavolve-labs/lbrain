@@ -64,11 +64,16 @@ class Identity:
         return cls(**{k: v for k, v in raw.items() if k in known})
 
     def save(self) -> None:
+        existed = CONFIG_DIR.is_dir()
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            CONFIG_DIR.chmod(0o700)
-        except OSError:
-            pass
+        if not existed:
+            # A home this call just made is private from the start. An EXISTING home keeps the mode and the
+            # POSIX ACL mask its owner set: chmod rewrites the ACL mask and locked shared-home seats out of their
+            # own brain on the workhorse (Farrier, 2026-11-15). The identity file itself is always 0600 below.
+            try:
+                CONFIG_DIR.chmod(0o700)
+            except OSError:
+                pass
         body = json.dumps(asdict(self), indent=2).encode("utf-8")
         tmp = IDENTITY_PATH.with_name(IDENTITY_PATH.name + ".tmp")
         # Private from the moment it exists — this record holds a key reference.
