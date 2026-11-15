@@ -180,9 +180,16 @@ class LocalEmbedClient:
         # or the default home's models/) instead of failing. An explicit LBRAIN_MODEL_CACHE is never overridden.
         home_cache_empty = not (os.path.isdir(cache_dir) and os.listdir(cache_dir))
         if not os.environ.get("LBRAIN_MODEL_CACHE") and home_cache_empty:
+            # Seed the home from a cache that already holds the model (copy, never point at it): the home stays
+            # self-sufficient, `init`'s "cached under <home>/models" stays true, and deleting the shared /tmp copy
+            # later (as the outsider guide tells 0.1.10 users to) breaks nothing. (Sostra, 2026-11-15T09:27Z.)
+            import shutil
             for legacy in (os.path.join(os.path.expanduser("~"), ".lbrain", "models"), "/tmp/fastembed_cache"):
-                if os.path.isdir(legacy) and os.listdir(legacy):
-                    cache_dir = legacy
+                if os.path.isdir(legacy) and os.listdir(legacy) and os.path.realpath(legacy) != os.path.realpath(cache_dir):
+                    try:
+                        shutil.copytree(legacy, cache_dir, dirs_exist_ok=True)
+                    except OSError:
+                        cache_dir = legacy  # copy refused (space, perms): use the legacy copy rather than fail
                     break
         os.makedirs(cache_dir, exist_ok=True)
         self.cache_dir = cache_dir
