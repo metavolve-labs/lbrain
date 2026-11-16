@@ -1173,10 +1173,24 @@ def _fts_query(q: str) -> str:
     """
     import re
 
+    # FX-031 (2026-11-16): a register id such as C-003, M-260, FX-137 or A-562 is a compound word.
+    # unicode61 splits it into tokens, and the old filter then DROPPED the one-letter half
+    # ("C", "M", "A"), so a search for "C-003" became a search for "003" and returned the wrong
+    # rows first. Every whitespace word that unicode61 would split (hyphens, dots, slashes) is
+    # now also emitted as its own quoted phrase, one-letter parts kept, so the compound matches
+    # exactly; the single tokens stay OR'd for recall.
+    words = q.split()
+    compounds = []
+    for w in words:
+        subs = re.findall(r"[A-Za-z0-9_]+", w)
+        if len(subs) > 1:
+            compounds.append('"' + " ".join(subs) + '"')
     toks = [t for t in re.findall(r"[A-Za-z0-9_]+", q) if len(t) > 1]
-    if not toks:
+    if not toks and not compounds:
         return ""
     terms = [f'"{t}"' for t in toks]
     if 2 <= len(toks) <= 6:
         terms.insert(0, '"' + " ".join(toks) + '"')
+    # compounds first: an exact register id outranks its scattered parts
+    terms = compounds + [t for t in terms if t not in compounds]
     return " OR ".join(terms)
