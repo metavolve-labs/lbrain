@@ -949,6 +949,10 @@ def build(
             scan_end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
             volatile_roots = {str(Path(v).expanduser()) for v in (getattr(cfg, "volatile_sources", []) or [])}
+            _unknown_volatile = sorted(volatile_roots - {str(Path(x)) for x in sources})
+            if _unknown_volatile:  # CSO follow-on 2026-11-17: a typo or a parent dir here must not pass silently
+                print("[lbrain] WARNING: volatile_sources names roots that are not configured sources (ignored): "
+                      + ", ".join(_unknown_volatile), file=sys.stderr)
             failures = validate_candidate(
                 staging_db, embedding_dim=cfg.embedding_dim, sources=sources,
                 prior_inv=prior_inv, confirmed_removed=confirmed, prior_abs=prior_abs, volatile=volatile_roots)
