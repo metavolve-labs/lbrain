@@ -375,6 +375,7 @@ def describe(cfg, stats: dict | None = None, counts_error: str = "") -> dict:
         "brain": {
             "db": _serving_db(cfg),
             "sources": [str(s) for s in getattr(cfg, "sources", [])],
+            "volatile_sources": [str(s) for s in (getattr(cfg, "volatile_sources", []) or [])],  # guard exemptions, visible (CSO 2026-11-17)
             "docs": (stats or {}).get("docs"),
             "chunks": (stats or {}).get("chunks"),
             "embedded": (stats or {}).get("embedded"),

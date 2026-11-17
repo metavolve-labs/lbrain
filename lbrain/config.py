@@ -251,6 +251,10 @@ class Config:
     # Empty by default — an exclusion that ships as a default is an ambient default.
     # Applied at discover() for import, currency AND the epoch deletion manifest.
     exclude_path_markers: list[str] = field(default_factory=list)
+    # 2026-11-17 (CTO, FX: CCO epochs refused since 11-17T00:53Z): roots whose document count may legitimately fall
+    # toward zero between builds (a mail INBOX drains as mail is claimed). The epoch gate's source-collapse check
+    # skips these roots with a note instead of refusing promotion. Default empty: every other root is still guarded.
+    volatile_sources: list[str] = field(default_factory=list)
     # Transcripts `capture-orphans` must NEVER stage, whatever their mtime: an exact session id, or (an entry
     # containing "/") a substring of the transcript's path. Empty by default. An exclusion is a decision
     # recorded by name, never a side effect of a timestamp (CSO, PR #84 review).
@@ -376,6 +380,7 @@ class Config:
             allowed_doc_types=list(raw.get("allowed_doc_types", []) or []),
             allowed_path_prefixes=list(raw.get("allowed_path_prefixes", []) or []),
             exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
+            volatile_sources=list(raw.get("volatile_sources", []) or []),
             capture_keep_out=list(raw.get("capture_keep_out", []) or []),
             retired_marker_scope=raw.get("retired_marker_scope", cls.retired_marker_scope),
             banner_retirement=raw.get("banner_retirement", cls.banner_retirement) is True,

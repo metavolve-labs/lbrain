@@ -64,6 +64,9 @@ from .index import discover, is_excluded_path, source_root_present
 # gate v2 source-collapse floor: a candidate keeping fewer than this fraction of a root's expected docs
 # (prior epoch minus intended exclusions) is refused. Same 50% line as the prune guards.
 SOURCE_COLLAPSE_FLOOR = 0.5
+# 2026-11-17 (CSO condition 2): a root declared volatile (drainable, e.g. an inbox) may hold at most this share
+# of the prior epoch's documents; the CCO's inbox was 13 of ~3,400 (0.4%). 5% is twelve times that.
+VOLATILE_MAX_SHARE = 0.05
 
 
 # ---------- helpers ----------
@@ -356,9 +359,30 @@ def validate_candidate(
     prior_inv: dict[str, dict[str, str]],
     confirmed_removed: set[str],
     prior_abs: dict[str, list[str]] | None = None,
+    volatile: frozenset[str] | set[str] = frozenset(),
 ) -> list[str]:
-    """Every failure is a string naming what refused and why. Empty list = pass."""
+    """Every failure is a string naming what refused and why. Empty list = pass.
+
+    `volatile` (2026-11-17, CSO conditions 11:02Z): roots the config declares drainable (an inbox). The hollow-root
+    and source-collapse checks SKIP them with a note, but (1) a volatile root may not hold more than
+    VOLATILE_MAX_SHARE of the prior epoch's documents (an exemption that could hide a real collapse is refused),
+    (2) every configured source may not be volatile, and (3) per-root checks on the other roots are untouched:
+    they never counted a volatile root's documents in the first place. The caller passes the set; this function
+    reads no config (Config.load() has a global side effect on the exclude markers, which broke two tests when the
+    first draft called it here)."""
     failures: list[str] = []
+    volatile = {str(Path(v)) for v in volatile}
+    if volatile:
+        if volatile >= {str(Path(s)) for s in sources}:
+            failures.append("volatile_sources: every configured source is listed volatile — the guards would guard "
+                            "nothing; refuse (list only the drainable roots, an inbox)")
+        total_prior = sum(len(d) for d in prior_inv.values())
+        for v in volatile:
+            held = len(prior_inv.get(v, {}))
+            if total_prior and held > VOLATILE_MAX_SHARE * total_prior:
+                failures.append(f"volatile_sources: {v} held {held} of {total_prior} prior docs "
+                                f"({held / total_prior:.1%}), above the {VOLATILE_MAX_SHARE:.0%} share a volatile root may "
+                                "have; an exemption that large could hide a real collapse; refuse")
     con = _connect_vec(db_path)
     try:
         ok = con.execute("PRAGMA integrity_check").fetchone()[0]
@@ -379,6 +403,7 @@ def validate_candidate(
         # which would make a db-diff check read "no deletions" while the corpus is
         # gone — mass-absence hidden by its own safety net. The test that found
         # this: test_vanished_source_root_refuses_without_confirmation.
+        _volatile = volatile
         for src in (str(Path(s)) for s in sources):
             prior_docs = prior_inv.get(src, {})
             if not prior_docs or src in confirmed_removed:
@@ -392,6 +417,9 @@ def validate_candidate(
                     f"deletion-manifest: source root {src} VANISHED while the prior epoch "
                     f"held {len(prior_docs)} docs — refuse; pass --confirm-source-removed "
                     "to assert intent")
+            elif not discover([Path(src)]) and src in _volatile:
+                import sys as _sys
+                print(f"  note: root {src} enumerated empty; volatile (config volatile_sources), an inbox drains: not a hollow root", file=_sys.stderr)
             elif not discover([Path(src)]):
                 failures.append(
                     f"deletion-manifest: source root {src} enumerated EMPTY while the prior "
@@ -419,6 +447,11 @@ def validate_candidate(
         for src in (str(Path(s)) for s in sources):
             if src in confirmed_removed:
                 continue  # removal asserted
+            if src in _volatile:
+                # 2026-11-17: a drainable root (an inbox) is expected to empty; its fall is not a scan failure.
+                import sys as _sys
+                print(f"  note: source-collapse check skipped for volatile root {src} (config volatile_sources)", file=_sys.stderr)
+                continue
             if prior_abs is not None:
                 prior_n = len({_real(ap) for ap in prior_abs.get(src, [])})
                 expected_n = len({_real(ap) for ap in prior_abs.get(src, []) if not is_excluded_path(Path(ap))})
@@ -915,9 +948,10 @@ def build(
                 oc.close()
             scan_end = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+            volatile_roots = {str(Path(v).expanduser()) for v in (getattr(cfg, "volatile_sources", []) or [])}
             failures = validate_candidate(
                 staging_db, embedding_dim=cfg.embedding_dim, sources=sources,
-                prior_inv=prior_inv, confirmed_removed=confirmed, prior_abs=prior_abs)
+                prior_inv=prior_inv, confirmed_removed=confirmed, prior_abs=prior_abs, volatile=volatile_roots)
             if rebase_source:
                 gcon = sqlite3.connect(str(staging_db))
                 try:
@@ -1029,6 +1063,10 @@ def build(
                 "docs_in_sources": sum(len(d) for d in new_inv.values()),
                 "source_digests": {s: _source_digest(d) for s, d in new_inv.items()},
                 "confirmed_removed": sorted(confirmed),
+                # 2026-11-17 (CSO condition 3): which guard exemptions this build used, and what the root held
+                "volatile_sources": sorted(volatile_roots),
+                "volatile_skipped": {v: {"prior_docs": len(prior_inv.get(v, {})), "candidate_docs": len(new_inv.get(v, {}))}
+                                     for v in sorted(volatile_roots) if v in prior_inv or v in new_inv},
                 # what a `--wait-for-builder` follower must match before adopting this epoch
                 # (CSO review of #89, D1-D3): the requested flags, the config it was loaded
                 # from AND the config its import child actually read, and where it ran.
