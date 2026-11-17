@@ -1376,6 +1376,9 @@ def stats():
     click.echo(f"embedded:       {s['embedded']}")
     click.echo(f"  → coverage:   {s['embedded'] / max(s['chunks'], 1) * 100:.1f}%")
     click.echo(f"priority docs:  {s['priority_docs']}")
+    _vol = list(getattr(Config.load(), "volatile_sources", []) or [])
+    if _vol:  # guard exemptions are visible wherever sources are (CSO condition 3, 2026-11-17)
+        click.echo(f"volatile roots: {len(_vol)} (collapse/hollow checks skipped): " + ", ".join(_vol))
     click.echo(f"wikilinks:      {s['wikilinks']}")
     click.echo(f"tier-2 archives:{s.get('archives', 0):>3}")
     if epoch_line:
