@@ -104,13 +104,12 @@ Supersedes [[deploy-flag]].
 LBrain keeps both records. The newer decision takes precedence without erasing the
 history that came before it.
 
-**PDFs and Word documents?** Not directly, yet. Convert the ones that matter to
-Markdown and keep the originals as your source of truth. The easy way: you already
-have an agent — tell it *"convert the PDFs in ~/docs that are relevant to our work
-into markdown notes."* Agents are good at this, it takes a minute, and you get to
-review what your memory is about to be made of. That review is the point: extraction
-quality varies enough that we'd rather have you glance at a conversion than quietly
-put mangled text into something your AI will later treat as memory.
+(edit) Ask your agent to select relevant PDF's and other files to convert to .md files for seeding lbrain.
+
+**PDFs and Word documents?** Not directly, yet. Convert them to Markdown first and
+keep the originals as your source of truth. That's deliberate: extraction quality
+varies enough that we'd rather ask you to convert a file than quietly put mangled text
+into something your AI will later treat as memory.
 
 ## Try it
 
@@ -135,6 +134,7 @@ lbrain init --source examples/demo-corpus
 lbrain import && lbrain embed --stale
 lbrain query "what flag do deploys use?"
 ```
+
 
 ## Connect it to an agent
 
