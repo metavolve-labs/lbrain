@@ -120,7 +120,10 @@ def check(name: str, address: str, records_dir: str | Path | None = None, today:
         return out
     if m.member != name:
         out["state"] = STATE_FAILS; out["detail"] = f"record names {m.member}, not {name}"; return out
-    if (address or "").strip() and m.member_public_key != address.strip():
+    if not (address or "").strip():
+        # CSO 2026-11-17T11:34Z: an EMPTY claim must not read as verified; the claim is the pair (name, key)
+        out["state"] = STATE_FAILS; out["detail"] = "no address claimed; the record binds a key and the claim names none"; return out
+    if m.member_public_key != address.strip():
         out["state"] = STATE_FAILS; out["detail"] = "record's member_public_key is not the claimed address"; return out
     today = today or dt.date.today()
     try:

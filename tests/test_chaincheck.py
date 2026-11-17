@@ -77,3 +77,10 @@ def test_outside_term_fails():
     r = cc.check(MEDIC, d["member_public_key"], records_dir=RECORDS, today=dt.date(2099, 1, 1))
     # the chain itself has lapsed by then, so the verifier refuses before the term check does; either way FAILS
     assert r["state"] == cc.STATE_FAILS, r
+
+
+@pytest.mark.skipif(RECORDS is None, reason="no lbrain-teams records beside the engine")
+def test_empty_claimed_address_fails():
+    """CSO 2026-11-17T11:34Z: an empty claim must not read as verified."""
+    r = cc.check(MEDIC, "", records_dir=RECORDS)
+    assert r["state"] == cc.STATE_FAILS and "no address claimed" in r["detail"], r
