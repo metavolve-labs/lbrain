@@ -13,6 +13,13 @@ import sqlite_vec
 from .index import Chunk, Doc
 
 
+class HomeMissingError(RuntimeError):
+    """FX-178 (2026-11-17): a read against a brain home that does not exist must FAIL, not mint the home.
+    Measured on katana: one `lbrain whoami --json` with LBRAIN_HOME pointing at a retired path created the
+    folder and an empty 35-object brain.db; a broker probe then re-created it at every window launch. A default
+    that wires a side effect is a bug (doctrine, rule 9). Only `lbrain init` (LBRAIN_CREATE_HOME=1) creates."""
+
+
 class SqliteExtensionError(RuntimeError):
     """This interpreter cannot load SQLite extensions, so sqlite-vec is unavailable.
 
@@ -199,6 +206,11 @@ class Store:
             self.db.row_factory = sqlite3.Row
             return
         self.immutable = False
+        if not db_path.parent.exists() and os.environ.get("LBRAIN_CREATE_HOME") != "1":
+            raise HomeMissingError(
+                f"brain home {db_path.parent} does not exist; refusing to create it on a read "
+                "(FX-178). Run `lbrain init` to create a home, or set LBRAIN_HOME to an existing one."
+            )
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # brain.db holds every chunk of the corpus in CLEARTEXT. Under the common
         # umask 022, mkdir gave 0755 and sqlite3.connect() gave 0644 — world-

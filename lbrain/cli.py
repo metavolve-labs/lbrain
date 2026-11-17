@@ -543,6 +543,7 @@ def init(provider: str, gemini_key: str, api_key: str, api_base: str, assume_yes
     is written to ~/.lbrain/env (chmod 600), never to plaintext config.
     """
     existing_config = CONFIG_PATH.exists()
+    os.environ["LBRAIN_CREATE_HOME"] = "1"  # init is the ONE command allowed to mint a home (FX-178)
     cfg = Config.load()
     if api_base:
         # Validate before assignment — direct attribute set bypasses __post_init__,

@@ -290,6 +290,7 @@ class _PayingTransport(LocalTransport):
 
 
 def _float_arc(tmp_path, monkeypatch, balance, floor=0.25, cmd=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)  # FX-178: a home is created by the test, never minted by a read
     cfg, _ = _cfg(tmp_path, monkeypatch)
     cfg.arweave_float_min_ar = floor
     out = tmp_path / "alert.txt"
