@@ -1979,6 +1979,19 @@ def whoami(as_json: bool):
     import json as _json
 
     from .identity import describe, read_counts
+    from .config import CONFIG_DIR, CONFIG_PATH
+
+    # FX-178 residue (Sostra 2026-11-17T05:19Z): a home that does not exist is not "a local brain, fully
+    # functional"; it is nothing. Say so and exit 2, in both forms, before any describe() runs.
+    if not CONFIG_DIR.exists() or not CONFIG_PATH.exists():
+        missing = str(CONFIG_DIR) if not CONFIG_DIR.exists() else str(CONFIG_PATH)
+        if as_json:
+            click.echo(_json.dumps({"error": "home missing", "path": missing,
+                                    "note": "no brain here; run `lbrain init` or set LBRAIN_HOME to an existing home"}, indent=2))
+        else:
+            click.secho(f"  home missing: {missing}", fg="red", bold=True)
+            click.echo("  no brain here; run `lbrain init` or set LBRAIN_HOME to an existing home")
+        raise SystemExit(2)
 
     cfg = Config.load()
     stats, counts_error = read_counts(cfg)
