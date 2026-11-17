@@ -2008,7 +2008,8 @@ def whoami(as_json: bool):
     if ident["registered"]:
         click.secho(f"  {ident['gcx']}", fg="green", bold=True)
         click.echo(f"  address:      {ident['address']}")
-        selfsaid = ident.get("verification") != "chain-verified"
+        chk = ident.get("chain_check") or {}
+        selfsaid = chk.get("state") != "verified now"
         mark = "  (self-asserted, unchecked)" if selfsaid else ""
         creds = ", ".join(ident["credentials"]) or "none yet"
         click.echo(f"  credentials:  {creds}{mark if ident['credentials'] else ''}")
@@ -2016,8 +2017,10 @@ def whoami(as_json: bool):
             click.echo(f"  trust score:  {ident['trust_score']}{mark}")
         if ident.get("issuer"):
             click.echo(f"  issuer:       {ident['issuer']}{mark}")
-        click.secho(f"  verification: {ident.get('verification', 'self-asserted')}",
-                    fg=("green" if not selfsaid else "yellow"))
+        _st = chk.get("state") or "claimed, evidence not reachable"
+        click.secho(f"  verification: {_st}", fg=("green" if _st == "verified now" else ("red" if _st == "FAILS" else "yellow")))
+        if chk.get("detail"):
+            click.echo(f"                {chk['detail']}")
         if selfsaid and ident.get("note"):
             click.secho(f"  {ident['note']}", fg="yellow")
     else:

@@ -255,6 +255,9 @@ class Config:
     # toward zero between builds (a mail INBOX drains as mail is claimed). The epoch gate's source-collapse check
     # skips these roots with a note instead of refusing promotion. Default empty: every other root is still guarded.
     volatile_sources: list[str] = field(default_factory=list)
+    # 2026-11-17 (CSO read-time identity design): where whoami looks for the member and chain records it verifies NOW;
+    # empty = the lbrain-teams/records checkout beside the engine, if any. Never a trust anchor: the keys are pinned in code.
+    estate_records_dir: str = ""
     # Transcripts `capture-orphans` must NEVER stage, whatever their mtime: an exact session id, or (an entry
     # containing "/") a substring of the transcript's path. Empty by default. An exclusion is a decision
     # recorded by name, never a side effect of a timestamp (CSO, PR #84 review).
@@ -381,6 +384,7 @@ class Config:
             allowed_path_prefixes=list(raw.get("allowed_path_prefixes", []) or []),
             exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
             volatile_sources=list(raw.get("volatile_sources", []) or []),
+            estate_records_dir=str(raw.get("estate_records_dir", "") or ""),
             capture_keep_out=list(raw.get("capture_keep_out", []) or []),
             retired_marker_scope=raw.get("retired_marker_scope", cls.retired_marker_scope),
             banner_retirement=raw.get("banner_retirement", cls.banner_retirement) is True,

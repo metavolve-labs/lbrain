@@ -352,6 +352,10 @@ def describe(cfg, stats: dict | None = None, counts_error: str = "") -> dict:
     ident = Identity.load()
     _marking = bool(getattr(cfg, "serve_staleness", True))
     _unscanned, _checked_at = _coverage(cfg)
+    # 2026-11-17 (CSO design): the stored verification word is a claim; the evidence is checked NOW against the
+    # pinned chain. `verification` carries the live state; the stored word is kept beside it for transparency.
+    from . import chaincheck as _cc
+    _chk = _cc.check(ident.gcx, ident.address, getattr(cfg, "estate_records_dir", "") or None) if ident else None
     return {
         "identity": {
             "registered": ident is not None,
@@ -366,7 +370,9 @@ def describe(cfg, stats: dict | None = None, counts_error: str = "") -> dict:
             # could claim any credential and `lair_whoami` would relay it to another
             # agent as fact. Same rule as gcx.Resolved.status — absence of a check is
             # reported as absence, never as a pass.
-            "verification": (ident.verification or "self-asserted") if ident else "",
+            "verification": (_chk["state"] if _chk else ""),
+            "stored_verification": (ident.verification or "self-asserted") if ident else "",
+            "chain_check": _chk,
             "issuer": (ident.issuer or "") if ident else "",
             # An unregistered brain is fully functional. Say so, so an agent
             # reading this does not treat absence as breakage.
