@@ -258,7 +258,7 @@ class Config:
     # 2026-11-17 (CSO read-time identity design): where whoami looks for the member and chain records it verifies NOW;
     # empty = the lbrain-teams/records checkout beside the engine, if any. Never a trust anchor: the keys are pinned in code.
     estate_records_dir: str = ""
-    # 2026-11-18 (C-Suite generic drive, Tad 18:46Z): a home may pin ITS OWN trust anchor. Empty = the Metavolve root,
+    # 2026-11-18 (C-Suite generic drive, founder's decision 18:46Z): a home may pin ITS OWN trust anchor. Empty = the Metavolve root,
     # intermediate and org keys pinned in chaincheck.py. A founder's drive sets these at first boot to the founder's own
     # root; nothing else in the engine changes. Hex ed25519 public keys; estate_org_public_hex is "org=hex" (one org).
     estate_root_public_hex: str = ""
