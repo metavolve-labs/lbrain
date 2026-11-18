@@ -40,7 +40,8 @@ def test_a_fabricated_identity_is_marked_self_asserted(home):
               credentials=["domain-verified", "kyc-passed"], trust_score=0.99,
               issuer="Metavolve Labs, Inc.")
     i = describe(_Cfg())["identity"]
-    assert i["verification"] == "self-asserted"
+    assert i["stored_verification"] == "self-asserted"  # the stored word; the verdict is the live read-time state
+    assert i["verification"] != "verified now"
     assert i["note"], "a registered-but-unverified identity reported an empty note"
     assert "SELF-ASSERTED" in i["note"]
     # the note must name what is being claimed, not just that something is
@@ -54,12 +55,18 @@ def test_the_issuer_reaches_the_surface(home):
     assert describe(_Cfg())["identity"]["issuer"] == "Some Authority"
 
 
-def test_chain_verified_identities_carry_no_warning(home):
-    """The marker must be earnable, or it is decoration."""
+def test_a_stored_chain_verified_word_earns_nothing_at_read_time(home):
+    """The marker must be earnable, or it is decoration. Since 2026-11-17 (CSO read-time design) it is earned
+    at READ time: `verification` is the live state of the signed record under the pinned root, and the word a
+    file carries is reported beside it as `stored_verification`, never as the verdict. A home whose stored word
+    says chain-verified but whose name has no record reads "claimed, evidence not reachable" (or FAILS), with the
+    unchecked note. `tests/test_chaincheck.py` covers "verified now" on a real record."""
     _register(credentials=["domain-verified"], verification="chain-verified")
     i = describe(_Cfg())["identity"]
-    assert i["verification"] == "chain-verified"
-    assert i["note"] == ""
+    assert i["stored_verification"] == "chain-verified"
+    assert i["verification"] != "chain-verified"
+    assert i["verification"] in ("claimed, evidence not reachable", "FAILS")
+    assert i["chain_check"]["state"] == i["verification"]
 
 
 def test_an_unregistered_brain_is_still_normal(home):

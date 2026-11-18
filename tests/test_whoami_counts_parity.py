@@ -141,7 +141,16 @@ def test_a_count_failure_never_changes_the_identity_section(tmp_path):
     (home / "epochs" / "CURRENT").write_text("20000101T000000Z-1-0001\n")
     bad = _run(home, "whoami")
     bj = json.loads(_run(home, "whoami", "--json").stdout)
-    assert _identity_block(good.stdout) == _identity_block(bad.stdout)
+    # the read-time chain check stamps WHEN it checked (2026-11-17); that timestamp is the one field allowed to
+    # differ between two reads, so it is normalised out before the parity compare
+    import re as _re
+    _ts = _re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+    assert _ts.sub("<ts>", _identity_block(good.stdout)) == _ts.sub("<ts>", _identity_block(bad.stdout))
+    for j in (gj, bj):
+        cc = j["identity"].get("chain_check") or {}
+        cc.pop("checked_at", None)
+        if "detail" in cc:
+            cc["detail"] = _ts.sub("<ts>", cc["detail"])
     assert gj["identity"] == bj["identity"]
 
 
