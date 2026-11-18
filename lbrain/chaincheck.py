@@ -64,8 +64,26 @@ def _import_teams(records: Path):
     return Membership, MembershipError, verify_chained, IntermediateChain, IntermediateRecord, org_signing_keys, RootChain, RootRecord
 
 
-def check(name: str, address: str, records_dir: str | Path | None = None, today: dt.date | None = None) -> dict:
-    """Return {"state", "detail", "checked_at", "expires", "records_dir", "limits"}; never raises."""
+def pins_from_config(cfg) -> dict:
+    """The trust anchor a home pins: its own (config, a founder's drive) or the Metavolve defaults (empty config).
+    Returns {"root": hex, "intermediate": hex, "orgs": {org: hex}}; a malformed org entry falls back to the default."""
+    root = (getattr(cfg, "estate_root_public_hex", "") or "").strip().lower() or METAVOLVE_ROOT_PUBLIC_HEX
+    inter = (getattr(cfg, "estate_intermediate_public_hex", "") or "").strip().lower() or INTERMEDIATE_PUBLIC_HEX
+    orgs = dict(ORG_PUBLIC_HEX)
+    raw = (getattr(cfg, "estate_org_public_hex", "") or "").strip()
+    if "=" in raw:
+        o, h = raw.split("=", 1)
+        if o.strip() and h.strip():
+            orgs = {o.strip(): h.strip().lower()}
+    return {"root": root, "intermediate": inter, "orgs": orgs}
+
+
+def check(name: str, address: str, records_dir: str | Path | None = None, today: dt.date | None = None,
+          pins: dict | None = None) -> dict:
+    """Return {"state", "detail", "checked_at", "expires", "records_dir", "limits"}; never raises.
+    `pins` (2026-11-18): the trust anchor to verify under; None = the Metavolve defaults. A founder's home passes
+    pins_from_config(cfg) so its own root is the anchor and ours is NOT above it."""
+    pins = pins or {"root": METAVOLVE_ROOT_PUBLIC_HEX, "intermediate": INTERMEDIATE_PUBLIC_HEX, "orgs": dict(ORG_PUBLIC_HEX)}
     checked_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = {"state": STATE_UNREACHABLE, "detail": "", "checked_at": checked_at, "expires": None,
            "records_dir": None, "limits": LIMITS}
@@ -103,12 +121,12 @@ def check(name: str, address: str, records_dir: str | Path | None = None, today:
     except (OSError, json.JSONDecodeError) as e:
         out["detail"] = f"chain records not readable ({type(e).__name__})"; return out
     # pins: a records directory with other keys is a failure, not another anchor
-    if inter.get("public_key") != INTERMEDIATE_PUBLIC_HEX:
+    if inter.get("public_key") != pins["intermediate"]:
         out["state"] = STATE_FAILS; out["detail"] = "intermediate record is not the pinned intermediate key"; return out
-    if ORG_PUBLIC_HEX.get(org) and org_rec.get("public_key") != ORG_PUBLIC_HEX[org]:
+    if pins["orgs"].get(org) and org_rec.get("public_key") != pins["orgs"][org]:
         out["state"] = STATE_FAILS; out["detail"] = f"org root record for {org} is not the pinned org key"; return out
     try:
-        root_pub = bytes.fromhex(METAVOLVE_ROOT_PUBLIC_HEX)
+        root_pub = bytes.fromhex(pins["root"])
         inter_chain = IntermediateChain([IntermediateRecord(**inter)])
         org_chain = RootChain(org, [RootRecord(**org_rec)])
         signers = org_signing_keys(root_pub, inter_chain)

@@ -84,3 +84,30 @@ def test_empty_claimed_address_fails():
     """CSO 2026-11-17T11:34Z: an empty claim must not read as verified."""
     r = cc.check(MEDIC, "", records_dir=RECORDS)
     assert r["state"] == cc.STATE_FAILS and "no address claimed" in r["detail"], r
+
+
+def test_pins_default_to_metavolve_when_config_is_empty():
+    class C: pass
+    p = cc.pins_from_config(C())
+    assert p["root"] == cc.METAVOLVE_ROOT_PUBLIC_HEX and p["intermediate"] == cc.INTERMEDIATE_PUBLIC_HEX
+    assert p["orgs"] == cc.ORG_PUBLIC_HEX
+
+
+def test_a_home_may_pin_its_own_root_and_ours_then_fails(tmp_path):
+    """2026-11-18 (C-Suite generic drive): a founder's home pins the founder's root; our records do not verify under
+    it, because our root is not above theirs. The same records verify under the default pins."""
+    if RECORDS is None:
+        pytest.skip("no lbrain-teams records beside the engine")
+    p, d = _record(RECORDS, MEDIC)
+    if d is None:
+        pytest.skip("medic record not present")
+    class C:
+        estate_root_public_hex = "11" * 32
+        estate_intermediate_public_hex = "22" * 32
+        estate_org_public_hex = "founderco=" + "33" * 32
+    pins = cc.pins_from_config(C())
+    assert pins["orgs"] == {"founderco": "33" * 32}
+    r = cc.check(MEDIC, d["member_public_key"], records_dir=RECORDS, pins=pins)
+    assert r["state"] == cc.STATE_FAILS, r
+    r2 = cc.check(MEDIC, d["member_public_key"], records_dir=RECORDS)
+    assert r2["state"] == cc.STATE_VERIFIED, r2

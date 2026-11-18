@@ -355,7 +355,8 @@ def describe(cfg, stats: dict | None = None, counts_error: str = "") -> dict:
     # 2026-11-17 (CSO design): the stored verification word is a claim; the evidence is checked NOW against the
     # pinned chain. `verification` carries the live state; the stored word is kept beside it for transparency.
     from . import chaincheck as _cc
-    _chk = _cc.check(ident.gcx, ident.address, getattr(cfg, "estate_records_dir", "") or None) if ident else None
+    _chk = _cc.check(ident.gcx, ident.address, getattr(cfg, "estate_records_dir", "") or None,
+                     pins=_cc.pins_from_config(cfg)) if ident else None
     return {
         "identity": {
             "registered": ident is not None,

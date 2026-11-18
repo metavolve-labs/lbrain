@@ -258,6 +258,12 @@ class Config:
     # 2026-11-17 (CSO read-time identity design): where whoami looks for the member and chain records it verifies NOW;
     # empty = the lbrain-teams/records checkout beside the engine, if any. Never a trust anchor: the keys are pinned in code.
     estate_records_dir: str = ""
+    # 2026-11-18 (C-Suite generic drive, Tad 18:46Z): a home may pin ITS OWN trust anchor. Empty = the Metavolve root,
+    # intermediate and org keys pinned in chaincheck.py. A founder's drive sets these at first boot to the founder's own
+    # root; nothing else in the engine changes. Hex ed25519 public keys; estate_org_public_hex is "org=hex" (one org).
+    estate_root_public_hex: str = ""
+    estate_intermediate_public_hex: str = ""
+    estate_org_public_hex: str = ""
     # Transcripts `capture-orphans` must NEVER stage, whatever their mtime: an exact session id, or (an entry
     # containing "/") a substring of the transcript's path. Empty by default. An exclusion is a decision
     # recorded by name, never a side effect of a timestamp (CSO, PR #84 review).
@@ -385,6 +391,9 @@ class Config:
             exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
             volatile_sources=[Path(x) for x in (raw.get("volatile_sources", []) or [])],
             estate_records_dir=str(raw.get("estate_records_dir", "") or ""),
+            estate_root_public_hex=str(raw.get("estate_root_public_hex", "") or ""),
+            estate_intermediate_public_hex=str(raw.get("estate_intermediate_public_hex", "") or ""),
+            estate_org_public_hex=str(raw.get("estate_org_public_hex", "") or ""),
             capture_keep_out=list(raw.get("capture_keep_out", []) or []),
             retired_marker_scope=raw.get("retired_marker_scope", cls.retired_marker_scope),
             banner_retirement=raw.get("banner_retirement", cls.banner_retirement) is True,
@@ -450,6 +459,9 @@ class Config:
             + ", ".join(q(x) for x in self.exclude_path_markers) + "]",
             "volatile_sources = [" + ", ".join(q(x) for x in self.volatile_sources) + "]",
             f"estate_records_dir = {q(self.estate_records_dir)}",
+            f"estate_root_public_hex = {q(self.estate_root_public_hex)}",
+            f"estate_intermediate_public_hex = {q(self.estate_intermediate_public_hex)}",
+            f"estate_org_public_hex = {q(self.estate_org_public_hex)}",
             "capture_keep_out = [" + ", ".join(q(x) for x in self.capture_keep_out) + "]",
             f"retired_marker_scope = {q(self.retired_marker_scope)}",
             f"banner_retirement = {str(self.banner_retirement).lower()}",
