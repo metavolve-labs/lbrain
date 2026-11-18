@@ -1378,7 +1378,7 @@ def stats():
     click.echo(f"priority docs:  {s['priority_docs']}")
     _vol = list(getattr(Config.load(), "volatile_sources", []) or [])
     if _vol:  # guard exemptions are visible wherever sources are (CSO condition 3, 2026-11-17)
-        click.echo(f"volatile roots: {len(_vol)} (collapse/hollow checks skipped): " + ", ".join(_vol))
+        click.echo(f"volatile roots: {len(_vol)} (collapse/hollow checks skipped): " + ", ".join(str(v) for v in _vol))  # Paths since a243f8d (CCO 09:50Z)
     click.echo(f"wikilinks:      {s['wikilinks']}")
     click.echo(f"tier-2 archives:{s.get('archives', 0):>3}")
     if epoch_line:
