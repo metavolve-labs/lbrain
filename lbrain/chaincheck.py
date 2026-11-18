@@ -85,7 +85,7 @@ def check(name: str, address: str, records_dir: str | Path | None = None, today:
     rec_path = None
     for cand in sorted((records / "estate").glob("member-*.json")):
         try:
-            if json.loads(cand.read_text()).get("member") == name:
+            if json.loads(cand.read_text(encoding="utf-8")).get("member") == name:
                 rec_path = cand; break
         except (OSError, json.JSONDecodeError):
             continue
@@ -97,9 +97,9 @@ def check(name: str, address: str, records_dir: str | Path | None = None, today:
     except Exception as e:  # noqa: BLE001
         out["detail"] = f"verifier not importable ({type(e).__name__})"; return out
     try:
-        inter = json.loads((records / "intermediate-record.json").read_text())
-        org_rec = json.loads((records / "estate" / f"org-root-{org}.json").read_text())
-        rec = json.loads(rec_path.read_text())
+        inter = json.loads((records / "intermediate-record.json").read_text(encoding="utf-8"))
+        org_rec = json.loads((records / "estate" / f"org-root-{org}.json").read_text(encoding="utf-8"))
+        rec = json.loads(rec_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
         out["detail"] = f"chain records not readable ({type(e).__name__})"; return out
     # pins: a records directory with other keys is a failure, not another anchor

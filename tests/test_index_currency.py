@@ -261,7 +261,7 @@ def test_doctor_json_carries_the_survey(tmp_path, monkeypatch):
     (src / "a.md").write_text(DOC + "\nedited\n", encoding="utf-8")
 
     res = CliRunner().invoke(main, ["doctor", "--json"])
-    payload = _json.loads(res.output)["index_currency"]
+    payload = _json.loads(res.stdout)["index_currency"]
     assert payload["is_current"] is False
     assert payload["changed"] == ["a.md"]
 

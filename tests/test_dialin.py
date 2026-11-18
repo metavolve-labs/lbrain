@@ -130,5 +130,5 @@ def test_doctor_surfaces_setup_drift(tmp_path):
     hook.unlink()
     res = CliRunner().invoke(main, ["doctor", "--json"])
     import json
-    payload = json.loads(res.output)
+    payload = json.loads(res.stdout)
     assert any("doctor-visible hook" in w for w in payload["setup_drift"])

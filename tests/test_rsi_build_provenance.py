@@ -20,7 +20,7 @@ def test_provenance_shape():
 def test_doctor_json_includes_build_block():
     r = CliRunner().invoke(main, ["doctor", "--json"])
     # doctor may exit non-zero on embedding drift; the block must still be present
-    payload = json.loads(r.output)
+    payload = json.loads(r.stdout)
     assert "build" in payload
     assert "editable_checkout" in payload["build"]
     assert "dirty" in payload["build"]

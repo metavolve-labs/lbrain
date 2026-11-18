@@ -19,7 +19,7 @@ MEDIC = "metavolvelabs/csuite/medic/sostra"
 
 def _record(records, name):
     for p in sorted((records / "estate").glob("member-*.json")):
-        d = json.loads(p.read_text())
+        d = json.loads(p.read_text(encoding="utf-8"))
         if d.get("member") == name:
             return p, d
     return None, None
@@ -64,7 +64,7 @@ def test_tampered_record_fails(tmp_path):
     shutil.copytree(RECORDS, fake, ignore=shutil.ignore_patterns("*.bin", "ANCHOR-*", "*bundle*"))
     tp, td = _record(fake, MEDIC)
     td["expires"] = "2099-01-01"  # a longer term than the org signed
-    tp.write_text(json.dumps(td))
+    tp.write_text(json.dumps(td), encoding="utf-8")
     r = cc.check(MEDIC, d["member_public_key"], records_dir=fake)
     assert r["state"] == cc.STATE_FAILS and "does not verify" in r["detail"], r
 

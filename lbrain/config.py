@@ -254,7 +254,7 @@ class Config:
     # 2026-11-17 (CTO, FX: CCO epochs refused since 11-17T00:53Z): roots whose document count may legitimately fall
     # toward zero between builds (a mail INBOX drains as mail is claimed). The epoch gate's source-collapse check
     # skips these roots with a note instead of refusing promotion. Default empty: every other root is still guarded.
-    volatile_sources: list[str] = field(default_factory=list)
+    volatile_sources: list[Path] = field(default_factory=list)
     # 2026-11-17 (CSO read-time identity design): where whoami looks for the member and chain records it verifies NOW;
     # empty = the lbrain-teams/records checkout beside the engine, if any. Never a trust anchor: the keys are pinned in code.
     estate_records_dir: str = ""
@@ -383,7 +383,7 @@ class Config:
             allowed_doc_types=list(raw.get("allowed_doc_types", []) or []),
             allowed_path_prefixes=list(raw.get("allowed_path_prefixes", []) or []),
             exclude_path_markers=list(raw.get("exclude_path_markers", []) or []),
-            volatile_sources=list(raw.get("volatile_sources", []) or []),
+            volatile_sources=[Path(x) for x in (raw.get("volatile_sources", []) or [])],
             estate_records_dir=str(raw.get("estate_records_dir", "") or ""),
             capture_keep_out=list(raw.get("capture_keep_out", []) or []),
             retired_marker_scope=raw.get("retired_marker_scope", cls.retired_marker_scope),
@@ -448,6 +448,8 @@ class Config:
             + ", ".join(q(x) for x in self.allowed_path_prefixes) + "]",
             "exclude_path_markers = ["
             + ", ".join(q(x) for x in self.exclude_path_markers) + "]",
+            "volatile_sources = [" + ", ".join(q(x) for x in self.volatile_sources) + "]",
+            f"estate_records_dir = {q(self.estate_records_dir)}",
             "capture_keep_out = [" + ", ".join(q(x) for x in self.capture_keep_out) + "]",
             f"retired_marker_scope = {q(self.retired_marker_scope)}",
             f"banner_retirement = {str(self.banner_retirement).lower()}",

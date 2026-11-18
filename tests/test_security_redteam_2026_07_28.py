@@ -187,10 +187,14 @@ def test_check_action_sanitizes_the_path_field_too():
 # --- #10: the corpus is cleartext; keep it private -------------------------
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
-def test_brain_db_and_its_directory_are_private(tmp_path):
+def test_brain_db_and_its_directory_are_private(tmp_path, monkeypatch):
     """brain.db holds every chunk in cleartext and was created 0644 in a 0755
     directory. The chmod 0700 that existed only ran when a HOSTED key was
-    configured — so the local-only install was the one left open."""
+    configured — so the local-only install was the one left open.
+
+    2026-11-17 (FX-178): a READ no longer creates a missing home; only `lbrain init` does, under
+    LBRAIN_CREATE_HOME=1. This test is about the CREATION path's modes, so it takes the init switch."""
+    monkeypatch.setenv("LBRAIN_CREATE_HOME", "1")
     db = tmp_path / "home" / "brain.db"
     Store(db).close()
 

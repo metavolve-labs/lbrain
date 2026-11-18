@@ -1986,8 +1986,10 @@ def whoami(as_json: bool):
 
     # FX-178 residue (Sostra 2026-11-17T05:19Z): a home that does not exist is not "a local brain, fully
     # functional"; it is nothing. Say so and exit 2, in both forms, before any describe() runs.
-    if not CONFIG_DIR.exists() or not CONFIG_PATH.exists():
-        missing = str(CONFIG_DIR) if not CONFIG_DIR.exists() else str(CONFIG_PATH)
+    # "Missing" is the store's definition (2026-11-18): the home DIRECTORY is absent. A directory with no
+    # config.toml is a home on defaults, as it always was; refusing it broke the default-home surface tests.
+    if not CONFIG_DIR.exists():
+        missing = str(CONFIG_DIR)
         if as_json:
             click.echo(_json.dumps({"error": "home missing", "path": missing,
                                     "note": "no brain here; run `lbrain init` or set LBRAIN_HOME to an existing home"}, indent=2))
