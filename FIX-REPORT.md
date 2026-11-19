@@ -52,3 +52,32 @@ Branch `cto/capture-reachable-through-recall-2026-11-19` (worktree /root/lbrain-
   would serve one person's session text to everyone who queries that home.
 - **Remote embedding provider.** On `gemini` / `openai`, ON sends the screened whole-session text to that provider to
   be embedded (stated in the config key's comment).
+
+## CSO re-read of b5f76c6 (04:02Z): what changed (third commit)
+- **Shred output on an epoch home** (ordering unchanged: plaintext first, then the key shred refuses, exit non-zero):
+  (a) `plaintext captured-session document for T removed for good: <path> (tombstoned at <root>/.shredded/T; no build
+  writes it back). The encrypted record, its key and its `lbrain recall` snapshot REMAIN: the archive key shred is
+  refused on an epoch home.` (b) `to complete the shred on this epoch home, run: [shred -u <spool payload> && ]shred -u
+  <home>/keys/T.key && lbrain epoch build` -- the build's existing keyless-receipt heal then marks the record shredded
+  in the new epoch (snapshot, FTS, vectors, chunk vectors purged) and drops the false receipt; a payload still in the
+  spool is removed first, or the heal would re-capture it under a new key. Tested end to end: after the printed steps
+  and a build the archive row is `shredded = 1` with an empty snapshot and `lbrain retrieve` fails. A record with no
+  spool receipt gets the key step only, and the line says no build purges its snapshot in this engine version. When
+  another SERVED capture of the same session exists, a third line names its txid (tested). Retained prior epochs keep
+  their copy until pruned.
+- **Claims, contradictions, supersession (the receipt question).** Every path by which a document can act on OTHER
+  records was checked: supersession edges (frontmatter `supersedes:` and body `Supersedes:` lines; the only mechanism
+  that buries another record), wikilinks (graph), claim spans (frontmatter `claims:`; they only ever filter the
+  declaring document's own chunks under `--current-only`), retirement banners and `status:` (self only), beliefs and
+  the G5 contradiction gate (only `type: belief` documents), `lair_check_action` (only `type: feedback` documents and
+  core rules). A `captured-session` document now mints no supersession edges, no wikilinks and no claim spans at parse
+  time, whatever its frontmatter says; banner-shaped and `Supersedes:` lines in the conversation are neutralised, so it
+  cannot retire itself either. Test: ten planted contradiction-shaped lines (SUPERSEDED/RETIRED banners, `Supersedes:`
+  both forms, `status: retired`, a `claims:` block naming a.md's text as retracted, a CONTRADICTS line, a `Last
+  Updated` header) mint zero rows in claim_spans, supersessions and wikilinks; a.md stays current and unmarked under
+  `--current-only`; plus a parse-level test on hand-written frontmatter carrying `supersedes:` and `claims:`.
+- **Backfill needs the list.** `--backfill-captures-without-path SESSIONS` (comma-separated ids or `@FILE`, one per
+  line, `#` comments) is required to name the sessions expected; the bare flag or an empty list refuses (exit 2). A
+  path-less capture not on the list is reported under `not_on_backfill_list` and stays unindexed; a listed session
+  not found is reported under `backfill_expected_not_found`; a document an earlier backfill wrote is kept by later
+  builds (`kept_backfilled`).

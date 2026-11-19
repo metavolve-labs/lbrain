@@ -712,7 +712,7 @@ def _drop_missing_captured(db_path: Path, root: Path, embedding_dim: int,
 
 def _captured_docs(home: Path, cfg, db: Path, report: dict, *, phase: str, remove: bool,
                    plan: list[dict] | None = None, immutable: bool = False,
-                   backfill_without_path: bool = False) -> dict | None:
+                   backfill_without_path: frozenset = frozenset()) -> dict | None:
     """Write the captured-session documents (lbrain.archive.captured). Without the archive extra there are no
     archives to publish: reported, never raised. Any other failure fails the build (staging retained)."""
     try:
@@ -866,7 +866,7 @@ def build(
     sweep: bool = True,
     config_sha: str | None = None,
     rebase_source: tuple[tuple[str, str], ...] = (),
-    backfill_captures_without_path: bool = False,
+    backfill_captures_without_path: tuple[str, ...] = (),
 ) -> dict:
     """Build → validate → swap. Returns a report dict; raises EpochError with the
     staging retained as .failed forensics on any gate refusal.
@@ -893,6 +893,8 @@ def build(
     captures_root = _captures_root(home, cfg)
     captures_credited: set[str] = set()       # abs paths of captured documents this build removed ON PURPOSE
     captures_credited_rel: set[str] = set()
+    # the operator's explicit list of path-less sessions to backfill (empty = none: such captures stay unindexed)
+    backfill_captures_without_path = frozenset(s for s in (backfill_captures_without_path or ()) if s)
     if captures_on and captures_root is not None:
         captures_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not any(os.path.realpath(s) == os.path.realpath(str(captures_root)) for s in sources):
@@ -961,8 +963,7 @@ def build(
                 # before the import: documents for every capture the PRIOR epoch already serves (first build after the
                 # switch flips, or a root someone emptied). Additive here; removals happen after the sweep.
                 _captured_docs(home, cfg, prior_db if prior_db is not None else staging_db, report,
-                               phase="pre_import", remove=False,
-                               backfill_without_path=backfill_captures_without_path)
+                               phase="pre_import", remove=False)   # backfill happens once, after the sweep
                 # rows whose document is gone (a `lbrain shred` unlinked its twin): dropped from the candidate HERE, by
                 # name and reported, so the import's prune never counts them as a vanished-files event.
                 dropped = _drop_missing_captured(staging_db, captures_root, cfg.embedding_dim)
@@ -1006,6 +1007,13 @@ def build(
                 for rel, ap in dropped:
                     captures_credited_rel.add(rel); captures_credited.add(ap)
                     report["captured_docs"].setdefault("index_rows_dropped", []).append(rel)
+                if backfill_captures_without_path:
+                    got = ({b["session_id"] for b in (rep or {}).get("backfilled", [])}
+                           | set((rep or {}).get("kept_backfilled_sessions", [])))
+                    missing = sorted(backfill_captures_without_path - got)
+                    report["captured_docs"]["backfill_expected"] = sorted(backfill_captures_without_path)
+                    if missing:   # named by the operator, not found as a served path-less capture in this build
+                        report["captured_docs"]["backfill_expected_not_found"] = missing
                 if rep and (rep.get("written") or rep.get("removed") or dropped):
                     _run_cli(["import", "--prune", str(captures_root)], staging, lbrain_bin, lock=lock)
                     _run_cli(["embed", "--stale"], staging, lbrain_bin, lock=lock)

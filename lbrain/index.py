@@ -596,7 +596,8 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         doc_type = str(meta["type"])
     # 2026-11-19 (CSO condition 4): a captured session is a record of what was SAID, not a declaration about the
     # corpus. It mints no wikilink edges and no supersession edges, whatever the conversation quoted.
-    if doc_type == "captured-session" or str(meta.get("kind", "")) == "captured-session":
+    captured_session = doc_type == "captured-session" or str(meta.get("kind", "")) == "captured-session"
+    if captured_session:
         wikilinks = []
         supersedes = []
 
@@ -685,7 +686,9 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
     # Text-matching, not char offsets, so an edit that shifts positions can't silently
     # mis-target (the offset-recompute fragility the panel flagged).
     claims = []
-    _raw_claims = meta.get("claims")
+    # 2026-11-19 (CSO 04:02Z question): a captured session mints no claim spans either (it is a record of what was
+    # said; claim spans only ever filter the declaring document's own chunks, but none is minted at all).
+    _raw_claims = None if captured_session else meta.get("claims")
     if isinstance(_raw_claims, list):
         for _c in _raw_claims:
             if not isinstance(_c, dict):

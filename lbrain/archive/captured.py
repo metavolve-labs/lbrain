@@ -278,16 +278,79 @@ def shred_twin(home: Path, cfg, txid: str) -> list[str]:
     return gone
 
 
+def shred_epoch_lines(home: Path, cfg, txid: str, gone: list[str]) -> list[str]:
+    """What `lbrain shred` says on an EPOCH home, after unlinking the twin and before refusing the key shred (CSO
+    04:02Z ruling): (a) the plaintext document is gone for good while the encrypted record, its key and its recall
+    snapshot remain; (b) the step that completes the shred on an epoch home; and, when another served capture of the
+    same session exists, its txid.
+
+    The completion step is the build's own keyless-receipt heal (``epoch_build._sweep_spool``): a sweep receipt whose
+    key is gone makes the next build mark that record shredded in the candidate (snapshot, FTS, vectors and chunk
+    vectors purged) and drop the false receipt. It is complete only when no plaintext payload is left in the spool for
+    that entry (a payload left there would be re-captured under a new key), so the step removes it first."""
+    from ..spool import META_SUFFIX, PAYLOAD_SUFFIX, receipted_items, sweep_receipt_path
+
+    home = Path(home)
+    root = captures_root_for(home, cfg)
+    key = home / "keys" / f"{txid}.key"
+    if gone:
+        a = (f"plaintext captured-session document for {txid} removed for good: {', '.join(gone)} "
+             f"(tombstoned at {root / TOMBSTONE_DIR / txid}; no build writes it back). The encrypted record, its key "
+             "and its `lbrain recall` snapshot REMAIN: the archive key shred is refused on an epoch home.")
+    elif not root.is_dir():
+        a = (f"no captured-session documents exist on this home (none for {txid}). The encrypted record, its key and "
+             "its `lbrain recall` snapshot REMAIN: the archive key shred is refused on an epoch home.")
+    else:
+        a = (f"no plaintext captured-session document existed for {txid} (tombstoned at {root / TOMBSTONE_DIR / txid} "
+             "so none is ever written). The encrypted record, its key and its `lbrain recall` snapshot REMAIN: the "
+             "archive key shred is refused on an epoch home.")
+    meta = next((m for m in receipted_items(home)
+                 if str(_read_json(sweep_receipt_path(m)).get("txid") or "") == txid), None)
+    if meta is not None:
+        payload = meta.with_name(meta.name[: -len(META_SUFFIX)] + PAYLOAD_SUFFIX)
+        steps = ([f"shred -u {payload}"] if payload.is_file() else []) + [f"shred -u {key}", "lbrain epoch build"]
+        b = ("to complete the shred on this epoch home, run: " + " && ".join(steps)
+             + "  (the build's keyless-receipt heal then marks the record shredded in the new epoch and purges its "
+               "recall snapshot, FTS row and vectors; epochs retained from before keep their copy until pruned)")
+    else:
+        b = (f"to complete the shred on this epoch home, run: shred -u {key}  (the record is undecryptable from that "
+             "moment; it has no spool receipt, so no build purges its recall snapshot: that needs the archive's "
+             "epoch-compatible staging, not in this engine version)")
+    lines = [a, b]
+    try:
+        from ..epoch import current_epoch_id, resolve_db_path
+        if current_epoch_id(home) is not None:
+            db = resolve_db_path(home, cfg.db_path)
+            con = _connect_ro(db, True)
+            try:
+                me = con.execute("SELECT title, namespace FROM archives WHERE txid = ?", (txid,)).fetchone()
+            finally:
+                con.close()
+            if me is not None:
+                for o in served_archives(db, immutable=True):
+                    if o["txid"] != txid and o["title"] == me["title"] and o["namespace"] == me["namespace"]:
+                        lines.append(f"another served capture of the same session remains: txid {o['txid']} (its "
+                                     "record and any captured-session document hold this session's text up to that "
+                                     "capture; shred it too to remove that text)")
+    except Exception as e:   # the two lines above are the contract; the third is best-effort and says when it failed
+        lines.append(f"(could not check for other captures of the same session: {type(e).__name__})")
+    return lines
+
+
 def write_captured_docs(home: Path, cfg, db_path: Path, *, plan: list[dict] | None = None,
-                        immutable: bool = False, remove: bool = True, backfill_without_path: bool = False) -> dict:
+                        immutable: bool = False, remove: bool = True,
+                        backfill_without_path: frozenset | set | tuple = ()) -> dict:
     """Make the captures root hold exactly one document per served captured session in ``db_path``. Writes only
     changed files (0600, tmp+rename), removes ``captured-session-*.md`` files that no longer correspond to a served
     capture (shredded, tombstoned by `lbrain shred`, superseded, excluded), and touches nothing else in the root.
 
     CSO defect 1 (2026-11-19): a capture with NO recorded transcript path cannot be judged against
     ``exclude_path_markers`` / ``capture_keep_out``, and every capture staged before this change has none. Such a
-    capture is SKIPPED (counted ``skipped_no_path``) unless ``backfill_without_path`` (the build's named flag
-    ``--backfill-captures-without-path``) is passed; then it is indexed and its txid listed under ``backfilled``."""
+    capture is SKIPPED (counted ``skipped_no_path``) unless its session id is on ``backfill_without_path``, the
+    explicit list of sessions the operator expects (the build's ``--backfill-captures-without-path SESSIONS``);
+    then it is indexed and listed under ``backfilled``. With a list given, every path-less capture NOT on it is
+    reported under ``not_on_backfill_list`` and stays unindexed (CSO 04:02Z: no backfill without naming the
+    sessions expected). A document an earlier backfill wrote is kept (``kept_backfilled``)."""
     from ..index import is_excluded_path
     from ..spool import _write_then_rename
 
@@ -314,10 +377,20 @@ def write_captured_docs(home: Path, cfg, db_path: Path, *, plan: list[dict] | No
             continue
         source_path = str((meta or {}).get("source_path") or "")
         if not source_path:
-            if not backfill_without_path:
+            existing = root / doc_name(sid, a["title"], a["txid"])
+            if existing.is_file() and _doc_txid(existing) == a["txid"]:
+                # backfilled by an EARLIER build's named list: kept as it is (the operator's act stands until shred,
+                # switch-off or a newer capture replaces it); never re-judged as "not on the list"
+                rep["kept_backfilled"] = rep.get("kept_backfilled", 0) + 1
+                rep.setdefault("kept_backfilled_sessions", []).append(sid)
+            elif not backfill_without_path or sid not in backfill_without_path:
                 rep["skipped_no_path"] = rep.get("skipped_no_path", 0) + 1
+                if backfill_without_path:
+                    # CSO rule: a capture the operator did NOT name is reported, never indexed
+                    rep.setdefault("not_on_backfill_list", []).append({"session_id": sid, "txid": a["txid"]})
                 continue
-            rep.setdefault("backfilled", []).append(a["txid"])
+            else:
+                rep.setdefault("backfilled", []).append({"session_id": sid, "txid": a["txid"]})
         if (source_path and is_excluded_path(Path(source_path))) or _keep_out(cfg, sid, source_path):
             rep["excluded"] += 1
             continue

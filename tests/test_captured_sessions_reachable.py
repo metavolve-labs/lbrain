@@ -341,11 +341,34 @@ def test_defect1_capture_without_recorded_path_is_skipped_unless_backfill_flag(t
     assert rep["sweep"]["swept"] == 1 and cd["skipped_no_path"] == 1 and cd["docs"] == 0 and "backfilled" not in cd, cd
     assert not list((home / "captures").glob("*.md"))
     assert "captured session" not in _run(tmp_path, home, "search", "quokka").stdout
-    # the named flag, through the CLI: indexed, and the txid is listed as backfilled in the build report
-    out = _run(tmp_path, home, "epoch", "build", "--backfill-captures-without-path").stdout
-    assert '"backfilled": [' in out, out
+    # CSO 04:02Z: no backfill without naming the sessions expected -- the bare flag and an empty list refuse
+    bare = _run(tmp_path, home, "epoch", "build", "--backfill-captures-without-path", check=False)
+    assert bare.returncode == 2, bare.stdout + bare.stderr
+    empty = _run(tmp_path, home, "epoch", "build", "--backfill-captures-without-path", " , ", check=False)
+    assert empty.returncode == 2 and "needs the sessions you expect" in empty.stdout + empty.stderr
+    # a list that does NOT name the capture found: reported, not indexed; the named-but-absent session is reported
+    rep = _build(home, tmp_path, mp, delta=True, backfill_captures_without_path=("sess-other-9999",))
+    cd = rep["captured_docs"]
+    assert cd["post_sweep"]["not_on_backfill_list"][0]["session_id"] == "sess-old-0001", cd
+    assert cd["backfill_expected_not_found"] == ["sess-other-9999"] and "backfilled" not in cd["post_sweep"], cd
+    assert not list((home / "captures").glob("*.md"))
+    # the list that names it: indexed, and listed as backfilled in the build report
+    rep = _build(home, tmp_path, mp, delta=True, backfill_captures_without_path=("sess-old-0001",))
+    cd = rep["captured_docs"]
+    assert cd["post_sweep"]["backfilled"][0]["session_id"] == "sess-old-0001" and "backfill_expected_not_found" not in cd
     assert (home / "captures" / "captured-session-sess-old-0001.md").is_file()
     assert "captured session sess-old-0001" in _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
+    # a later ordinary build keeps the operator's backfill (it is not re-judged as "not on the list")
+    rep = _build(home, tmp_path, mp, delta=True)
+    assert rep["captured_docs"]["post_sweep"]["kept_backfilled"] == 1
+    assert (home / "captures" / "captured-session-sess-old-0001.md").is_file()
+    # the CLI's @FILE form (one id per line, '#' comments) through a real build, where the local model is present
+    from _coldembed import HAVE_LOCAL_EMBED
+    if HAVE_LOCAL_EMBED:
+        lst = tmp_path / "expected.txt"; lst.write_text("# sessions I expect\nsess-old-0001\nsess-other-9999\n")
+        out = _run(tmp_path, home, "epoch", "build", "--backfill-captures-without-path", f"@{lst}").stdout
+        assert '"backfill_expected": ["sess-old-0001", "sess-other-9999"]' in out and \
+            '"backfill_expected_not_found": ["sess-other-9999"]' in out, out
 
 
 def test_defect2_shred_unlinks_the_twin_in_the_same_call_and_the_next_build_drops_its_rows(tmp_path, monkeypatch):
@@ -356,8 +379,17 @@ def test_defect2_shred_unlinks_the_twin_in_the_same_call_and_the_next_build_drop
     txid = json.loads(doc.read_text().split("\ntxid: ", 1)[1].split("\n", 1)[0])
     assert "captured session sess-quokka-0001" in _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
     out = _run(tmp_path, home, "shred", "--txid", txid, "--yes", check=False)
-    # the epoch home still refuses the KEY shred (unchanged); the plaintext twin is gone in this very call
-    assert out.returncode != 0 and "removed captured-session document" in out.stdout, out.stdout + out.stderr
+    text = out.stdout + out.stderr
+    # the epoch home still refuses the KEY shred (non-zero, unchanged); the plaintext twin is gone in this very call,
+    # and the command SAYS so (a), says what remains, and says how to finish (b) -- CSO ruling 04:02Z
+    assert out.returncode != 0, text
+    assert f"plaintext captured-session document for {txid} removed for good: {doc}" in text, text
+    assert "The encrypted record, its key and its `lbrain recall` snapshot REMAIN: the archive key shred is refused " \
+           "on an epoch home." in text
+    route = text.split("to complete the shred on this epoch home, run: ", 1)[1].split("  (", 1)[0]
+    assert route.endswith("lbrain epoch build") and f"shred -u {home / 'keys' / (txid + '.key')}" in route, route
+    assert "another served capture" not in text                     # this session has only the one capture
+    assert text.index("removed for good") < text.index("to complete the shred")
     assert not doc.exists() and (home / "captures" / ".shredded" / txid).is_file()
     rep = _build(home, tmp_path, mp, delta=True)
     cd = rep["captured_docs"]
@@ -365,6 +397,41 @@ def test_defect2_shred_unlinks_the_twin_in_the_same_call_and_the_next_build_drop
     assert cd["post_sweep"]["shredded"] == 1 and cd["post_sweep"]["written"] == 0, cd   # never written back
     assert not doc.exists()
     assert "captured session sess-quokka-0001" not in _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
+    # (b) is the real route: run its file steps, then the build -> the record is shredded in the new epoch
+    steps = [s for s in route.split(" && ") if s != "lbrain epoch build"]
+    for s in steps:
+        assert s.startswith("shred -u "), s
+        subprocess.run(["bash", "-c", s], check=True)
+    rep2 = _build(home, tmp_path, mp, delta=True)
+    assert rep2["sweep"]["healed_keyless"] == 1, rep2["sweep"]
+    db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
+    con = eb._connect_vec(db)
+    row = con.execute("SELECT shredded, snapshot FROM archives WHERE txid = ?", (txid,)).fetchone()
+    con.close()
+    assert row[0] == 1 and row[1] == "", row
+    rt = _run(tmp_path, home, "retrieve", "--txid", txid, "--out", str(tmp_path / "x.bin"), check=False)
+    assert rt.returncode != 0                                         # undecryptable: the key is gone
+
+
+def test_shred_names_another_served_capture_of_the_same_session(tmp_path, monkeypatch):
+    mp = monkeypatch
+    home = _captured_home(tmp_path, mp, on=True)
+    _build(home, tmp_path, mp, delta=True)
+    old = home / "captures" / "captured-session-sess-quokka-0001.md"
+    old_txid = json.loads(old.read_text().split("\ntxid: ", 1)[1].split("\n", 1)[0])
+    longer = tmp_path / "transcript2.jsonl"
+    longer.write_text((tmp_path / "transcript.jsonl").read_text() + json.dumps(
+        {"type": "user", "timestamp": "2026-11-18T10:00:00Z", "message": {"content": "One more turn after that."}}) + "\n")
+    _run(tmp_path, home, "capture", "--from-file", str(longer), "--session-id", "sess-quokka-0001", "--quiet")
+    _build(home, tmp_path, mp, delta=True)
+    new_txid = json.loads(old.read_text().split("\ntxid: ", 1)[1].split("\n", 1)[0])
+    assert new_txid != old_txid                                       # the newer capture now serves the session
+    out = _run(tmp_path, home, "shred", "--txid", old_txid, "--yes", check=False)
+    text = out.stdout + out.stderr
+    assert out.returncode != 0
+    assert f"no plaintext captured-session document existed for {old_txid}" in text, text
+    assert f"another served capture of the same session remains: txid {new_txid}" in text, text
+    assert old.is_file()                                              # the newer capture's document is not touched
 
 
 def test_condition5_the_cap_keeps_the_newest_turns(tmp_path, monkeypatch):
@@ -427,3 +494,55 @@ def test_condition6_every_secret_pattern_and_a_pem_block_never_reach_the_documen
     for ln in PEM_BLOCK.split("\n"):
         assert ln not in doc, ln
     assert "the key follows" in doc and "after the key" in doc and "note 13:" in doc
+
+
+CONTRADICTION_LINES = [
+    "SUPERSEDED by [[a]] on 2026-11-18",
+    "RETIRED — see [[a]]",
+    "**Supersedes:** [[a]]",
+    "Supersedes: a",
+    "status: retired",
+    "claims:",
+    "  - text: nothing about any marsupial here",
+    "    status: retracted",
+    "CONTRADICTS [[a]]: 'nothing about any marsupial here' is false",
+    "**Last Updated**: 2020-01-01",
+]
+
+
+def test_captured_session_mints_no_claim_contradiction_or_supersession(tmp_path, monkeypatch):
+    """CSO 04:02Z question for the first receipt: a captured session must feed NO claim_spans, supersession,
+    wikilink or retirement against other records. Planted contradiction-shaped lines (the conversation QUOTING
+    every form the index reads as a declaration) mint nothing; the ordinary note a.md stays current and unmarked."""
+    mp = monkeypatch
+    home = _home(tmp_path, True)
+    _build(home, tmp_path, mp, delta=False)
+    rows = [{"type": "user", "timestamp": "2026-11-18T09:00:00Z", "message": {"content": "\n".join(CONTRADICTION_LINES)}},
+            {"type": "assistant", "timestamp": "2026-11-18T09:00:01Z",
+             "message": {"content": [{"type": "text", "text": "noted the wallaby audit"}]}}]
+    t = tmp_path / "contra.jsonl"; t.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    _run(tmp_path, home, "capture", "--from-file", str(t), "--session-id", "sess-contra", "--quiet")
+    rep = _build(home, tmp_path, mp, delta=True)
+    assert rep["captured_docs"]["post_sweep"]["written"] == 1, rep["captured_docs"]
+    doc = home / "captures" / "captured-session-sess-contra.md"
+    db = home / "epochs" / (home / "epochs" / "CURRENT").read_text().strip() / "brain.db"
+    con = eb._connect_vec(db)
+    rel = con.execute("SELECT rel_path FROM docs WHERE abs_path = ?", (str(doc),)).fetchone()[0]
+    for table in ("claim_spans", "supersessions", "wikilinks"):
+        assert con.execute(f"SELECT COUNT(*) FROM {table} WHERE src_path = ?", (rel,)).fetchone()[0] == 0, table
+    assert con.execute("SELECT COUNT(*) FROM supersessions").fetchone()[0] == 0     # nothing anywhere names a.md
+    assert con.execute("SELECT COUNT(*) FROM claim_spans").fetchone()[0] == 0
+    con.close()
+    def headers(out):   # the record header lines: where SUPERSEDED / RETIRED markers are rendered
+        return [ln for ln in out.splitlines() if ln.strip().startswith("src:")]
+    s = _run(tmp_path, home, "search", "--current-only", "marsupial").stdout
+    assert "src: a.md" in s and not any(("SUPERSEDED" in h or "RETIRED" in h) for h in headers(s)), s
+    c = _run(tmp_path, home, "search", "--current-only", "wallaby audit").stdout
+    assert "captured session sess-contra" in c and not any("RETIRED" in h for h in headers(c)), c   # not self-retired
+    # the exemption holds at parse time even for frontmatter the engine did not write
+    from lbrain.index import parse
+    p = tmp_path / "hand.md"
+    p.write_text('---\nkind: "captured-session"\ntype: "captured-session"\nsupersedes: a\nclaims:\n'
+                 '  - text: nothing about any marsupial here\n    status: retracted\n---\n# x\n\n**Supersedes:** [[a]]\nsee [[a]]\n')
+    d = parse(p)
+    assert d.claims == [] and d.supersedes == [] and d.wikilinks == []

@@ -2598,11 +2598,13 @@ def prune_unreachable_cmd(yes, force):
               help="If a LIVE builder holds the lock, wait up to SECONDS for it instead of failing. When it "
                    "publishes an epoch whose scan began after this command started, exit 0 on that epoch "
                    "without a second build; otherwise build. A stale lock is taken over as without the flag.")
-@click.option("--backfill-captures-without-path", "backfill_captures_without_path", is_flag=True,
-              help="index_captured_snapshots only: ALSO index captured sessions that carry no recorded transcript "
-                   "path (every capture staged before 2026-11-19). Such a capture cannot be judged against "
-                   "exclude_path_markers / capture_keep_out, so it is skipped unless this is passed; the build "
-                   "report lists each backfilled txid.")
+@click.option("--backfill-captures-without-path", "backfill_captures_without_path", default=None,
+              metavar="SESSIONS",
+              help="index_captured_snapshots only: ALSO index the NAMED captured sessions that carry no recorded "
+                   "transcript path (every capture staged before 2026-11-19; they cannot be judged against "
+                   "exclude_path_markers / capture_keep_out). SESSIONS is required: comma-separated session ids, or "
+                   "@FILE with one id per line. A path-less capture not on the list is reported, never indexed; a "
+                   "listed session not found is reported too.")
 def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_delist, keep, max_bytes, no_sweep,
                     wait_for_builder, rebase_source, backfill_captures_without_path):
     """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
@@ -2628,11 +2630,25 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
             click.secho("✗ --rebase-source takes OLD=NEW and cannot be combined with --wait-for-builder", fg="red")
             sys.exit(2)
         kw["rebase_source"] = tuple(pairs)
-    if backfill_captures_without_path:
+    if backfill_captures_without_path is not None:
+        spec = backfill_captures_without_path.strip()
+        if spec.startswith("@"):
+            try:
+                raw_ids = Path(spec[1:]).expanduser().read_text(encoding="utf-8").splitlines()
+            except OSError as e:
+                click.secho(f"✗ --backfill-captures-without-path: cannot read {spec[1:]}: {e}", fg="red")
+                sys.exit(2)
+        else:
+            raw_ids = spec.split(",")
+        ids = tuple(sorted({x.strip() for x in raw_ids if x.strip() and not x.strip().startswith("#")}))
+        if not ids:   # CSO 04:02Z: no backfill without naming the sessions expected
+            click.secho("✗ --backfill-captures-without-path needs the sessions you expect: comma-separated session "
+                        "ids or @FILE (one id per line); refusing to backfill an unnamed set", fg="red")
+            sys.exit(2)
         if wait_for_builder is not None:   # a follower could be satisfied by a build that did NOT backfill
             click.secho("✗ --backfill-captures-without-path cannot be combined with --wait-for-builder", fg="red")
             sys.exit(2)
-        kw["backfill_captures_without_path"] = True
+        kw["backfill_captures_without_path"] = ids
     try:
         if wait_for_builder is None:
             report = build(CONFIG_DIR, cfg, **kw)

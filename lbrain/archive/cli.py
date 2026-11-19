@@ -350,9 +350,17 @@ def shred(txid, yes, soft):
     except Exception as e:
         click.secho(f"✗ could not remove the captured-session document for {txid}: {type(e).__name__}: {e}", fg="red")
         sys.exit(1)
-    for g in gone:
-        click.secho(f"  removed captured-session document {g} (tombstoned; its index rows drop at the next "
-                    "`lbrain epoch build`)", fg="yellow")
+    from ..epoch import current_epoch_id
+    if current_epoch_id(Path(CONFIG_DIR)) is not None:
+        # CSO ruling 04:02Z: on an epoch home the plaintext goes first, then the command SAYS what remains and how
+        # to finish, then the key shred refuses (non-zero exit, as before).
+        from .captured import shred_epoch_lines
+        for ln in shred_epoch_lines(Path(CONFIG_DIR), cfg, txid, gone):
+            click.secho(f"  {ln}", fg="yellow")
+    else:
+        for g in gone:
+            click.secho(f"  removed captured-session document {g} (tombstoned; its index rows drop at the next "
+                        "`lbrain epoch build`)", fg="yellow")
     store = _open(cfg, write=True)
     had_key = Archiver(cfg, store).shred(txid, purge_snapshot=not soft)
     store.close()
