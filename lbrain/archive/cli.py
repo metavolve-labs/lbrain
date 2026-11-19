@@ -189,7 +189,8 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
         label = title or session_id or Path(from_file).stem
         try:
             res = spool_capture(Config.load(), home, payload, session_id=session_id,
-                                title=label, namespace=namespace)
+                                title=label, namespace=namespace,
+                                source_path=os.path.abspath(from_file))
         except (WriteGateError, SpoolIntegrityError) as e:
             # rc=2 like every gated writer; hooks stay fail-safe. Integrity
             # refusals (RED-SPOOL-1) are loud here, never a quiet "already staged".
@@ -260,9 +261,12 @@ def capture(from_file, session_id, title, namespace, remote, llm_snapshot, quiet
 @click.argument("query")
 @click.option("-k", default=5, type=int, help="Number of archived records to surface")
 @click.option("--namespace", default=None, help="Restrict to a silo")
-def recall(query, k, namespace):
+@click.option("--chars", "chars", default=None, type=click.IntRange(min=1),
+              help="Preview length for THIS call (default: config recall_preview_chars, 300 unless set)")
+def recall(query, k, namespace, chars):
     """Deep-recall: semantic search over archived-session snapshots (the read surface)."""
     cfg = Config.load()
+    width = chars or int(getattr(cfg, "recall_preview_chars", 300) or 300)
     store = _open(cfg)
     embedder = make_embedder(cfg)
     try:
@@ -280,7 +284,7 @@ def recall(query, k, namespace):
         when = _dt.datetime.fromtimestamp(r["created"], _dt.timezone.utc).strftime("%Y-%m-%d") if r["created"] else "?"  # UTC frame
         click.secho(f"  [{i}] {r['title']}  (dist {r['dist']:.3f})", fg="yellow")
         click.echo(f"      txid {r['txid']}  ·  {when}  ·  {r['namespace']}  ·  {r['n_bytes']} bytes")
-        preview = r["snapshot"].strip().replace("\n", " ")[:300]
+        preview = r["snapshot"].strip().replace("\n", " ")[:width]
         click.echo(f"      {preview}\n")
     click.echo(f"  → full record: lbrain retrieve --txid <txid>")
 
@@ -507,7 +511,24 @@ def archive_chunks_reindex():
     click.echo("ARCHIVE-CHUNKS " + json.dumps(rep, sort_keys=True))
 
 
-_COMMANDS = [archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status, archive_chunks_reindex]
+@click.command(name="capture-pointer")
+@click.option("--hours", default=24.0, type=float, show_default=True, help="Look back this many hours")
+def capture_pointer(hours):
+    """One line per session captured in the last N hours: what was captured, whether it is searchable yet, and five
+    terms to ask `lbrain query` / `lbrain recall` about. Built for a SessionStart hook: prints nothing when there is
+    nothing to say, never fails the hook (exit 0; a problem is one line on stderr). Read-only."""
+    try:
+        from .captured import pointer_lines
+        lines = pointer_lines(Path(CONFIG_DIR), Config.load(), hours=hours)
+    except Exception as e:   # a session start must never break on the pointer
+        from ..identity import scrub_reason
+        click.echo(f"capture-pointer: unavailable ({type(e).__name__}: {scrub_reason(str(e))})", err=True)
+        return
+    for ln in lines:
+        click.echo(ln)
+
+
+_COMMANDS = [capture_pointer, archive, capture, recall, retrieve, shred, archive_status, archives_cmd, sweep_status, archive_chunks_reindex]
 
 
 def register(main) -> None:

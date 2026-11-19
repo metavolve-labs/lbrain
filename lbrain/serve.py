@@ -109,7 +109,8 @@ def _fold_confusable_dots(s: str) -> str:
     return "".join(out)
 
 # doc_type is corpus-derived (arbitrary YAML frontmatter) — whitelist the enum.
-DOC_TYPES = {"user", "feedback", "project", "reference", "abstraction", "belief"}
+DOC_TYPES = {"user", "feedback", "project", "reference", "abstraction", "belief",
+             "captured-session"}  # 2026-11-19: a captured session served through ordinary recall says what it is
 
 
 def sanitize_field(s: str, max_len: int = 120) -> str:

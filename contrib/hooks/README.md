@@ -58,3 +58,16 @@ auto-capture local and push deliberately, to protect the AR balance.
 - **Privacy:** records are AES-256-GCM encrypted; the key is local and crypto-shreddable
   (`lbrain shred --txid …`). Auto-capturing *everything* makes throwaway sessions permanent
   too — use `lbrain shred` to drop ones you don't want kept.
+
+## Reaching a captured session from the next session (2026-11-19)
+
+- `index_captured_snapshots = true` (config.toml, default **false**): at each `lbrain epoch build` the FULL text of every
+  served captured session (its user and assistant turns, rendered from the transcript; thinking, tool inputs and tool
+  results dropped; capped at 1 MB of turns) is written, secret-screened, as `<home>/captures/captured-session-<id>.md`
+  (`type: captured-session`, txid, session id, capture time, transcript path) and served by `lbrain query`,
+  `lbrain search`, `lair_query` and `lair_search`. `exclude_path_markers` and `capture_keep_out` keep a capture out.
+  Turning it off again purges those documents from the next epoch (the files stay on disk).
+- `recall_preview_chars` (default 300) sets the `lbrain recall` / `lair_deep_recall` preview; `lbrain recall --chars N`
+  overrides it for one call.
+- `lbrain-capture-pointer.sh` (SessionStart) prints one line per session captured in the last 24 h, with the terms to
+  ask about; it calls `lbrain capture-pointer` and nothing else.

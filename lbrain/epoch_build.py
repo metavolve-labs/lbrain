@@ -668,6 +668,25 @@ def _shred_in_candidate(staging_db: Path, txid: str, dim: int) -> None:
         con.close()
 
 
+def _captures_root(home: Path, cfg) -> Path | None:
+    explicit = str(getattr(cfg, "captured_snapshots_root", "") or "")
+    return Path(explicit).expanduser() if explicit else Path(home) / "captures"
+
+
+def _captured_docs(home: Path, cfg, db: Path, report: dict, *, phase: str, remove: bool,
+                   plan: list[dict] | None = None, immutable: bool = False) -> dict | None:
+    """Write the captured-session documents (lbrain.archive.captured). Without the archive extra there are no
+    archives to publish: reported, never raised. Any other failure fails the build (staging retained)."""
+    try:
+        from .archive.captured import write_captured_docs
+    except ImportError as e:
+        report.setdefault("captured_docs", {})[phase] = {"skipped": f"archive extra unavailable: {e}"}
+        return None
+    rep = write_captured_docs(home, cfg, db, plan=plan, immutable=immutable, remove=remove)
+    report.setdefault("captured_docs", {})[phase] = rep
+    return rep
+
+
 def _sweep_spool(home: Path, staging: Path, lbrain_bin: str, lock, report: dict, dim: int = 0) -> list[dict]:
     """Archive every staged capture into the staging candidate. Returns the plan (one dict per entry, with the txid the
     capture reported) for `_finish_sweep` after publish. Skips loudly, never silently: no passphrase = nothing swept."""
@@ -828,6 +847,14 @@ def build(
     sources = [str(Path(s)) for s in cfg.sources]
     confirmed = {str(Path(s)) for s in confirm_source_removed}
     report: dict = {"home": str(home)}
+    # 2026-11-19 (index_captured_snapshots, default OFF): the captures root is a SOURCE of this build -- in its
+    # inventory, its deletion manifest, its collapse check and its coverage -- exactly when the switch is on.
+    captures_on = bool(getattr(cfg, "index_captured_snapshots", False))
+    captures_root = _captures_root(home, cfg)
+    if captures_on and captures_root is not None:
+        captures_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if not any(os.path.realpath(s) == os.path.realpath(str(captures_root)) for s in sources):
+            sources.append(str(captures_root))
 
     with BuilderLock(home) as lock:
         eid = new_epoch_id()
@@ -883,7 +910,16 @@ def build(
             staged_sha = hashlib.sha256(raw_bytes).hexdigest()
             raw = raw_bytes.decode("utf-8")
             raw = re.sub(r"^db_path = .*$", f'db_path = "{staging_db}"', raw, count=1, flags=re.M)
+            if captures_on and captures_root is not None:
+                # the staging child resolves the root from ITS home unless told; tell it (top-level key, first line)
+                raw = re.sub(r"^captured_snapshots_root\s*=.*$\n?", "", raw, flags=re.M)
+                raw = f"captured_snapshots_root = {json.dumps(str(captures_root))}\n" + raw
             (staging / "config.toml").write_text(raw, encoding="utf-8")
+            if captures_on and captures_root is not None:
+                # before the import: documents for every capture the PRIOR epoch already serves (first build after the
+                # switch flips, or a root someone emptied). Additive here; removals happen after the sweep.
+                _captured_docs(home, cfg, prior_db if prior_db is not None else staging_db, report,
+                               phase="pre_import", remove=False)
 
             _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else [])
                      + (["--confirm-delist"] if confirm_delist else []),
@@ -910,6 +946,22 @@ def build(
                 report["archive_index_carried"] = _carry_archive_index(prior_db, staging_db)
             swept_plan = _sweep_spool(home, staging, lbrain_bin, lock, report, dim=int(getattr(cfg, "embedding_dim", 0) or 0)) if sweep else []
             lock.heartbeat()
+            if captures_on and captures_root is not None:
+                # after the sweep: the candidate's served captures, exactly (new ones written, shredded/superseded/excluded
+                # ones removed), then a NARROW import of the reserved root (its prune scoped to that root; --force-prune
+                # because the removals are this build's own deliberate act) and an embed of the new chunks.
+                rep = _captured_docs(home, cfg, staging_db, report, phase="post_sweep", remove=True, plan=swept_plan)
+                if rep and (rep.get("written") or rep.get("removed")):
+                    _run_cli(["import", "--prune", "--force-prune", str(captures_root)], staging, lbrain_bin, lock=lock)
+                    _run_cli(["embed", "--stale"], staging, lbrain_bin, lock=lock)
+                    lock.heartbeat()
+            elif captures_root is not None and captures_root.is_dir() and not any(
+                    os.path.realpath(s) == os.path.realpath(str(captures_root)) for s in sources):
+                # switch OFF after it was on: the documents stop being served (rows purged from the candidate; the files
+                # on disk are left for the operator). A home that never turned it on has no root: no-op.
+                n = _purge_source(staging_db, str(captures_root), cfg.embedding_dim)
+                if n:
+                    report["captured_docs"] = {"purged_switch_off": n}
             # Chunked archive vectors (2026-10-17): every served archive gets chunk vectors, superseded/shredded ones
             # drop theirs (derived index data only). Runs in STAGING, the only write path. The chunk index is derived,
             # so a failure here is reported loudly and the build publishes; recall falls back to the single vector.

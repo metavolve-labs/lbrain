@@ -148,6 +148,22 @@ _load_env_file()
 # archive layer reads (kept here so Config.write persists them round-trip).
 
 
+def _preview_chars(v) -> int:
+    """recall_preview_chars: a positive int; anything else falls back to 300 (the pre-knob behaviour)."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 300
+    return n if n > 0 else 300
+
+
+def _same_dir(a: Path, b: Path) -> bool:
+    try:
+        return os.path.realpath(str(a)) == os.path.realpath(str(b))
+    except OSError:
+        return str(a) == str(b)
+
+
 @dataclass
 class Config:
     sources: list[Path] = field(default_factory=list)
@@ -297,7 +313,20 @@ class Config:
     arweave_float_min_ar: float = 0.0
     arweave_float_alert_cmd: str = ""
     archive_namespace: str = "private"  # default silo: private working/research memory
+    # 2026-11-19 (capture reachable through ordinary recall). OFF by default: when ON, `lbrain epoch build` writes each
+    # served captured session's snapshot (secret-screened) as a markdown document under `captured_snapshots_root`
+    # (empty = <home>/captures) and that root is served as an ordinary source, so `lbrain query` / `lbrain search`
+    # return captured-session chunks. OFF = nothing is written and the source list is exactly what config.toml says.
+    index_captured_snapshots: bool = False
+    captured_snapshots_root: str = ""
+    # How many characters of the best-matching snapshot chunk `lbrain recall` and `lair_deep_recall` show (and the
+    # prose-mode `lair_search` preview). 300 = the behaviour before the knob existed.
+    recall_preview_chars: int = 300
     db_path: Path = field(default_factory=lambda: DB_PATH)
+
+    def captures_root(self) -> Path:
+        """The reserved source root for captured-session snapshot documents."""
+        return Path(self.captured_snapshots_root).expanduser() if self.captured_snapshots_root else CONFIG_DIR / "captures"
 
     def __post_init__(self):
         # Validate on every construction — catches a poisoned GEMINI_BASE_URL env
@@ -351,7 +380,7 @@ class Config:
             or os.environ.get("GEMINI_API_KEY")
             or os.environ.get("GEMINI_3_API_KEY", "")
         )
-        return cls(
+        cfg = cls(
             sources=sources,
             embedding_provider=raw.get("embedding_provider", cls.embedding_provider),
             openai_api_key=api_key,
@@ -410,8 +439,21 @@ class Config:
             arweave_float_min_ar=float(raw.get("arweave_float_min_ar", cls.arweave_float_min_ar)),
             arweave_float_alert_cmd=raw.get("arweave_float_alert_cmd", cls.arweave_float_alert_cmd),
             archive_namespace=raw.get("archive_namespace", cls.archive_namespace),
+            index_captured_snapshots=raw.get("index_captured_snapshots", cls.index_captured_snapshots) is True,
+            captured_snapshots_root=str(raw.get("captured_snapshots_root", "") or ""),
+            recall_preview_chars=_preview_chars(raw.get("recall_preview_chars", cls.recall_preview_chars)),
             db_path=Path(raw["db_path"]).expanduser() if "db_path" in raw else DB_PATH,
         )
+        # The captures root joins the served sources ONLY when the switch is on AND the directory exists (the epoch
+        # build creates it). An absent root is never added: prune's mount-gone guard would otherwise skip every prune.
+        if cfg.index_captured_snapshots:
+            root = cfg.captures_root()
+            if root.is_dir() and not any(_same_dir(root, s) for s in cfg.sources):
+                cfg.sources.append(root)
+                # Not a dataclass field (the write/load round-trip gate covers fields): the sources the engine added
+                # at load, which write() must never persist as operator sources.
+                cfg.implicit_sources = [root]
+        return cfg
 
     def write(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -477,10 +519,15 @@ class Config:
             f"arweave_float_min_ar = {float(self.arweave_float_min_ar)}",
             f"arweave_float_alert_cmd = {q(self.arweave_float_alert_cmd)}",
             f"archive_namespace = {q(self.archive_namespace)}",
+            f"index_captured_snapshots = {str(self.index_captured_snapshots).lower()}",
+            f"captured_snapshots_root = {q(self.captured_snapshots_root)}",
+            f"recall_preview_chars = {int(self.recall_preview_chars)}",
             f"db_path = {q(self.db_path)}",
             "sources = [",
         ]
         for s in self.sources:
+            if s in getattr(self, "implicit_sources", ()):
+                continue   # engine-added at load (the captures root): never persisted as an operator source
             lines.append(f"  {q(s)},")
         lines.append("]")
         CONFIG_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")

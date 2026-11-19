@@ -278,6 +278,37 @@ def _redact(text: str) -> str:
     return s
 
 
+def redact_secrets(text: str) -> str:
+    """Multi-line form of the screen above, for DOCUMENT text (2026-11-19: captured-session snapshots and the capture
+    pointer). The SAME ``_SECRET_PATTERNS``, applied line by line so the document keeps its lines; no new patterns.
+    Per line: invisible characters stripped, then the raw line redacted. When the line carries percent escapes, the
+    decoded line is redacted too (up to ``_DECODE_LEVELS``), and if decoding exposed a secret shape the redacted
+    DECODED form replaces the line (compose, never choose: whatever the raw pass hid stays hidden). A line with no
+    secret shape at any level comes back unchanged apart from invisible characters: the snapshot stays readable.
+    Conservative like its source: the long-opaque-token rule also redacts 40+ character hashes and ids."""
+    from urllib.parse import unquote
+
+    out = []
+    for line in str(text).split("\n"):
+        raw = "".join(ch for ch in line if not _invisible(ch))
+        s = raw
+        for pat, repl in _SECRET_PATTERNS:
+            s = pat.sub(repl, s)
+        cur = s
+        for _ in range(_DECODE_LEVELS):
+            d = unquote(cur)
+            if d == cur:
+                break
+            r = d
+            for pat, repl in _SECRET_PATTERNS:
+                r = pat.sub(repl, r)
+            if r != d:          # decoding exposed a secret shape: keep the redacted decoded form
+                s = r
+            cur = r
+        out.append(s)
+    return "\n".join(out)
+
+
 def _counts_unknown(stats: dict | None, counts_error: str) -> str:
     """Empty when every count is a real integer; otherwise the reason it is not (scrubbed,
     one line, capped: it is printed by `whoami` and relayed by `lair_whoami`)."""

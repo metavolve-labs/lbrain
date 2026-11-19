@@ -102,7 +102,7 @@ def _write_then_rename(target: Path, data: bytes) -> None:
 
 
 def spool_capture(cfg, home: Path, payload: bytes, *, session_id: str | None,
-                  title: str | None, namespace: str | None) -> SpoolResult:
+                  title: str | None, namespace: str | None, source_path: str | None = None) -> SpoolResult:
     """Stage one capture. Raises ``WriteGateError`` on W1/W2 refusal."""
     from .write_gates import check_write_target
 
@@ -162,6 +162,10 @@ def spool_capture(cfg, home: Path, payload: bytes, *, session_id: str | None,
         "namespace": namespace,
         "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if source_path:
+        # 2026-11-19: where the transcript was read from (additive field; schema stays 1). The epoch build's captured-
+        # session documents carry it as provenance and judge exclude_path_markers / capture_keep_out against it.
+        meta["source_path"] = str(source_path)
     # Meta renames LAST: its presence is the completeness marker.
     _write_then_rename(meta_path, json.dumps(meta, indent=2).encode("utf-8"))
     return SpoolResult(digest, payload_path, meta_path, skipped=False)

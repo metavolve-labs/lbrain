@@ -293,7 +293,7 @@ def lair_search(query: str, k: int = 10, current_only: bool = False) -> str:
         for i, h in enumerate(hits, 1):
             out.append(f"  [{i}] {h.title}")
             out.append(f"    {h.rel_path} :: chunk {h.chunk_idx}")
-            preview = h.text.strip().replace("\n", " ")[:300]
+            preview = h.text.strip().replace("\n", " ")[:int(getattr(cfg, "recall_preview_chars", 300) or 300)]
             out.append(f"    {amp.fence(preview)}\n")
         return unprovisioned + warn + "\n".join(out)
     finally:

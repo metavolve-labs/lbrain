@@ -31,6 +31,7 @@ def register(mcp) -> None:
         from .storage import ArchiveStore
 
         cfg = Config.load()
+        width = int(getattr(cfg, "recall_preview_chars", 300) or 300)
         # RED-W-BYPASS-1 (CSO 2026-09-01): a direct non-immutable Store() open
         # MATERIALIZED a brain.db at a foreign db_path on a mere read. Route
         # through the engine read path (immutable on epoch homes) and refuse to
@@ -48,7 +49,7 @@ def register(mcp) -> None:
             for i, r in enumerate(rows, 1):
                 out.append(f"[{i}] {r['title']}  (dist={r['dist']:.3f})")
                 out.append(f"    txid {r['txid']}  ·  {r['namespace']}  ·  {r['n_bytes']} bytes")
-                out.append(f"    {amp.fence(r['snapshot'].strip().replace(chr(10), ' ')[:300])}\n")
+                out.append(f"    {amp.fence(r['snapshot'].strip().replace(chr(10), ' ')[:width])}\n")
             out.append("Fetch a full record: `lbrain retrieve --txid <txid>`")
             return "\n".join(out)
         finally:
