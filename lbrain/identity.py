@@ -278,6 +278,11 @@ def _redact(text: str) -> str:
     return s
 
 
+_PEM_BEGIN = _re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")   # the header shape _SECRET_PATTERNS already names
+_PEM_END = _re.compile(r"-----END [A-Z ]*PRIVATE KEY-----")
+_PEM_BODY = _re.compile(r"^(?:[A-Za-z0-9+/=]+|Proc-Type:.*|DEK-Info:.*)?$")
+
+
 def redact_secrets(text: str) -> str:
     """Multi-line form of the screen above, for DOCUMENT text (2026-11-19: captured-session snapshots and the capture
     pointer). The SAME ``_SECRET_PATTERNS``, applied line by line so the document keeps its lines; no new patterns.
@@ -289,8 +294,25 @@ def redact_secrets(text: str) -> str:
     from urllib.parse import unquote
 
     out = []
+    in_key = False
     for line in str(text).split("\n"):
         raw = "".join(ch for ch in line if not _invisible(ch))
+        # A PEM private key is a BLOCK: the pattern above names its header line, and its base64 body lines (broken by
+        # '/' into runs under 40) would otherwise survive one by one. From a header line, every line up to and
+        # including the END line, or the first line that is not PEM-shaped (an unterminated paste), is redacted.
+        if _PEM_BEGIN.search(raw):
+            in_key = not _PEM_END.search(raw)
+            out.append("[REDACTED]")
+            continue
+        if in_key:
+            if _PEM_END.search(raw):
+                in_key = False
+                out.append("[REDACTED]")
+                continue
+            if _PEM_BODY.match(raw.strip()):
+                out.append("[REDACTED]")
+                continue
+            in_key = False
         s = raw
         for pat, repl in _SECRET_PATTERNS:
             s = pat.sub(repl, s)

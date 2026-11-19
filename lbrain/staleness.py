@@ -75,6 +75,9 @@ _AS_OF = re.compile(r"\bas of\s+(\d{4}-\d{2}-\d{2})", re.I)
 # Hugo). Anchored to the top-of-file frontmatter so a `date:` mentioned in prose
 # further down is not mistaken for the document's own date.
 _FM_DATE = re.compile(r"\A---\r?\n.*?^date:\s*['\"]?(\d{4}-\d{2}-\d{2})", re.S | re.M)
+# `kind: captured-session` INSIDE the leading frontmatter block only (never a line of the conversation below it).
+_CAPTURED_KIND = re.compile(r"\A---\r?\n(?:(?!^---[ \t]*\r?$).)*?^kind:[ \t]*['\"]?captured-session['\"]?[ \t]*\r?$",
+                            re.S | re.M)
 _VERIFY_BY = re.compile(r"^verify_by\s*:\s*(\d{4}-\d{2}-\d{2})", re.M | re.I)
 _VOLATILE_FALSE = re.compile(r"^volatile\s*:\s*(?:false|no)\s*$", re.M | re.I)
 _FN_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -155,6 +158,12 @@ def claim_date(text: str, rel_path: str, mtime_iso: str = "",
     be covered by tests and satisfied by two of three callers and still be dead
     on the path the user actually sees.
     """
+    # 2026-11-19 (CSO condition 4): a captured-session document (raw text, frontmatter `kind: captured-session`) is
+    # dated by its capture time; the conversation inside it cannot re-date it. The serve path does the same by type.
+    if _CAPTURED_KIND.search(text):
+        m = _FM_DATE.search(text)
+        if m:
+            return ("dated", m.group(1))
     m = _UPDATED_HDR.search(text)
     if m:
         return ("verified", m.group(1))

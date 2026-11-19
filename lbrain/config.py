@@ -314,9 +314,14 @@ class Config:
     arweave_float_alert_cmd: str = ""
     archive_namespace: str = "private"  # default silo: private working/research memory
     # 2026-11-19 (capture reachable through ordinary recall). OFF by default: when ON, `lbrain epoch build` writes each
-    # served captured session's snapshot (secret-screened) as a markdown document under `captured_snapshots_root`
+    # served captured session's full turn text (secret-screened) as a markdown document under `captured_snapshots_root`
     # (empty = <home>/captures) and that root is served as an ordinary source, so `lbrain query` / `lbrain search`
     # return captured-session chunks. OFF = nothing is written and the source list is exactly what config.toml says.
+    # The documents hold the FULL text of each session's turns (not the snapshot), secret-screened. ON puts the seat's
+    # own session text in the seat's own index (0600 files, 0700 root, the index's permissions). On a REMOTE embedding
+    # provider (gemini / openai) ON also SENDS that screened whole-session text to the provider to be embedded.
+    # Captures with no recorded transcript path are skipped unless `epoch build --backfill-captures-without-path`.
+    # A home shared by several people should keep this OFF: ordinary recall has no per-owner filter.
     index_captured_snapshots: bool = False
     captured_snapshots_root: str = ""
     # How many characters of the best-matching snapshot chunk `lbrain recall` and `lair_deep_recall` show (and the

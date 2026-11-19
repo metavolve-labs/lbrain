@@ -176,6 +176,10 @@ def record_date(h: Hit) -> tuple[str, str]:
         except (OverflowError, OSError, ValueError):
             return ""
 
+    if getattr(h, "doc_type", "") == "captured-session" and getattr(h, "doc_date", ""):
+        # 2026-11-19 (CSO condition 4): a captured session is dated by its CAPTURE time. Its chunks are a
+        # conversation; an "as of <date>" or a `**Last Updated**` said in it must not re-date the record.
+        return ("dated", h.doc_date)
     if _is_abstraction(h):
         # Prefer the in-content `generated:` date; mtime is only the fallback.
         # The old comment here read "mtime IS synthesis time for a generated record,

@@ -673,8 +673,46 @@ def _captures_root(home: Path, cfg) -> Path | None:
     return Path(explicit).expanduser() if explicit else Path(home) / "captures"
 
 
+def _drop_missing_captured(db_path: Path, root: Path, embedding_dim: int,
+                           removed_names: set[str] | frozenset = frozenset()) -> list[tuple[str, str]]:
+    """Remove from the candidate every captured-session row under ``root`` whose document file no longer exists
+    BECAUSE OF A DELIBERATE ACT: its txid is tombstoned (`lbrain shred` unlinked the twin), or the build's own writer
+    removed that file this build (``removed_names``). Full cascade. Returns (rel_path, abs_path) per row dropped. A
+    document that vanished for any other reason is NOT dropped here: the import and the gates judge it as usual."""
+    from .store import Store, _norm_path, _under_roots
+
+    if not Path(db_path).exists():
+        return []
+    from .archive.captured import is_tombstoned
+    store = Store(Path(db_path), embedding_dim=embedding_dim)
+    try:
+        roots = [_norm_path(str(root))]
+        rows = []
+        for r in store.db.execute("SELECT rel_path, abs_path, metadata FROM docs"):
+            if not _under_roots(r["abs_path"], roots) or os.path.exists(r["abs_path"]):
+                continue
+            try:
+                txid = str(json.loads(r["metadata"] or "{}").get("txid") or "")
+            except Exception:
+                txid = ""
+            if Path(r["abs_path"]).name in removed_names or is_tombstoned(Path(root), txid):
+                rows.append((r["rel_path"], r["abs_path"]))
+        rels = [rel for rel, _ in rows]
+        with store.transaction():
+            for rel in rels:
+                store.delete_doc_chunks(rel)
+                store.db.execute("DELETE FROM wikilinks WHERE src_path = ?", (rel,))
+                store.db.execute("DELETE FROM supersessions WHERE src_path = ?", (rel,))
+                store.db.execute("DELETE FROM claim_spans WHERE src_path = ?", (rel,))
+                store.db.execute("DELETE FROM docs WHERE rel_path = ?", (rel,))
+        return rows
+    finally:
+        store.close()
+
+
 def _captured_docs(home: Path, cfg, db: Path, report: dict, *, phase: str, remove: bool,
-                   plan: list[dict] | None = None, immutable: bool = False) -> dict | None:
+                   plan: list[dict] | None = None, immutable: bool = False,
+                   backfill_without_path: bool = False) -> dict | None:
     """Write the captured-session documents (lbrain.archive.captured). Without the archive extra there are no
     archives to publish: reported, never raised. Any other failure fails the build (staging retained)."""
     try:
@@ -682,7 +720,8 @@ def _captured_docs(home: Path, cfg, db: Path, report: dict, *, phase: str, remov
     except ImportError as e:
         report.setdefault("captured_docs", {})[phase] = {"skipped": f"archive extra unavailable: {e}"}
         return None
-    rep = write_captured_docs(home, cfg, db, plan=plan, immutable=immutable, remove=remove)
+    rep = write_captured_docs(home, cfg, db, plan=plan, immutable=immutable, remove=remove,
+                              backfill_without_path=backfill_without_path)
     report.setdefault("captured_docs", {})[phase] = rep
     return rep
 
@@ -827,6 +866,7 @@ def build(
     sweep: bool = True,
     config_sha: str | None = None,
     rebase_source: tuple[tuple[str, str], ...] = (),
+    backfill_captures_without_path: bool = False,
 ) -> dict:
     """Build → validate → swap. Returns a report dict; raises EpochError with the
     staging retained as .failed forensics on any gate refusal.
@@ -851,6 +891,8 @@ def build(
     # inventory, its deletion manifest, its collapse check and its coverage -- exactly when the switch is on.
     captures_on = bool(getattr(cfg, "index_captured_snapshots", False))
     captures_root = _captures_root(home, cfg)
+    captures_credited: set[str] = set()       # abs paths of captured documents this build removed ON PURPOSE
+    captures_credited_rel: set[str] = set()
     if captures_on and captures_root is not None:
         captures_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         if not any(os.path.realpath(s) == os.path.realpath(str(captures_root)) for s in sources):
@@ -919,7 +961,14 @@ def build(
                 # before the import: documents for every capture the PRIOR epoch already serves (first build after the
                 # switch flips, or a root someone emptied). Additive here; removals happen after the sweep.
                 _captured_docs(home, cfg, prior_db if prior_db is not None else staging_db, report,
-                               phase="pre_import", remove=False)
+                               phase="pre_import", remove=False,
+                               backfill_without_path=backfill_captures_without_path)
+                # rows whose document is gone (a `lbrain shred` unlinked its twin): dropped from the candidate HERE, by
+                # name and reported, so the import's prune never counts them as a vanished-files event.
+                dropped = _drop_missing_captured(staging_db, captures_root, cfg.embedding_dim)
+                for rel, ap in dropped:
+                    captures_credited_rel.add(rel); captures_credited.add(ap)
+                    report["captured_docs"].setdefault("index_rows_dropped", []).append(rel)
 
             _run_cli(["import", "--prune"] + (["--prune-unreachable"] if prune_unreachable else [])
                      + (["--confirm-delist"] if confirm_delist else []),
@@ -948,20 +997,33 @@ def build(
             lock.heartbeat()
             if captures_on and captures_root is not None:
                 # after the sweep: the candidate's served captures, exactly (new ones written, shredded/superseded/excluded
-                # ones removed), then a NARROW import of the reserved root (its prune scoped to that root; --force-prune
-                # because the removals are this build's own deliberate act) and an embed of the new chunks.
-                rep = _captured_docs(home, cfg, staging_db, report, phase="post_sweep", remove=True, plan=swept_plan)
-                if rep and (rep.get("written") or rep.get("removed")):
-                    _run_cli(["import", "--prune", "--force-prune", str(captures_root)], staging, lbrain_bin, lock=lock)
+                # ones removed), the rows of deliberately removed documents dropped by name, then a NARROW import of
+                # the reserved root (its prune scoped to that root) and an embed of the new chunks.
+                rep = _captured_docs(home, cfg, staging_db, report, phase="post_sweep", remove=True, plan=swept_plan,
+                                     backfill_without_path=backfill_captures_without_path)
+                dropped = _drop_missing_captured(staging_db, captures_root, cfg.embedding_dim,
+                                                 set((rep or {}).get("removed_files", [])))
+                for rel, ap in dropped:
+                    captures_credited_rel.add(rel); captures_credited.add(ap)
+                    report["captured_docs"].setdefault("index_rows_dropped", []).append(rel)
+                if rep and (rep.get("written") or rep.get("removed") or dropped):
+                    _run_cli(["import", "--prune", str(captures_root)], staging, lbrain_bin, lock=lock)
                     _run_cli(["embed", "--stale"], staging, lbrain_bin, lock=lock)
                     lock.heartbeat()
             elif captures_root is not None and captures_root.is_dir() and not any(
                     os.path.realpath(s) == os.path.realpath(str(captures_root)) for s in sources):
-                # switch OFF after it was on: the documents stop being served (rows purged from the candidate; the files
-                # on disk are left for the operator). A home that never turned it on has no root: no-op.
+                # switch OFF after it was on (CSO defect 2): the documents stop being served (rows purged from the
+                # candidate) AND the plaintext documents are deleted from disk. What remains under the root is named in
+                # the report: the tombstone directory (txids of shredded records, empty files) and any file that is not
+                # a captured-session document. A home that never turned it on has no root: no-op.
                 n = _purge_source(staging_db, str(captures_root), cfg.embedding_dim)
-                if n:
-                    report["captured_docs"] = {"purged_switch_off": n}
+                files = sorted(captures_root.glob("captured-session-*.md"))
+                for f in files:
+                    f.unlink()
+                remains = sorted(str(p.relative_to(captures_root)) for p in captures_root.rglob("*"))
+                if n or files:
+                    report["captured_docs"] = {"purged_switch_off": n, "files_deleted_switch_off": len(files),
+                                               "remaining_under_root": remains}
             # Chunked archive vectors (2026-10-17): every served archive gets chunk vectors, superseded/shredded ones
             # drop theirs (derived index data only). Runs in STAGING, the only write path. The chunk index is derived,
             # so a failure here is reported loudly and the build publishes; recall falls back to the single vector.
@@ -1006,6 +1068,16 @@ def build(
             if _unknown_volatile:  # CSO follow-on 2026-11-17: a typo or a parent dir here must not pass silently
                 print("[lbrain] WARNING: volatile_sources names roots that are not configured sources (ignored): "
                       + ", ".join(_unknown_volatile), file=sys.stderr)
+            if captures_credited:
+                # Documents this build dropped ON PURPOSE (a shred's tombstone, or the writer's own removal of a
+                # superseded/excluded capture), each reported by name in report["captured_docs"], are credited as
+                # intended deletions for the captures root ONLY, the way exclude markers are credited. Any other loss
+                # of captured documents still meets the deletion manifest and the collapse check.
+                key = str(Path(captures_root))
+                if key in prior_inv:
+                    prior_inv[key] = {r: h for r, h in prior_inv[key].items() if r not in captures_credited_rel}
+                if prior_abs is not None and key in prior_abs:
+                    prior_abs[key] = [a for a in prior_abs[key] if a not in captures_credited]
             failures = validate_candidate(
                 staging_db, embedding_dim=cfg.embedding_dim, sources=sources,
                 prior_inv=prior_inv, confirmed_removed=confirmed, prior_abs=prior_abs, volatile=volatile_roots)

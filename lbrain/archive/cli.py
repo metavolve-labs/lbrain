@@ -341,6 +341,18 @@ def shred(txid, yes, soft):
         click.echo("  Aborted.")
         return
     cfg = Config.load()
+    # CSO defect 2 (2026-11-19): the record's plaintext TWIN (its captured-session document, when
+    # index_captured_snapshots wrote one) goes in THIS call, before anything that can refuse, and is tombstoned so
+    # no later build writes it back. Its index rows go at the next `lbrain epoch build` (reported there).
+    try:
+        from .captured import shred_twin
+        gone = shred_twin(Path(CONFIG_DIR), cfg, txid)
+    except Exception as e:
+        click.secho(f"✗ could not remove the captured-session document for {txid}: {type(e).__name__}: {e}", fg="red")
+        sys.exit(1)
+    for g in gone:
+        click.secho(f"  removed captured-session document {g} (tombstoned; its index rows drop at the next "
+                    "`lbrain epoch build`)", fg="yellow")
     store = _open(cfg, write=True)
     had_key = Archiver(cfg, store).shred(txid, purge_snapshot=not soft)
     store.close()

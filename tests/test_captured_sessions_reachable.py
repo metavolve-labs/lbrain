@@ -64,7 +64,8 @@ def _transcript(tmp_path) -> Path:
             rows.append({"type": "user", "timestamp": "2026-11-18T09:20:30Z",
                          "message": {"content": f"Status check before the call.\nNothing else changed.\n{MIDDLE}\n"
                                                 f"my GEMINI_API_KEY={PLANTED} and also {PLANTED2} were pasted by mistake\n"
-                                                "**Supersedes:** [[a]]"}})
+                                                "**Supersedes:** [[a]]\n"
+                                                "as of 2020-01-01 the quokka plan stood; see [[a]] for the background"}})
     p = tmp_path / "transcript.jsonl"
     p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
     return p
@@ -133,12 +134,26 @@ def test_a_switch_on_query_and_search_return_the_captured_session_with_provenanc
     con.close()
     assert "quokka" not in snap and "Filler turn 0" in snap
     assert oct(doc.stat().st_mode & 0o777) == "0o600" and oct((home / "captures").stat().st_mode & 0o777) == "0o700"
+    # condition 4: the captured document mints NO graph edges (the conversation quoted [[a]] twice)
+    con = eb._connect_vec(db)
+    rel = con.execute("SELECT rel_path FROM docs WHERE abs_path = ?", (str(doc),)).fetchone()[0]
+    assert con.execute("SELECT COUNT(*) FROM wikilinks WHERE src_path = ?", (rel,)).fetchone()[0] == 0
+    assert con.execute("SELECT COUNT(*) FROM supersessions WHERE src_path = ?", (rel,)).fetchone()[0] == 0
+    con.close()
+    # ... and the raw-text date ladder (`lbrain stale`) dates it by its capture, not by "as of 2020-01-01"
+    from lbrain.staleness import claim_date
+    label, when = claim_date(text, doc.name, "")
+    assert label == "dated" and when.startswith("2026-") and when != "2020-01-01"
 
     s = _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
     assert "captured session sess-quokka-0001 at 2026-" in s and "quokka migration on Tuesday" in s, s
     assert "type=captured-session" in s and "dated 2026-" in s and "captured-session-sess-quokka-0001.md" in s
     assert "⟪note⟫" in s or "│ " in s                              # served inside the untrusted-data fence
     assert PLANTED not in s and PLANTED2 not in s
+    # condition 4: the chunk that SAYS "as of 2020-01-01" is still served dated by its capture time
+    s_asof = _run(tmp_path, home, "search", "quokka plan stood").stdout
+    assert "captured session sess-quokka-0001" in s_asof and "dated 2026-" in s_asof, s_asof
+    assert "as-of 2020-01-01" not in s_asof and "2020-01-01 ·" not in s_asof
     # the planted Supersedes line did not bury the ordinary note (a.md)
     s2 = _run(tmp_path, home, "search", "marsupial").stdout
     assert "a.md" in s2
@@ -162,12 +177,15 @@ def test_a_switch_on_query_and_search_return_the_captured_session_with_provenanc
         line = [ln for ln in r.splitlines() if ln.startswith("      ") and "txid" not in ln and ln.strip()][0]
         assert len(line.strip()) <= 40
 
-    # switching it OFF again stops serving the documents (files stay on disk for the operator)
+    # switching it OFF again stops serving the documents AND deletes them from disk (CSO defect 2); the report
+    # names what remains under the root (nothing here: no shred happened, so no tombstones)
     cfgp = home / "config.toml"; cfgp.write_text(cfgp.read_text().replace("index_captured_snapshots = true", "index_captured_snapshots = false"))
     rep3 = _build(home, tmp_path, mp, delta=True)
-    assert rep3["published"] and rep3["captured_docs"]["purged_switch_off"] == 1, rep3
+    cd3 = rep3["captured_docs"]
+    assert rep3["published"] and cd3["purged_switch_off"] == 1 and cd3["files_deleted_switch_off"] == 1, rep3
+    assert cd3["remaining_under_root"] == []
     assert "captured session sess-quokka-0001" not in _run(tmp_path, home, "search", "quokka").stdout
-    assert doc.is_file()
+    assert not doc.exists()
 
 
 def test_a_switch_off_nothing_changes(tmp_path, monkeypatch):
@@ -299,3 +317,113 @@ def test_redact_secrets_keeps_lines_and_ordinary_text():
     out = redact_secrets(src)
     assert out.split("\n")[0] == "line one" and out.split("\n")[3] == "http://x.com/a%20b stays"
     assert PLANTED not in out and PLANTED2 not in out and out.count("[REDACTED]") == 2
+
+
+# ------------------------------------------------------------------- CSO security read of 8c706b9 (2026-11-19)
+
+def _stage_without_path(home, sid, text):
+    """A spool entry exactly as every capture staged BEFORE this change looks: no `source_path` in its meta."""
+    from lbrain.spool import META_SUFFIX, PAYLOAD_SUFFIX, staging_dir
+    d = staging_dir(home); d.mkdir(parents=True, exist_ok=True)
+    payload = text.encode(); h = hashlib.sha256(payload).hexdigest(); stem = h[:32]
+    (d / f"{stem}{PAYLOAD_SUFFIX}").write_bytes(payload)
+    (d / f"{stem}{META_SUFFIX}").write_text(json.dumps({"schema": 1, "sha256": h, "size": len(payload), "session_id": sid,
+                                                        "title": sid, "namespace": None, "captured_at": "2026-11-18T09:00:00Z"}))
+
+
+def test_defect1_capture_without_recorded_path_is_skipped_unless_backfill_flag(tmp_path, monkeypatch):
+    mp = monkeypatch
+    home = _home(tmp_path, True)
+    _build(home, tmp_path, mp, delta=False)
+    _stage_without_path(home, "sess-old-0001", _transcript(tmp_path).read_text())
+    rep = _build(home, tmp_path, mp, delta=True)
+    cd = rep["captured_docs"]["post_sweep"]
+    assert rep["sweep"]["swept"] == 1 and cd["skipped_no_path"] == 1 and cd["docs"] == 0 and "backfilled" not in cd, cd
+    assert not list((home / "captures").glob("*.md"))
+    assert "captured session" not in _run(tmp_path, home, "search", "quokka").stdout
+    # the named flag, through the CLI: indexed, and the txid is listed as backfilled in the build report
+    out = _run(tmp_path, home, "epoch", "build", "--backfill-captures-without-path").stdout
+    assert '"backfilled": [' in out, out
+    assert (home / "captures" / "captured-session-sess-old-0001.md").is_file()
+    assert "captured session sess-old-0001" in _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
+
+
+def test_defect2_shred_unlinks_the_twin_in_the_same_call_and_the_next_build_drops_its_rows(tmp_path, monkeypatch):
+    mp = monkeypatch
+    home = _captured_home(tmp_path, mp, on=True)
+    _build(home, tmp_path, mp, delta=True)
+    doc = home / "captures" / "captured-session-sess-quokka-0001.md"
+    txid = json.loads(doc.read_text().split("\ntxid: ", 1)[1].split("\n", 1)[0])
+    assert "captured session sess-quokka-0001" in _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
+    out = _run(tmp_path, home, "shred", "--txid", txid, "--yes", check=False)
+    # the epoch home still refuses the KEY shred (unchanged); the plaintext twin is gone in this very call
+    assert out.returncode != 0 and "removed captured-session document" in out.stdout, out.stdout + out.stderr
+    assert not doc.exists() and (home / "captures" / ".shredded" / txid).is_file()
+    rep = _build(home, tmp_path, mp, delta=True)
+    cd = rep["captured_docs"]
+    assert cd["index_rows_dropped"] == ["captured-session-sess-quokka-0001.md"], cd
+    assert cd["post_sweep"]["shredded"] == 1 and cd["post_sweep"]["written"] == 0, cd   # never written back
+    assert not doc.exists()
+    assert "captured session sess-quokka-0001" not in _run(tmp_path, home, "search", "quokka migration Tuesday").stdout
+
+
+def test_condition5_the_cap_keeps_the_newest_turns(tmp_path, monkeypatch):
+    from lbrain.archive import captured
+    rows = [{"type": "user", "timestamp": f"2026-11-18T10:{i // 60:02d}:{i % 60:02d}Z",
+             "message": {"content": f"turn number {i:04d} " + "pad " * 20}} for i in range(400)]
+    payload = ("\n".join(json.dumps(r) for r in rows) + "\n").encode()
+    meta = tmp_path / ("a" * 32 + ".meta.json"); (tmp_path / ("a" * 32 + ".transcript")).write_bytes(payload)
+    m = {"sha256": hashlib.sha256(payload).hexdigest(), "_meta_path": str(meta)}
+    full = captured.full_text(tmp_path, "", m)
+    assert "turn number 0000" in full and "turn number 0399" in full and "older turns omitted" not in full
+    monkeypatch.setattr(captured, "FULL_TEXT_CAP", 5000)
+    kept = captured.keep_newest(full, captured.FULL_TEXT_CAP)
+    assert kept.startswith("… [older turns omitted") and "turn number 0399" in kept and "turn number 0000" not in kept
+    body = kept.split("\n\n", 1)[1]
+    assert body.startswith("## user ") and len(body) <= 5000      # starts on a turn boundary, within the cap
+    # and full_text itself applies it, on the same transcript, through the payload path
+    capped = captured.full_text(tmp_path, "", m)
+    assert capped == kept
+
+
+SECRET_SAMPLES = [   # one planted sample per _SECRET_PATTERNS entry, in order; the value after '|' must not survive
+    ("postgres://admin:S3cretPassw0rdUrl@db.example.com/x", "S3cretPassw0rdUrl"),
+    ("Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA=="),
+    ('{"api_key": "jsonSecretValue123"}', "jsonSecretValue123"),
+    ('DB_PASSWORD="quoted secret value"', "quoted secret value"),
+    ("SECRET_TOKEN=bareSecretValue987", "bareSecretValue987"),
+    ("client_secret={unclosedNestedSecret", "unclosedNestedSecret"),
+    ("-----BEGIN PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----"),
+    ("use Bearer bearerTokenValue42xyz now", "bearerTokenValue42xyz"),
+    ("sk-abcdefgh12345678", "sk-abcdefgh12345678"),
+    (PLANTED, PLANTED),
+    ("ghp_" + "A1b2C3d4E5" * 4, "ghp_" + "A1b2C3d4E5" * 4),
+    ("xoxb-1234567890-abcdefghij", "xoxb-1234567890-abcdefghij"),
+    ("AKIAIOSFODNN7EXAMPLE", "AKIAIOSFODNN7EXAMPLE"),
+    ("Zx9" * 16, "Zx9" * 16),
+]
+PEM_BLOCK = ("-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0AHB7MaHk/q1w\n"
+             "Hy7/Xq4kq9K2c/Yl0dZ3x+f8bVq/kR9m3T7oPL1ZbkQ/Wqk2Xv9cTt8u=\n-----END RSA PRIVATE KEY-----")
+
+
+def test_condition6_every_secret_pattern_and_a_pem_block_never_reach_the_document(tmp_path):
+    from lbrain.archive import captured
+    from lbrain.identity import _SECRET_PATTERNS
+    assert len(SECRET_SAMPLES) == len(_SECRET_PATTERNS)
+    for (sample, _), (pat, _) in zip(SECRET_SAMPLES, _SECRET_PATTERNS):
+        assert pat.search(sample), f"sample does not exercise its pattern: {pat.pattern[:60]}"
+    lines = [f"note {i}: {s}" for i, (s, _) in enumerate(SECRET_SAMPLES)] + ["the key follows", PEM_BLOCK, "after the key"]
+    rows = [{"type": "user", "timestamp": "2026-11-18T09:00:00Z", "message": {"content": "start of session"}},
+            {"type": "user", "timestamp": "2026-11-18T09:00:01Z", "message": {"content": "\n".join(lines)}},
+            {"type": "assistant", "timestamp": "2026-11-18T09:00:02Z", "message": {"content": [{"type": "text", "text": "ok"}]}}]
+    payload = ("\n".join(json.dumps(r) for r in rows) + "\n").encode()
+    meta = tmp_path / ("b" * 32 + ".meta.json"); (tmp_path / ("b" * 32 + ".transcript")).write_bytes(payload)
+    body = captured.full_text(tmp_path, "", {"sha256": hashlib.sha256(payload).hexdigest(), "_meta_path": str(meta)})
+    assert "note 0:" in body and "BEGIN RSA PRIVATE KEY" in body          # the plaintext really carried them
+    doc = captured.render_doc(session_id="sess-s", captured_at="2026-11-18T09:00:00Z", txid="t" * 43, title="sess-s",
+                              namespace="private", source_path=str(tmp_path / "t.jsonl"), text=body)
+    for _, secret in SECRET_SAMPLES:
+        assert secret not in doc, secret
+    for ln in PEM_BLOCK.split("\n"):
+        assert ln not in doc, ln
+    assert "the key follows" in doc and "after the key" in doc and "note 13:" in doc

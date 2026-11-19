@@ -109,8 +109,31 @@ def full_text(home: Path, txid: str, meta: dict | None) -> str | None:
     if data is None:
         return None
     text = _decode_text(data)
-    rendered = render_transcript_jsonl(text)
-    return rendered if rendered is not None else text
+    # Render UNCAPPED, then keep the NEWEST end (CSO condition 5): the renderer's own cap keeps the oldest turns,
+    # which is right for a snapshot of how a session began and wrong for "what was decided before the boundary".
+    rendered = render_transcript_jsonl(text, cap=10 ** 12)
+    return keep_newest(rendered if rendered is not None else text)
+
+
+FULL_TEXT_CAP = 1_000_000
+OMITTED_MARK = "… [older turns omitted: the index keeps the NEWEST {cap} characters; full session in the archived record]"
+
+
+def keep_newest(text: str, cap: int | None = None) -> str:
+    """The last ``cap`` characters of ``text`` (default ``FULL_TEXT_CAP``), cut forward to the next turn heading
+    (``\\n\\n## ``) when one lies in the first quarter of the kept window, else to the next line, so the kept text
+    starts on a boundary and stays within the cap. The OLDEST turns are the ones dropped."""
+    cap = cap or FULL_TEXT_CAP
+    if len(text) <= cap:
+        return text
+    start = len(text) - cap
+    turn = text.find("\n\n## ", start, start + cap // 4)
+    if turn != -1:
+        start = turn + 2
+    else:
+        nl = text.find("\n", start)
+        start = nl + 1 if nl != -1 else start
+    return OMITTED_MARK.format(cap=cap) + "\n\n" + text[start:]
 
 
 def _doc_txid(p: Path) -> str:
@@ -226,11 +249,45 @@ def render_doc(*, session_id: str, captured_at: str, txid: str, title: str, name
             f"Full record: `lbrain retrieve --txid {txid}`.\n\n{body}\n")
 
 
+TOMBSTONE_DIR = ".shredded"
+
+
+def is_tombstoned(root: Path, txid: str) -> bool:
+    return bool(txid) and (Path(root) / TOMBSTONE_DIR / txid).is_file()
+
+
+def shred_twin(home: Path, cfg, txid: str) -> list[str]:
+    """CSO defect 2 (2026-11-19): `lbrain shred` destroys a record's key; the record's plaintext TWIN (its captured-
+    session document) must go in the same call. Unlinks every ``captured-session-*.md`` whose frontmatter txid is
+    ``txid`` and writes a tombstone (``<root>/.shredded/<txid>``, an empty file: the txid only, no content), so no
+    later build writes the document again. Returns the unlinked paths. The index rows go at the next build."""
+    from ..spool import _write_then_rename
+
+    root = captures_root_for(home, cfg)
+    if not txid or not root.is_dir():
+        return []
+    gone = []
+    for p in sorted(root.glob(f"{DOC_PREFIX}*.md")):
+        if _doc_txid(p) == txid:
+            p.unlink()
+            gone.append(str(p))
+    t = root / TOMBSTONE_DIR
+    t.mkdir(mode=0o700, exist_ok=True)
+    if not (t / txid).is_file():
+        _write_then_rename(t / txid, b"")
+    return gone
+
+
 def write_captured_docs(home: Path, cfg, db_path: Path, *, plan: list[dict] | None = None,
-                        immutable: bool = False, remove: bool = True) -> dict:
+                        immutable: bool = False, remove: bool = True, backfill_without_path: bool = False) -> dict:
     """Make the captures root hold exactly one document per served captured session in ``db_path``. Writes only
     changed files (0600, tmp+rename), removes ``captured-session-*.md`` files that no longer correspond to a served
-    capture (shredded, superseded, excluded), and touches nothing else in the root."""
+    capture (shredded, tombstoned by `lbrain shred`, superseded, excluded), and touches nothing else in the root.
+
+    CSO defect 1 (2026-11-19): a capture with NO recorded transcript path cannot be judged against
+    ``exclude_path_markers`` / ``capture_keep_out``, and every capture staged before this change has none. Such a
+    capture is SKIPPED (counted ``skipped_no_path``) unless ``backfill_without_path`` (the build's named flag
+    ``--backfill-captures-without-path``) is passed; then it is indexed and its txid listed under ``backfilled``."""
     from ..index import is_excluded_path
     from ..spool import _write_then_rename
 
@@ -252,7 +309,15 @@ def write_captured_docs(home: Path, cfg, db_path: Path, *, plan: list[dict] | No
         sid = str((meta or {}).get("session_id") or tags.get("LBrain-SessionId") or "")
         if meta is None and not sid:
             continue   # an archive that is not a captured session (`lbrain archive` of a note): not ours to publish
+        if is_tombstoned(root, a["txid"]):
+            rep["shredded"] = rep.get("shredded", 0) + 1
+            continue
         source_path = str((meta or {}).get("source_path") or "")
+        if not source_path:
+            if not backfill_without_path:
+                rep["skipped_no_path"] = rep.get("skipped_no_path", 0) + 1
+                continue
+            rep.setdefault("backfilled", []).append(a["txid"])
         if (source_path and is_excluded_path(Path(source_path))) or _keep_out(cfg, sid, source_path):
             rep["excluded"] += 1
             continue
@@ -279,6 +344,7 @@ def write_captured_docs(home: Path, cfg, db_path: Path, *, plan: list[dict] | No
         if p.name not in chosen:
             p.unlink()
             rep["removed"] += 1
+            rep.setdefault("removed_files", []).append(p.name)
     rep["docs"] = len(chosen)
     return rep
 

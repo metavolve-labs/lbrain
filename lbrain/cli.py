@@ -2598,8 +2598,13 @@ def prune_unreachable_cmd(yes, force):
               help="If a LIVE builder holds the lock, wait up to SECONDS for it instead of failing. When it "
                    "publishes an epoch whose scan began after this command started, exit 0 on that epoch "
                    "without a second build; otherwise build. A stale lock is taken over as without the flag.")
+@click.option("--backfill-captures-without-path", "backfill_captures_without_path", is_flag=True,
+              help="index_captured_snapshots only: ALSO index captured sessions that carry no recorded transcript "
+                   "path (every capture staged before 2026-11-19). Such a capture cannot be judged against "
+                   "exclude_path_markers / capture_keep_out, so it is skipped unless this is passed; the build "
+                   "report lists each backfilled txid.")
 def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_delist, keep, max_bytes, no_sweep,
-                    wait_for_builder, rebase_source):
+                    wait_for_builder, rebase_source, backfill_captures_without_path):
     """Build a candidate, run gate v2, publish atomically (and sweep the capture spool into it)."""
     import time as _time
 
@@ -2623,6 +2628,11 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
             click.secho("✗ --rebase-source takes OLD=NEW and cannot be combined with --wait-for-builder", fg="red")
             sys.exit(2)
         kw["rebase_source"] = tuple(pairs)
+    if backfill_captures_without_path:
+        if wait_for_builder is not None:   # a follower could be satisfied by a build that did NOT backfill
+            click.secho("✗ --backfill-captures-without-path cannot be combined with --wait-for-builder", fg="red")
+            sys.exit(2)
+        kw["backfill_captures_without_path"] = True
     try:
         if wait_for_builder is None:
             report = build(CONFIG_DIR, cfg, **kw)
@@ -2657,6 +2667,10 @@ def epoch_build_cmd(full, confirm_source_removed, prune_unreachable, confirm_del
                        f"{sw['bytes']} bytes; {sw.get('receipts', 0)} receipt(s), {sw.get('ciphertext_files_copied', 0)} ciphertext file(s) copied")
             for f in sw.get("failures", []):
                 click.secho(f"    ✗ {f}", fg="red")
+    cdocs = report.get("captured_docs")
+    if cdocs:   # index_captured_snapshots: what the build wrote, skipped, backfilled, dropped or deleted, by name
+        import json as _json
+        click.echo("  captured-session documents: " + _json.dumps(cdocs, sort_keys=True))
 
 
 @epoch.command("status")

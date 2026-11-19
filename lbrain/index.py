@@ -594,6 +594,11 @@ def parse(path: Path, repo_root: Path | None = None) -> Doc:
         doc_type = str(meta["metadata"].get("type", "")) or ""
     elif "type" in meta:
         doc_type = str(meta["type"])
+    # 2026-11-19 (CSO condition 4): a captured session is a record of what was SAID, not a declaration about the
+    # corpus. It mints no wikilink edges and no supersession edges, whatever the conversation quoted.
+    if doc_type == "captured-session" or str(meta.get("kind", "")) == "captured-session":
+        wikilinks = []
+        supersedes = []
 
     # Disclosure class. Accepted at the top level or nested under `metadata:`,
     # matching how `type:` is already written in this corpus. Unknown values fall
