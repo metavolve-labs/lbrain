@@ -119,8 +119,12 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
     # staged>0 is now a build trigger alongside source drift, as anticipated above.
     local staged=0 swept=0 m
     for m in "$LBHOME"/capture-staging/*.meta.json; do
-      [ -f "$m" ] && [ -f "${m%.meta.json}.transcript" ] || continue
-      if [ -f "${m%.meta.json}.swept.json" ]; then swept=$((swept+1)); else staged=$((staged+1)); fi
+      [ -f "$m" ] || continue
+      # Terra 2026-11-20T22:14Z: the engine reclaims an archived entry's transcript after the verified round-trip, so an
+      # entry with a .swept.json receipt counts as swept with or without its transcript; staged still needs the transcript.
+      if [ -f "${m%.meta.json}.swept.json" ]; then swept=$((swept+1)); continue; fi
+      [ -f "${m%.meta.json}.transcript" ] || continue
+      staged=$((staged+1))
     done
     if [ -n "$drift" ] || [ "$staged" -gt 0 ]; then
       # 2026-11-03 (CTO, measured on katana): with seven seats writing lairs all day every home is "drifted"
