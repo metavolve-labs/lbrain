@@ -211,6 +211,7 @@ class Store:
                 f"brain home {db_path.parent} does not exist; refusing to create it on a read "
                 "(FX-178). Run `lbrain init` to create a home, or set LBRAIN_HOME to an existing one."
             )
+        _parent_existed = db_path.parent.is_dir()
         db_path.parent.mkdir(parents=True, exist_ok=True)
         # brain.db holds every chunk of the corpus in CLEARTEXT. Under the common
         # umask 022, mkdir gave 0755 and sqlite3.connect() gave 0644 — world-
@@ -218,10 +219,13 @@ class Store:
         # chmod 0700 only ever ran from _write_env_var, i.e. only when a HOSTED
         # key was configured, so the privacy-maximal local-only install was
         # precisely the one left open. Create private, before connecting.
-        try:
-            db_path.parent.chmod(0o700)
-        except OSError:
-            pass
+        # 2026-11-21: only a directory this call just made. An existing home keeps its owner's mode and ACL mask
+        # (a chmod here reset the mask on shared homes at every open); the database file is made 0600 below.
+        if not _parent_existed:
+            try:
+                db_path.parent.chmod(0o700)
+            except OSError:
+                pass
         if not db_path.exists():
             try:
                 os.close(os.open(str(db_path), os.O_CREAT | os.O_WRONLY | os.O_EXCL, 0o600))
