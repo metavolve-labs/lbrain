@@ -12,6 +12,7 @@ What this version must carry, and v0.1.10.post1 does not:
 - `query` and `search` say when the home has no documents, and name the import (456bae6).
 - A killed or failed epoch build is logged with its duration (3aa3a31).
 - Tracked shebang files are tracked executable (d22208f).
+- The role-continuity module stays in the source tree and is not in the wheel. The free base ships. The continuity layer does not.
 
 ## 0.1.9.post1 — 2026-09-01
 
