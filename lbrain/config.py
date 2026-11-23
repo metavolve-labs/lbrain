@@ -15,6 +15,15 @@ except ImportError:
 
 CONFIG_DIR = Path(os.environ.get("LBRAIN_HOME", Path.home() / ".lbrain"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+
+
+def mark_used() -> None:
+    """Touch <home>/last-used: this brain was asked something just now. The refresh heartbeat reads it so a brain nobody
+    has asked since its last build is not rebuilt (2026-11-23: idle seats' brains were rebuilt every hour). Never raises."""
+    try:
+        (CONFIG_DIR / "last-used").touch()
+    except OSError:
+        pass
 ENV_PATH = CONFIG_DIR / "env"
 DB_PATH = CONFIG_DIR / "brain.db"
 

@@ -11,7 +11,7 @@ import click
 
 from . import __version__
 from . import amp
-from .config import CONFIG_DIR, CONFIG_PATH, Config
+from .config import CONFIG_DIR, CONFIG_PATH, Config, mark_used
 from .embed import make_embedder, UnknownProviderError
 from .index import chunk as chunk_doc
 from .index import CHUNKER_VERSION, chunker_fingerprint, discover, parse
@@ -1256,6 +1256,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
           serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None,
           current_only: bool):
     """Semantic + keyword hybrid search across the brain."""
+    mark_used()
     warn_if_unprovisioned()
     cfg = Config.load()
     if getattr(cfg, "amp_gating", True):
@@ -1336,6 +1337,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
 def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None,
                current_only: bool):
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
+    mark_used()
     warn_if_unprovisioned()
     cfg = Config.load()
     store = open_store(cfg)
