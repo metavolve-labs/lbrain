@@ -190,17 +190,15 @@ class TestInstall:
 
 
 class TestPackaging:
-    def test_modules_are_present_in_a_built_wheel(self):
-        """The framework's bug was never 'files missing' — it was 'nothing
-        packages them' (A-408). Same failure is available here."""
+    def test_role_continuity_is_not_in_the_free_wheel(self):
+        """The free base ships. The continuity layer does not (Tad). The
+        module stays in the source tree for the bundled tests."""
         dists = sorted(Path(__file__).resolve().parents[1].glob("dist/*.whl"))
         if not dists:
             pytest.skip("no wheel built")
         names = zipfile.ZipFile(dists[-1]).namelist()
-        assert any(n.startswith("lbrain/modules/") and n.endswith("module.toml")
-                   for n in names), "wheel ships no module manifest"
-        assert any("/questions/" in n and n.endswith(".md") for n in names), \
-            "wheel ships no module questions"
+        assert not any("role-continuity" in n for n in names), \
+            "the free wheel carries role-continuity"
 
 
 class TestTheNameIsAWritePath:
