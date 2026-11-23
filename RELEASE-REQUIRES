@@ -17,3 +17,4 @@ d5499f5 embed: a fresh home seeds models/ by copying from a legacy cache
 456bae6 query and search say when the home is empty; model seeding keeps links
 47d54f9 store: a read against a missing home fails instead of creating it (FX-178)
 3aa3a31 heartbeat: a killed or failed epoch build is logged with its duration
+8a9a0e7 heartbeat: an idle brain is not rebuilt; six-hour floor; daily ceiling
