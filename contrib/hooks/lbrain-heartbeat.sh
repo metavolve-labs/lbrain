@@ -164,7 +164,18 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       fi
       printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool; box lock held, nice 19, idle io)\n' \
         "$(date -Is)" "${drift:-no source drift}" "$staged" "$swept" >>"$LOG" 2>&1
-      nice -n 19 ionice -c 3 timeout 1800 "$LB" epoch build >>"$LOG" 2>&1
+      local brc=0 bt0; bt0=$(date +%s)
+      nice -n 19 ionice -c 3 timeout "${LBRAIN_BUILD_TIMEOUT:-1800}" "$LB" epoch build >>"$LOG" 2>&1 || brc=$?
+      # A build that fails or is killed must say so (2026-11-23: nine hourly builds of one home were killed at the
+      # timeout, nothing was logged, the unit reported success and the brain went 11 h stale).
+      if [ "$brc" -eq 124 ]; then
+        printf '[%s] epoch home: BUILD KILLED at the %ss timeout after %ss; CURRENT is unchanged and STALE; a .building folder is left behind. The home has outgrown the timeout: check its sources and exclude_path_markers\n' \
+          "$(date -Is)" "${LBRAIN_BUILD_TIMEOUT:-1800}" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+      elif [ "$brc" -ne 0 ]; then
+        printf '[%s] epoch home: BUILD FAILED rc=%s after %ss; CURRENT is unchanged\n' "$(date -Is)" "$brc" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+      else
+        printf '[%s] epoch home: build ok in %ss\n' "$(date -Is)" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+      fi
       flock -u 9
     else
       printf '[%s] epoch home: no source drift; staged_captures=0 swept=%s — no build\n' \
