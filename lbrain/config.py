@@ -15,6 +15,15 @@ except ImportError:
 
 CONFIG_DIR = Path(os.environ.get("LBRAIN_HOME", Path.home() / ".lbrain"))
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+
+
+def mark_used() -> None:
+    """Touch <home>/last-used: this brain was asked something just now. The refresh heartbeat reads it so a brain nobody
+    has asked since its last build is not rebuilt (2026-11-23: idle seats' brains were rebuilt every hour). Never raises."""
+    try:
+        (CONFIG_DIR / "last-used").touch()
+    except OSError:
+        pass
 ENV_PATH = CONFIG_DIR / "env"
 DB_PATH = CONFIG_DIR / "brain.db"
 
@@ -95,11 +104,18 @@ def _write_env_var(key: str, value: str) -> None:
     never exists on disk under the process umask (commonly 0644 = world-readable)
     even for the instant between create and a later chmod. Closes the TOCTOU window
     where another local user could read the file during that gap."""
+    existed = CONFIG_DIR.is_dir()
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        CONFIG_DIR.chmod(0o700)  # the secret's parent dir, not just the file
-    except OSError:
-        pass
+    if not existed:
+        # A home this call just made is private from the start. An EXISTING home keeps the mode and the POSIX ACL
+        # mask its owner set: chmod rewrites the mask, and setting an archive passphrase on a shared home cut the
+        # trading services and two seats off Tally's brain for about a minute (workhorse, 2026-11-20T22:14Z; the
+        # same fault Identity.save had until 2026-11-15). The env file itself is created 0600 below, so the secret
+        # is never readable through a wider home.
+        try:
+            CONFIG_DIR.chmod(0o700)
+        except OSError:
+            pass
     lines, found = [], False
     if ENV_PATH.exists():
         for line in ENV_PATH.read_text(encoding="utf-8").splitlines():

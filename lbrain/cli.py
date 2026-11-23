@@ -11,7 +11,7 @@ import click
 
 from . import __version__
 from . import amp
-from .config import CONFIG_DIR, CONFIG_PATH, Config
+from .config import CONFIG_DIR, CONFIG_PATH, Config, mark_used
 from .embed import make_embedder, UnknownProviderError
 from .index import chunk as chunk_doc
 from .index import CHUNKER_VERSION, chunker_fingerprint, discover, parse
@@ -209,6 +209,18 @@ def _build_provenance() -> dict:
     except Exception:
         pass  # not a git checkout, or git absent — an installed wheel; leave defaults
     return prov
+
+
+def _say_if_nothing_indexed(store) -> None:
+    """"0 hits" on a home with no documents is absence of a corpus, not evidence of absence. Say which, and the fix.
+    (Outsider install, 2026-11-22: a first user who missed one step got an empty answer and no clue.)"""
+    try:
+        n = int(store.stats().get("docs", 0))
+    except Exception:
+        return
+    if n == 0:
+        click.echo("0 documents indexed: this brain is empty, so no query can match. "
+                   "Run `lbrain import <folder>` and then `lbrain embed --stale`.")
 
 
 @main.command()
@@ -1244,6 +1256,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
           serve_mode: str | None, persona: str | None, disclosure: str | None, sealed: str | None,
           current_only: bool):
     """Semantic + keyword hybrid search across the brain."""
+    mark_used()
     warn_if_unprovisioned()
     cfg = Config.load()
     if getattr(cfg, "amp_gating", True):
@@ -1266,6 +1279,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
         if mode == "structured":
             present(f"--- structured serve ({dt_ms:.0f} ms retrieval) ---", role="frame")
             click.echo(render_response(cfg, hits, query))
+            if not hits: _say_if_nothing_indexed(store)
             return
         kept, used = amp.budget(hits, getattr(cfg, "amp_budget_chars", 0), getattr(cfg, "amp_per_chunk_chars", 360))
 
@@ -1292,6 +1306,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
 
         label = f"{len(kept)} of {len(hits)} hits, AMP-budgeted" if len(kept) < len(hits) else f"{len(hits)} hits"
         present(f"--- {label} ({dt_ms:.0f} ms) ---\n", role="frame")
+        if not hits: _say_if_nothing_indexed(store)
         for i, h in enumerate(kept, 1):
             prefix = "★" if h.is_priority else " "
             present(f"{prefix} [{i}] {sanitize_field(h.title, 120)}  ({h.score:.3f})", role="title")
@@ -1322,6 +1337,7 @@ def query(query: str, k: int, doc_type: str | None, priority: bool, rerank: bool
 def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, sealed: str | None,
                current_only: bool):
     """Exact-keyword search (FTS5 only, no embeddings, no API call)."""
+    mark_used()
     warn_if_unprovisioned()
     cfg = Config.load()
     store = open_store(cfg)
@@ -1339,6 +1355,7 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
             click.echo(render_response(cfg, hits, query, admissibility_on=False,
                                        include_core=False, include_provenance=False,
                                        hits_label="keyword hits"))
+            if not hits: _say_if_nothing_indexed(store)
             return
         blind = blinding_notice(hits)
         if blind:
@@ -1346,6 +1363,7 @@ def search_cmd(query: str, k: int, persona: str | None, disclosure: str | None, 
         if hits:
             present(amp.UNTRUSTED_NOTICE, role="boundary")
         present(f"--- {len(hits)} keyword hits ({dt_ms:.0f} ms) ---\n", role="frame")
+        if not hits: _say_if_nothing_indexed(store)
         for i, h in enumerate(hits, 1):
             present(f"  [{i}] {sanitize_field(h.title, 120)}", role="title")
             click.echo(f"   {sanitize_field(h.rel_path, 160)} :: chunk {h.chunk_idx}")

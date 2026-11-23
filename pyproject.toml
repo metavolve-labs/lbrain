@@ -71,10 +71,10 @@ packages = ["lbrain", "lbrain.archive", "lbrain.framework", "lbrain.modules"]
 # install with the tool and are reachable at runtime via `lbrain framework`.
 [tool.setuptools.package-data]
 "lbrain.framework" = ["*.md"]
-# Modules are content, so they are package data for the same reason the framework
-# is: a module that does not install with the tool reaches nobody. The nested
-# globs are the module layout (<name>/module.toml, <name>/questions/*.md).
-"lbrain.modules" = ["*/*.toml", "*/*.md", "*/*/*.md"]
+# role-continuity stays in the source tree. It is not in the free wheel.
+# Tad: the free base ships; the continuity layer does not.
+[tool.setuptools.exclude-package-data]
+"lbrain.modules" = ["role-continuity/*", "role-continuity/*/*"]
 
 [project.urls]
 Homepage = "https://lbrain.ai"

@@ -130,8 +130,21 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       #   1. a per-home floor between builds (LBRAIN_BUILD_MIN_SEC, default 3600) unless captures are staged;
       #   2. one build at a time per box (flock on LBRAIN_BUILD_LOCK), the others defer to their next beat;
       # and the build itself runs at the lowest CPU/IO priority so the desk and the seats keep their turn.
-      local floor="${LBRAIN_BUILD_MIN_SEC:-3600}" age
+      #   3. (2026-11-23, Tad: "Brains should not upgrade constantly like that. Every hour is a waste of resources.
+      #      Especially for a seat that is not active all the time.") a brain nobody has ASKED since its last build is
+      #      not rebuilt: query and search touch <home>/last-used; if that file exists and is older than the current
+      #      epoch, the beat skips. A ceiling (LBRAIN_BUILD_MAX_STALE_SEC, default 86400) still rebuilds a drifted brain
+      #      once a day, so a process too old to write the marker cannot freeze its home. The floor default is now 6 h.
+      local floor="${LBRAIN_BUILD_MIN_SEC:-21600}" age used_at ceil="${LBRAIN_BUILD_MAX_STALE_SEC:-86400}"
       age=$(( $(date +%s) - $(stat -c %Y "$epoch_db" 2>/dev/null || echo 0) ))
+      if [ "$staged" -eq 0 ] && [ -f "$LBHOME/last-used" ] && [ "$age" -lt "$ceil" ]; then
+        used_at=$(stat -c %Y "$LBHOME/last-used" 2>/dev/null || echo 0)
+        if [ "$used_at" -le "$(stat -c %Y "$epoch_db" 2>/dev/null || echo 0)" ]; then
+          printf '[%s] epoch home: drift seen but nobody has asked this brain since its last build (%ss ago) — idle, no build\n' \
+            "$(date -Is)" "$age" >>"$LOG" 2>&1
+          return 0
+        fi
+      fi
       if [ "$staged" -eq 0 ] && [ "$age" -lt "$floor" ]; then
         printf '[%s] epoch home: drift seen but the current epoch is %ss old (floor %ss) — build deferred to a later beat\n' \
           "$(date -Is)" "$age" "$floor" >>"$LOG" 2>&1
@@ -164,7 +177,18 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
       fi
       printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool; box lock held, nice 19, idle io)\n' \
         "$(date -Is)" "${drift:-no source drift}" "$staged" "$swept" >>"$LOG" 2>&1
-      nice -n 19 ionice -c 3 timeout 1800 "$LB" epoch build >>"$LOG" 2>&1
+      local brc=0 bt0; bt0=$(date +%s)
+      nice -n 19 ionice -c 3 timeout "${LBRAIN_BUILD_TIMEOUT:-1800}" "$LB" epoch build >>"$LOG" 2>&1 || brc=$?
+      # A build that fails or is killed must say so (2026-11-23: nine hourly builds of one home were killed at the
+      # timeout, nothing was logged, the unit reported success and the brain went 11 h stale).
+      if [ "$brc" -eq 124 ]; then
+        printf '[%s] epoch home: BUILD KILLED at the %ss timeout after %ss; CURRENT is unchanged and STALE; a .building folder is left behind. The home has outgrown the timeout: check its sources and exclude_path_markers\n' \
+          "$(date -Is)" "${LBRAIN_BUILD_TIMEOUT:-1800}" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+      elif [ "$brc" -ne 0 ]; then
+        printf '[%s] epoch home: BUILD FAILED rc=%s after %ss; CURRENT is unchanged\n' "$(date -Is)" "$brc" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+      else
+        printf '[%s] epoch home: build ok in %ss\n' "$(date -Is)" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+      fi
       flock -u 9
     else
       printf '[%s] epoch home: no source drift; staged_captures=0 swept=%s — no build\n' \

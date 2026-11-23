@@ -252,6 +252,10 @@ guarantee what the model does with good evidence. And its admissibility check is
 conservative, so it will sometimes flag a record you'd have accepted. That's a trade we're willing
 to make: we'd rather surface uncertainty than manufacture confidence.
 
+It also indexes files, not history. `lbrain import` reads the documents in a source folder; it does
+not read git commit messages. A fact written only in a commit message cannot be found by `query` or
+by `search`. If a fact is worth recalling, put it in a file.
+
 ## How it works
 
 - **Hybrid retrieval** — vector + BM25 keyword, fused by reciprocal rank fusion.

@@ -11,6 +11,10 @@
 # Maintain: add a line when a fix becomes release-blocking; prune lines only after
 # the fix has shipped in a published version (then it is protected by the
 # already-on-PyPI guard instead).
-909d302 archive sub-CLI funneled through W1/W2 + epoch refusal (RED-W-BYPASS-1)
-bf25ffb W1/W2 write-path gates at the open_store chokepoint
-04d9b1e capture hook presence-aware seat guard, unconditional refusal logging
+43989a2 home mode: opening a store no longer chmods an existing home
+747c8df embed: a fresh home with an empty models/ falls back to a cache that holds the model
+d5499f5 embed: a fresh home seeds models/ by copying from a legacy cache
+456bae6 query and search say when the home is empty; model seeding keeps links
+47d54f9 store: a read against a missing home fails instead of creating it (FX-178)
+3aa3a31 heartbeat: a killed or failed epoch build is logged with its duration
+8a9a0e7 heartbeat: an idle brain is not rebuilt; six-hour floor; daily ceiling
