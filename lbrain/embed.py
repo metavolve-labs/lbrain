@@ -187,7 +187,9 @@ class LocalEmbedClient:
             for legacy in (os.path.join(os.path.expanduser("~"), ".lbrain", "models"), "/tmp/fastembed_cache"):
                 if os.path.isdir(legacy) and os.listdir(legacy) and os.path.realpath(legacy) != os.path.realpath(cache_dir):
                     try:
-                        shutil.copytree(legacy, cache_dir, dirs_exist_ok=True)
+                        # symlinks=True: the cache's snapshot files are links to its blobs; following them stored
+                        # every model file twice (FX-123, measured 2026-11-15).
+                        shutil.copytree(legacy, cache_dir, dirs_exist_ok=True, symlinks=True)
                     except OSError:
                         cache_dir = legacy  # copy refused (space, perms): use the legacy copy rather than fail
                     break
