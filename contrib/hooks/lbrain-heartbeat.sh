@@ -175,6 +175,30 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
           "$(date -Is)" "${drift:-no source drift}" "$staged" "$lockf" >>"$LOG" 2>&1
         return 0
       fi
+      # K-0030 (CSO 2026-11-20: a refused build was retried three times in thirty minutes, each leaving a ~150 MB .failed
+      # copy). A build the engine REFUSED at its gate is TERMINAL for the same inputs: the marker $LBHOME/build-refused,
+      # written below, stops the retries until an input changes (config.toml, any source .md, or a capture staged AFTER
+      # the refusal) or the owner removes the marker. A transient failure (no .failed copy left) writes no marker.
+      local refused="$LBHOME/build-refused" changed="" rd
+      if [ -f "$refused" ]; then
+        [ "$LBHOME/config.toml" -nt "$refused" ] && changed="config.toml"
+        if [ -z "$changed" ]; then
+          for rd in "${src_dirs[@]}"; do
+            [ -d "$rd" ] || continue
+            changed=$(find "$rd" -name '*.md' -newer "$refused" -print -quit 2>/dev/null)
+            [ -n "$changed" ] && break
+          done
+        fi
+        [ -z "$changed" ] && changed=$(find "$LBHOME/capture-staging" -maxdepth 1 -name '*.meta.json' -newer "$refused" -print -quit 2>/dev/null)
+        if [ -z "$changed" ]; then
+          printf '[%s] epoch home: the last build was REFUSED (%s) and no input has changed since — no build. Change the config or a source, or remove %s to retry\n' \
+            "$(date -Is)" "$(head -n 1 "$refused" 2>/dev/null)" "$refused" >>"$LOG" 2>&1
+          flock -u 9
+          return 0
+        fi
+        printf '[%s] epoch home: an input changed since the refused build (%s) — retrying once\n' "$(date -Is)" "$changed" >>"$LOG" 2>&1
+        rm -f "$refused"
+      fi
       printf '[%s] epoch home: %s; staged_captures=%s swept=%s — building delta epoch (sweeps the spool; box lock held, nice 19, idle io)\n' \
         "$(date -Is)" "${drift:-no source drift}" "$staged" "$swept" >>"$LOG" 2>&1
       local brc=0 bt0; bt0=$(date +%s)
@@ -186,6 +210,16 @@ refresh_index() {  # import any lair/memory edits + embed a SMALL stale backlog
           "$(date -Is)" "${LBRAIN_BUILD_TIMEOUT:-1800}" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
       elif [ "$brc" -ne 0 ]; then
         printf '[%s] epoch home: BUILD FAILED rc=%s after %ss; CURRENT is unchanged\n' "$(date -Is)" "$brc" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
+        # K-0030: a .failed copy newer than this build's start is the engine's refusal signal (epoch_build.py keeps the
+        # staging as <epoch>.failed on any gate refusal). Record it so the next beat does not build the same inputs again.
+        local fdir=""
+        fdir=$(find "$LBHOME/epochs" -maxdepth 1 -name '*.failed' -newermt "@$bt0" -print -quit 2>/dev/null)
+        if [ -n "$fdir" ]; then
+          printf '%s rc=%s at %s\n' "$(basename "$fdir")" "$brc" "$(date -Is)" > "$refused" 2>/dev/null \
+            && printf '[%s] epoch home: that failure left %s: a gate REFUSAL. Marked %s; no retry until an input changes\n' \
+                 "$(date -Is)" "$(basename "$fdir")" "$refused" >>"$LOG" 2>&1 \
+            || printf '[%s] epoch home: REFUSAL seen but %s could not be written — the next beat WILL retry\n' "$(date -Is)" "$refused" >>"$LOG" 2>&1
+        fi
       else
         printf '[%s] epoch home: build ok in %ss\n' "$(date -Is)" "$(( $(date +%s) - bt0 ))" >>"$LOG" 2>&1
       fi
