@@ -424,8 +424,10 @@ def validate_candidate(
             elif not discover([Path(src)]):
                 failures.append(
                     f"deletion-manifest: source root {src} enumerated EMPTY while the prior "
-                    f"epoch held {len(prior_docs)} docs (decoy/hollow root) — refuse; pass "
-                    "--confirm-source-removed to assert intent")
+                    f"epoch held {len(prior_docs)} docs (decoy/hollow root) — refuse. The folder EXISTS "
+                    "but holds no indexable file: check the mount, the path and the permissions first. "
+                    "--confirm-source-removed is for a root whose contents were removed ON PURPOSE: "
+                    f"passing it here DROPS all {len(prior_docs)} of this root's docs from the next epoch")
 
         # -- source collapse: the candidate against the PRIOR EPOCH, per source root (2026-10-16) --
         # CCO-REFRESH-20261016T111454: a wake build produced a candidate with 0 docs while every source root
@@ -465,7 +467,9 @@ def validate_candidate(
                 failures.append(
                     f"source-collapse: {src}: candidate holds {kept} docs vs {expected_n} expected from the "
                     f"prior epoch ({prior_n - expected_n} more now excluded by markers) — a scan that lost most "
-                    "of a root is not a deletion; refuse; pass --confirm-source-removed to assert intent")
+                    "of a root is not a deletion; refuse. The root is still there: look for a failed scan "
+                    "(mount, permissions, an exclude marker) before anything else. --confirm-source-removed "
+                    f"is for files removed ON PURPOSE: passing it here publishes this root with {kept} docs")
 
         # -- vector sanity (Grok G3: the right number of zeros) --
         # FULL scan, not first-32 (CSO R4: the realistic embed-failure shape is
